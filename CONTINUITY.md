@@ -4,63 +4,61 @@
 
 - Goal: native iOS/iPadOS port of OrcaSlicer — engine as-is (C++), GUI from
   scratch (SwiftUI + Metal). See PLANS.md for phases.
-- Acceptance (Phase 0): green `xtool dev build`; renders on iPoke at ~60fps
-  with orbit/pan/pinch on bed grid + test cube.
+- Acceptance (Phase 1, this push): status chip shows
+  `OrcaCore: STL load+repair ok · 12 tris · 8000 mm³` on iPoke.
 - Next steps:
-  1. [USER] Visual confirm on iPoke: bed grid + orange cube visible; orbit /
-     pan / pinch work; status chip shows live fps (expect ~60). Then tick
-     the last Phase 0 box.
-  2. Phase 1: libslic3r iOS build — CMake toolchain file, minimal dep set,
-     arm64 + simulator slices → xcframework, Swift↔C++ interop layer in
-     `Engine/`, first on-device slice (cube STL → gcode in Documents).
-  3. Consider `skipLSP: true` decision and Mac collaborator .xcodeproj export
-     (`xtool dev generate-xcode-project`) when Phase 1 C++ enters.
+  1. Fix 2 real duplicate symbols (see PROGRESS), refine audit, ONE build.
+  2. Then: document picker → real STL → TriangleMesh in viewer (Phase 2 start).
+  3. Phase 1 continues: slice_mesh_ex already links — grow toward Print pipeline.
 
 ## DECISIONS
 
-- [USER] Strategy B: engine as-is + native GUI from scratch, Metal only, skip
-  exotic tools (painting/MMU/CAD) for first concepts.
-- Name `OrcaPad`, bundle `ie.duz.OrcaPad` (matches `ie.duz.LifeCounter`).
-- iPad-first; iPhone companion is out of scope until core loop ships.
-- iOS 17 deployment target, Swift 6 language mode, strict concurrency.
-- Runtime MSL compilation from embedded source strings — Linux toolchain
-  cannot compile .metallib (Apple's metal toolchain is macOS-only). [TOOL]
-- No .xcassets (xtool #219): SF Symbols + code-drawn UI only. [TOOL]
-- Renderer/camera are non-isolated classes confined to the main thread;
-  MTKViewDelegate is nonisolated so no @MainActor on Renderer. [CODE]
-- Git from day one; commits prefixed `P0:`–`P5:` by phase.
+- [USER] Strategy B: engine as-is + native GUI, Metal only, skip exotic tools.
+- Name `OrcaPad`, bundle `ie.duz.OrcaPad`. iPad-first. iOS 17, Swift 6.
+- Runtime MSL compilation (Linux can't build .metallib). [TOOL]
+- Upstream NEVER patched — adapters only: Engine/shim headers, -include
+  force-includes, wrapper TUs in Engine/engine-cxx/. I18N::translate_fn
+  identity-adapter lives in orca_core.cpp (utils.cpp needs macOS libproc.h).
+- Sequential TBB shims (parallel_for/reduce serial) — swap for real oneTBB
+  iOS build when slicing perf matters.
+- Cross-build via raw clang scripts (build-core.sh), NOT CMake, NOT lld
+  linking — static archives only; final link = SwiftPM/xtool. [TOOL]
+- [USER-mandated] Process: no build without a passing static audit first;
+  no one-error-at-a-time cycles; builds are expensive (~200s) — earn them.
+- Incremental compiles in build-core.sh (depfiles + mtime + flags stamp).
 
 ## PROGRESS
 
-- [2026-10-02] Phase 0 scaffold written: Package.swift, xtool.yml, 7 Swift
-  files (app shell, plater view, MetalCanvas/Renderer/Camera/Geometry/Shaders).
-  Meta-files AGENTS/PLANS/CONTINUITY/LESSONS created.
-- [2026-10-02] `xtool dev build` GREEN (3 fix iterations, 0 warnings).
-  Committed `P0:` 9bc9586. Phone not connected — install pending.
-- [2026-10-02] Installed on iPoke via `xtool dev` (auto-provisioned). User
-  launched 15:14:13 → `renderer online` at 15:14:14.566 (<600ms), GPU
-  assertion acquired, foregroundRunning, no crash/jetsam through capture
-  window. On-device id: `XTL-C93C0481.ie.duz.OrcaPad`. [TOOL]
+- [2026-10-02] Phase 0 done: app + Metal viewer verified on iPoke (60fps).
+- [2026-10-02] Interop gate green: static lib → xcframework → Swift .Cxx.
+- [2026-10-02] OrcaSlicer v2.4.2 shallow submodule at upstream/orcaslicer.
+- [2026-10-02] OrcaCore: 82-object static archive cross-compiled from Linux.
+  Subset: geometry core (Point→ExPolygon, Clipper, Voronoi family, MedialAxis,
+  ShortestPath, Tesselate, ExtrusionEntity*, Flow, TriangleMesh+Slicer, STL),
+  vendored admesh+qhull+glu-libtess, CGAL header-only for VoronoiUtilsCgal.
+  Shims: boost::log, boost::nowide, tbb (sequential), openssl/md5→CommonCrypto,
+  OCCT stubs (STEP.hpp parse-only). External symbol debt: benign only.
+- [2026-10-02] Tooling: Engine/tools/closure.py (BFS closure + duplicate audit).
+- [2026-10-02] Root causes fixed: ar rcs ghost members (archive never dropped
+  exclusions — now rm -f + member-count guard); Debian multiarch gmp.h.
+- BLOCKERS (2 real T-T duplicates): __gl_pqHeap* (priorityq.c vs
+  priorityq-heap.c — pick one per upstream CMake); TriangleMesh::~TriangleMesh
+  (orca_core.cpp.o + Format_STL.cpp.o — investigate owner).
 
 ## DISCOVERIES
 
-- OrcaSlicer codebase measured [CODE]: libslic3r ~312k LOC, wx GUI ~449k LOC
-  (~31k scene core + ~47k gizmos + ~9k jobs + ~360k desktop chrome).
-  → 80% of GUI code is deletable, not portable.
-- wxWidgets iOS port is officially "very basic" — confirms native-rewrite path.
-- Bambu Handy does cloud slicing; no full on-device mobile slicer exists yet
-  (opportunity). UNCONFIRMED as of 2026-10.
-- xtool's generated Info.plist already has UIDeviceFamily [1,2] (iPhone+iPad)
-  and full iPad orientations — no plist overrides needed. [TOOL]
-- In this SDK (iOS 27.0), MTKView is @MainActor and MTKViewDelegate
-  satisfaction from a @MainActor class works WITHOUT @preconcurrency
-  (attribute warned "has no effect"). Renderer is @MainActor. [TOOL]
-- Swift tuples do NOT bridge to SIMD3<Float> literals — write
-  `SIMD3(x, y, z)` explicitly. [CODE]
+- SwiftPM binaryTarget caching is FAITHFUL (md5-identical copy of Prebuilt) —
+  earlier "stale cache" suspicion disproven. [TOOL]
+- xtool's app link uses lld with a WARNING "does not support platform iOS —
+  proceed at your own risk" — it proceeds and works (device-verified P0).
+- `ar rcs` only replaces/adds members; stale members survive exclusions.
+- deps_src/ vendors: admesh clipper2 libnest2d miniz qhull glu-libtess expat
+  semver qoi earcut agg nanosvg libigl mcut + more — external deps shrink to
+  boost/eigen/cereal/tbb/opencv/occt/draco/jpeg/png/freetype/openssl.
+- Format/STEP.hpp is included unconditionally by Model.hpp → OCCT stub headers
+  suffice (parse-only; STEP.cpp never compiled in core subset). [CODE]
+- On-device bundle id `XTL-C93C0481.ie.duz.OrcaPad`; launch manually only.
 
 ## OUTCOMES
 
-- [2026-10-02] Phase 0 complete (pending visual confirm): OrcaPad builds
-  from Linux, installs on a physical iPhone, Metal pipeline + runtime MSL
-  compile + 60fps render loop verified via syslog. The whole xtool loop
-  (build→sign→install→verify) works for this project.
+- [2026-10-02] Phase 0 complete: Linux→iPhone loop + Metal + interop proven.

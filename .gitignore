@@ -9,3 +9,6 @@ DerivedData/
 
 /xtool
 /.bsp
+
+# fetched build caches (pinned clones, auto-fetched by build scripts)
+/Engine/cache/

@@ -1,0 +1,4 @@
+module OrcaCore {
+    header "orca_core.h"
+    export *
+}

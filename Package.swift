@@ -25,19 +25,19 @@ let package = Package(
                 .interoperabilityMode(.Cxx)
             ]
         ),
-        // Swift↔C++ interop layer over the (future) libslic3r static lib.
+        // Swift↔C++ interop layer over the OrcaSlicer engine static lib.
         .target(
             name: "Engine",
-            dependencies: ["CxxProbe"],
+            dependencies: ["OrcaCore"],
             swiftSettings: [
                 .interoperabilityMode(.Cxx)
             ]
         ),
-        // Prebuilt C++ static library (hand-rolled xcframework, built by
-        // clang -target arm64-apple-ios from Linux; see Engine/build.sh).
+        // libslic3r geometry subset (built by Engine/build-core.sh —
+        // clang -target arm64-apple-ios from Linux, static archive).
         .binaryTarget(
-            name: "CxxProbe",
-            path: "Prebuilt/CxxProbe.xcframework"
+            name: "OrcaCore",
+            path: "Prebuilt/OrcaCore.xcframework"
         ),
     ],
     cxxLanguageStandard: .cxx17
