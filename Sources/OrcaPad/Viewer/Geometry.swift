@@ -94,6 +94,9 @@ extension Geometry {
             verts.append(VertexPNC(position: b, normal: n))
             verts.append(VertexPNC(position: c, normal: n))
         }
-        return (verts, Array(ip))
+        // Face-duplicated vertices need SEQUENTIAL indices (0,1,2, 3,4,5, …):
+        // the engine's shared-vertex indices would point into wrong verts.
+        // (Storing original `ip` here garbles every repaired/deduped mesh.)
+        return (verts, (0..<verts.count).map { UInt32($0) })
     }
 }
