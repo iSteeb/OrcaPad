@@ -24,16 +24,18 @@ Upstream contact surface (keep it this small): `libslic3r` + config defs +
 **Accept:** dark 3D scene w/ 256mm bed grid + orange cube; 1-finger orbit,
 2-finger pan, pinch zoom all smooth at ~60fps.
 
-## Phase 1 — Engine bring-up (the proving ground)
+## Phase 1 — Engine bring-up (the proving ground) ✅ (core gate passed)
 **Goal:** libslic3r running on iOS, called from Swift.
 
-- CMake + iOS toolchain: build libslic3r subset (no GUI deps) for
-  arm64 + simulator → xcframeworks
-- Minimal dep set first: boost-headers-only subset, tbb (or libdispatch swap),
-  expat, zlib, eigen, cereal… grow only as link errors demand
-- Swift↔C++ interop layer in `Engine/`: load STL → `Model` → slice →
-  gcode string written to app Documents
-- Slice runs off-main (actor + libslic3r print steps), progress via async stream
+- [x] Cross-compile real libslic3r subset from Linux (79-object static lib:
+  geometry core + admesh + qhull + glu-libtess + header-only CGAL)
+- [x] Swift↔C++ interop layer in `Engine/` with hardened extern-C boundary
+  (Swift owns paths; exceptions/errors → status strings, never crashes)
+- [x] On-device proof: STL load + admesh repair verified on iPhone
+  (12 tris / 8000 mm³ cube, user-confirmed 2026-10-02)
+- [ ] CMake+xcframework for full libslic3r incl. deps (current subset is
+  hand-curated; grows link-driven toward Print pipeline)
+- [ ] Slice runs off-main (actor + libslic3r print steps), progress via async stream
 
 **Accept:** tap Slice in-app on a 20mm cube STL → real gcode file appears in
 Files app in < 30s; memory stays under ~500MB.

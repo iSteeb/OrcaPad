@@ -7,9 +7,14 @@
 - Acceptance (Phase 1, this push): status chip shows
   `OrcaCore: STL load+repair ok · 12 tris · 8000 mm³` on iPoke.
 - Next steps:
-  1. Fix 2 real duplicate symbols (see PROGRESS), refine audit, ONE build.
-  2. Then: document picker → real STL → TriangleMesh in viewer (Phase 2 start).
-  3. Phase 1 continues: slice_mesh_ex already links — grow toward Print pipeline.
+  1. Verify on device (DONE 2026-10-02 — chip shows `OrcaCore: STL
+     load+repair ok · 12 tris · 8000 mm³`; zero crashes in syslog).
+  2. Phase 1 continues: grow subset toward real slicing —
+     PrintConfig + Config, PresetBundle minimal, PrintObject → slice_mesh_ex
+     is already linked; target: cube STL → gcode string on device.
+  3. Phase 2 start: document picker → real STL → TriangleMesh → Metal
+     viewer (replace test cube); orca_core API grows: load_stl(path) →
+     mesh buffers (vertices/indices) for the renderer.
 
 ## DECISIONS
 
@@ -62,3 +67,8 @@
 ## OUTCOMES
 
 - [2026-10-02] Phase 0 complete: Linux→iPhone loop + Metal + interop proven.
+- [2026-10-02] **Phase 1 gate complete**: 79-object OrcaSlicer engine subset
+  (TriangleMesh/admesh/clipper/voronoi/qhull/tess) loads + repairs an STL
+  ON DEVICE (12 tris, 8000 mm³ cube, user-verified). Crash→fix cycle
+  established (crash report pull → exact frame → targeted fix → 1-file
+  incremental rebuild → redeploy).
