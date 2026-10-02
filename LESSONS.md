@@ -94,3 +94,19 @@ in ~/xtool-cheatsheet.md — link, don't duplicate.)
 - `set -u` + empty-array expansion and `local` scoping inside $( ) bit twice.
   Keep build scripts dumb: manifest file + explicit failure exits + no clever
   process substitution.
+
+### iOS runtime (2026-10-02, first engine crash)
+
+- **Sandboxed apps CANNOT write /tmp** — only the container's temp dir
+  (NSTemporaryDirectory / TMPDIR env). Hardcoded "/tmp" fopen returns NULL.
+- **Never pass an unchecked FILE\* to fwrite** — a NULL FILE\* segfaults in
+  flockfile with fault address ~0x68 (recognizable crash signature).
+- Boundary rule: Swift owns ALL filesystem paths (sandbox-aware); the C++
+  engine receives paths as arguments and every file op is checked with loud
+  error strings returned to the UI — never crashes, never silent fallbacks.
+- extern "C" boundaries must catch ALL C++ exceptions (…/std::exception)
+  and convert to error strings — an exception escaping into Swift frames
+  is std::terminate.
+- Crash reports: `idevicecrashreport -e <dir>` (slow — background it) or
+  pymobiledevice3; the .ips JSON carries exception type + symbolicated
+  frames (our static-lib symbols show up by name — keep them unstripped).
