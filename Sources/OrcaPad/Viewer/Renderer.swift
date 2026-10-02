@@ -156,7 +156,12 @@ final class Renderer: NSObject, MTKViewDelegate {
     // MARK: Scene setup
 
     private func buildScene() {
-        let (cubeVerts, cubeIdx) = Geometry.unitCube()
+        // Calibration cube with its transform BAKED IN (20mm, sitting on bed):
+        // the draw path uses an identity model matrix for all objects.
+        let (unitVerts, cubeIdx) = Geometry.unitCube()
+        let cubeVerts = unitVerts.map {
+            VertexPNC(position: $0.position * 20 + SIMD3<Float>(0, 10, 0), normal: $0.normal)
+        }
         objectIndexCount = cubeIdx.count
         objectVB = device.makeBuffer(
             bytes: cubeVerts, length: MemoryLayout<VertexPNC>.stride * cubeVerts.count,
@@ -227,8 +232,9 @@ final class Renderer: NSObject, MTKViewDelegate {
         encoder.drawPrimitives(type: .line, vertexStart: 0, vertexCount: gridVertexCount)
         encoder.popDebugGroup()
 
-        // Object (test cube, or imported STL after uploadMesh)
-        let model = Math.translate(SIMD3<Float>(0, 10, 0)) * Math.scale(20)
+        // Object: identity model — uploaded vertices are already
+        // viewer-space, bed-anchored, recentred (cube transform is baked in).
+        let model = Math.identity()
         cubeUniforms.mvp = viewProj * model
         cubeUniforms.model = model
         encoder.pushDebugGroup("object")

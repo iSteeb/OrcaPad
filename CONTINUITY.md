@@ -7,14 +7,29 @@
 - Acceptance (Phase 1, this push): status chip shows
   `OrcaCore: STL load+repair ok · 12 tris · 8000 mm³` on iPoke.
 - Next steps:
-  1. Verify on device (DONE 2026-10-02 — chip shows `OrcaCore: STL
-     load+repair ok · 12 tris · 8000 mm³`; zero crashes in syslog).
-  2. Phase 1 continues: grow subset toward real slicing —
-     PrintConfig + Config, PresetBundle minimal, PrintObject → slice_mesh_ex
-     is already linked; target: cube STL → gcode string on device.
-  3. Phase 2 start: document picker → real STL → TriangleMesh → Metal
-     viewer (replace test cube); orca_core API grows: load_stl(path) →
-     mesh buffers (vertices/indices) for the renderer.
+  1. [USER] Verify STL import + slice line on device (deployed `3a94ce7`).
+  2. Full G-code pipeline session (map below): add Model.cpp + Format/OBJ
+     (+objparser) + GCode family; shims: tbb pipeline trio, nowide/iostream;
+     stub-adapter TU: load_3mf/load_step/load_amf → throw 'unsupported'.
+  3. Then PrintConfig/Print/PrintObject chain → first real slice → Files.
+
+## G-code pipeline dep map (static analysis 2026-10-02) [CODE]
+
+- Model.cpp externals: Eigen ✓, boost headers ✓ (needs nowide/iostream shim),
+  log shim ✓. Calls: load_stl ✓ compiled, load_obj (easy: OBJ.cpp+objparser,
+  no new deps), load_amf (expat+miniz vendored ✓), load_3mf (WALL: draco not
+  vendored, curl — stub it), load_step (OCCT — stub it).
+- GCode.cpp: tbb/parallel_pipeline.h + tbb/pipeline.h + tbb/version.h
+  (new shim surface — sequential pipeline ~40 lines), boost/beast base64
+  (header-only, verify in apt boost), Shiny (profile-guarded).
+- Expected adds: GCode.cpp GCodeWriter PlaceholderParser CustomGCode Time
+  Thread Semver PrintBase Print PrintApply PrintObject PrintObjectSlice
+  PrintRegion Layer LayerRegion PrintConfig Extruder✓ Flow✓ WipeTower2
+  WipeTower GCodeProcessor PressureEqualizer GCode/Thumbnails ThumbnailData
+  MinAreaBoundingBox ElephantFootCompensation Brim... (closure-driven; 15-25
+  files). Walls: none hard — draco/curl/OCCT stay stubbed, freetype not needed
+  for slicing, PNG only for thumbnails (stub-able).
+- Strategy unchanged: shims + stub-adapters in Engine/, upstream untouched.
 
 ## DECISIONS
 
@@ -33,6 +48,13 @@
 - Incremental compiles in build-core.sh (depfiles + mtime + flags stamp).
 
 ## PROGRESS
+
+- [2026-10-02] P2 vertical slice deployed (`3a94ce7`): document picker →
+  security-scoped copy → EngineMesh.load (off-main) → flat-shaded Metal
+  render of the REAL mesh + camera auto-framing; slice_mesh_ex report
+  (8 z-levels, mid-layer islands+area) in the status chip.
+- [2026-10-02] Engine/build-ios untracked (incremental cache), obj cache
+  survived exclusion cycles (corrections cost 0 compiles).
 
 - [2026-10-02] Phase 0 done: app + Metal viewer verified on iPoke (60fps).
 - [2026-10-02] Interop gate green: static lib → xcframework → Swift .Cxx.

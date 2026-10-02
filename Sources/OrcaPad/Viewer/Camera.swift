@@ -28,6 +28,10 @@ enum Math {
         ))
     }
 
+    static func identity() -> simd_float4x4 {
+        simd_float4x4(diagonal: SIMD4<Float>(1, 1, 1, 1))
+    }
+
     static func translate(_ t: simd_float3) -> simd_float4x4 {
         simd_float4x4(columns: (
             simd_float4(1, 0, 0, 0),
