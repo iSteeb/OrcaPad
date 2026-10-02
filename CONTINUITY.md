@@ -7,8 +7,10 @@
 - Acceptance (Phase 0): green `xtool dev build`; renders on iPoke at ~60fps
   with orbit/pan/pinch on bed grid + test cube.
 - Next steps:
-  1. `xtool dev build` → fix compile errors → `xtool dev` to install on iPoke.
-  2. Verify syslog: `idevicesyslog | grep --line-buffered "OrcaPad\["`.
+  1. Plug in iPoke → `cd ~/OrcaPad && xtool dev > /tmp/orcapad-dev.log 2>&1`
+     (first run registers App ID + provisioning — automatic).
+  2. Verify syslog: `idevicesyslog | grep --line-buffered "OrcaPad\["` — expect
+     `renderer online` + status overlay shows fps.
   3. Manual launch on phone (xtool launch broken, iOS 17+ issue #44).
   4. Then Phase 1: libslic3r iOS build (start: CMake toolchain file, minimal
      dep set, arm64 + simulator slices → xcframework).
@@ -31,7 +33,9 @@
 
 - [2026-10-02] Phase 0 scaffold written: Package.swift, xtool.yml, 7 Swift
   files (app shell, plater view, MetalCanvas/Renderer/Camera/Geometry/Shaders).
-  Meta-files AGENTS/PLANS/CONTINUITY/LESSONS created. Build not yet attempted.
+  Meta-files AGENTS/PLANS/CONTINUITY/LESSONS created.
+- [2026-10-02] `xtool dev build` GREEN (3 fix iterations, 0 warnings).
+  Committed `P0:` 9bc9586. Phone not connected — install pending.
 
 ## DISCOVERIES
 
@@ -41,6 +45,13 @@
 - wxWidgets iOS port is officially "very basic" — confirms native-rewrite path.
 - Bambu Handy does cloud slicing; no full on-device mobile slicer exists yet
   (opportunity). UNCONFIRMED as of 2026-10.
+- xtool's generated Info.plist already has UIDeviceFamily [1,2] (iPhone+iPad)
+  and full iPad orientations — no plist overrides needed. [TOOL]
+- In this SDK (iOS 27.0), MTKView is @MainActor and MTKViewDelegate
+  satisfaction from a @MainActor class works WITHOUT @preconcurrency
+  (attribute warned "has no effect"). Renderer is @MainActor. [TOOL]
+- Swift tuples do NOT bridge to SIMD3<Float> literals — write
+  `SIMD3(x, y, z)` explicitly. [CODE]
 
 ## OUTCOMES
 

@@ -16,7 +16,7 @@ Upstream contact surface (keep it this small): `libslic3r` + config defs +
 - [x] SwiftUI plater shell (toolbar, status overlay)
 - [x] Metal viewer: MTKView, orbit camera, bed grid, lit test cube
 - [x] Runtime MSL compilation (Linux can't build .metallib)
-- [ ] Builds green via `xtool dev build`
+- [x] Builds green via `xtool dev build` (0 warnings)
 - [ ] Installs + renders on iPoke; syslog shows renderer online
 
 **Accept:** dark 3D scene w/ 256mm bed grid + orange cube; 1-finger orbit,
