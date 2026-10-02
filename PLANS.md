@@ -40,15 +40,20 @@ Upstream contact surface (keep it this small): `libslic3r` + config defs +
 **Accept:** tap Slice in-app on a 20mm cube STL → real gcode file appears in
 Files app in < 30s; memory stays under ~500MB.
 
-## Phase 2 — Plater MVP
+## Phase 2 — Plater MVP (in progress)
 **Goal:** it looks and works like a slicer.
 
-- Document picker import: binary+ASCII STL, then 3MF (via engine), STEP deferred
-- Mesh rendering in Metal (real indexed triangle meshes, not the test cube)
-- Instance transform gizmos: move / rotate / snap, lay-flat, auto-arrange
+- [x] Document picker import: STL (binary+ASCII via engine/admesh) — DONE
+  2026-10-02, user-verified on device
+- [x] Mesh rendering in Metal (indexed triangle meshes, flat shading,
+  bed-anchored, auto-framing) — DONE (cube fallback retired on import)
+- [x] Real slicing geometry on-device: slice_mesh_ex probe (8 z-levels,
+  mid-layer islands+area in status chip) — DONE
+- [ ] 3MF import via engine (blocked on stub/dep decisions — see map)
+- [ ] Instance transform gizmos: move / rotate / snap, lay-flat, auto-arrange
   (arrange algorithm from engine — never reimplement)
-- Object list UI; multi-instance; delete/duplicate
-- Picking (ray-cast against meshes on CPU or via GPU id buffer)
+- [ ] Object list UI; multi-instance; delete/duplicate
+- [ ] Picking (ray-cast against meshes on CPU or via GPU id buffer)
 
 **Accept:** import a real-world STL, arrange 3 copies, zoom/inspect, slice.
 

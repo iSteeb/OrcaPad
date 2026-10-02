@@ -110,3 +110,26 @@ in ~/xtool-cheatsheet.md — link, don't duplicate.)
 - Crash reports: `idevicecrashreport -e <dir>` (slow — background it) or
   pymobiledevice3; the .ips JSON carries exception type + symbolicated
   frames (our static-lib symbols show up by name — keep them unstripped).
+
+### Renderer/engine boundary (2026-10-02, STL-import night)
+
+- **Face-duplicated vertex arrays need SEQUENTIAL indices.** Engine meshes
+  (post-admesh-repair) use deduplicated shared-vertex indices; after
+  expanding to 3-verts-per-face for flat shading, the original index buffer
+  points into wrong vertices → garbled mesh. Symptom signature: right
+  position/size, scrambled triangles.
+- **Test geometry hides bugs.** The unit cube is natively face-duplicated
+  with matching indices — it silently survived both render bugs that
+  garbled every real imported mesh. Verify new pipelines with real-world
+  assets, not the placeholder.
+- **Leftover transforms:** when a placeholder object's model matrix lives in
+  the draw path (not its geometry), every later object inherits it. Bake
+  placeholder transforms into placeholder vertices; draw paths stay identity.
+- Swift "failed to produce diagnostic" ≈ usually a REAL error hiding
+  elsewhere (missing member from a raced-away edit); fix the root, don't
+  restructure around the opaque message.
+- The parallel edit+bash race DID it again (expandFlat vanished; CONTINUITY
+  commit aborted). RULE IS ABSOLUTE: after any edit/write, the next bash
+  call runs in a SEPARATE tool turn. No exceptions for "quick" appends.
+- Camera framing formula that worked: distance = max(bboxDim) × 2.6
+  (clamped 110–1400), target at 45% of height, pitch 0.42 rad.

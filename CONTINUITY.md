@@ -7,11 +7,11 @@
 - Acceptance (Phase 1, this push): status chip shows
   `OrcaCore: STL load+repair ok · 12 tris · 8000 mm³` on iPoke.
 - Next steps:
-  1. [USER] Verify STL import + slice line on device (deployed `3a94ce7`).
-  2. Full G-code pipeline session (map below): add Model.cpp + Format/OBJ
-     (+objparser) + GCode family; shims: tbb pipeline trio, nowide/iostream;
-     stub-adapter TU: load_3mf/load_step/load_amf → throw 'unsupported'.
-  3. Then PrintConfig/Print/PrintObject chain → first real slice → Files.
+  1. Next session: full G-code pipeline push (dep map below is the battle
+     plan): Model.cpp + Format/OBJ + GCode family; shims: tbb pipeline trio,
+     nowide/iostream, beast base64; stub TU: load_3mf/load_step/load_amf.
+  2. Then PrintConfig/Print/PrintObject chain → first real slice → Files.
+  3. P2 backlog: object list UI, multi-instance, gizmos, real arrange.
 
 ## G-code pipeline dep map (static analysis 2026-10-02) [CODE]
 
@@ -49,10 +49,11 @@
 
 ## PROGRESS
 
-- [2026-10-02] P2 vertical slice deployed (`3a94ce7`): document picker →
-  security-scoped copy → EngineMesh.load (off-main) → flat-shaded Metal
-  render of the REAL mesh + camera auto-framing; slice_mesh_ex report
-  (8 z-levels, mid-layer islands+area) in the status chip.
+- [2026-10-02] P2 vertical slice deployed & USER-VERIFIED (`763e337`):
+  document picker → sandbox copy → EngineMesh.load (off-main) → flat-shaded
+  Metal render of the REAL mesh + auto-framing; slice_mesh_ex report in chip.
+  Two render bugs fixed same night: leftover test-cube model matrix (20×
+  scale); face-duplicated verts fed shared-vertex indices (garbled mesh).
 - [2026-10-02] Engine/build-ios untracked (incremental cache), obj cache
   survived exclusion cycles (corrections cost 0 compiles).
 
@@ -89,8 +90,8 @@
 ## OUTCOMES
 
 - [2026-10-02] Phase 0 complete: Linux→iPhone loop + Metal + interop proven.
-- [2026-10-02] **Phase 1 gate complete**: 79-object OrcaSlicer engine subset
-  (TriangleMesh/admesh/clipper/voronoi/qhull/tess) loads + repairs an STL
-  ON DEVICE (12 tris, 8000 mm³ cube, user-verified). Crash→fix cycle
-  established (crash report pull → exact frame → targeted fix → 1-file
-  incremental rebuild → redeploy).
+- [2026-10-02] Phase 1 gate complete: engine subset runs on device (STL
+  load+repair, 12 tris/8000 mm³ cube, user-verified).
+- [2026-10-02] **Phase 2 vertical slice complete**: real STL → real mesh in
+  the Metal viewer + real slice_mesh_ex cross-sections on device
+  (user-verified `763e337`). Full G-code = next session, map banked.
