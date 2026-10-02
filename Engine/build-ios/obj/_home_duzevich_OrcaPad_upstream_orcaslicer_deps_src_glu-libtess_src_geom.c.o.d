@@ -1,0 +1,21 @@
+/home/duzevich/OrcaPad/Engine/build-ios/obj/_home_duzevich_OrcaPad_upstream_orcaslicer_deps_src_glu-libtess_src_geom.c.o: \
+  /home/duzevich/.config/swiftpm/swift-sdks/darwin.artifactbundle/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS27.0.sdk/SDKSettings.json \
+  /home/duzevich/OrcaPad/upstream/orcaslicer/deps_src/glu-libtess/src/geom.c \
+  /home/duzevich/.local/share/swiftly/toolchains/6.4.0/usr/lib/clang/21/include/limits.h \
+  /home/duzevich/.config/swiftpm/swift-sdks/darwin.artifactbundle/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS27.0.sdk/usr/include/limits.h \
+  /home/duzevich/.config/swiftpm/swift-sdks/darwin.artifactbundle/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS27.0.sdk/usr/include/sys/cdefs.h \
+  /home/duzevich/.config/swiftpm/swift-sdks/darwin.artifactbundle/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS27.0.sdk/usr/include/sys/_symbol_aliasing.h \
+  /home/duzevich/.config/swiftpm/swift-sdks/darwin.artifactbundle/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS27.0.sdk/usr/include/sys/_posix_availability.h \
+  /home/duzevich/.local/share/swiftly/toolchains/6.4.0/usr/lib/clang/21/include/ptrcheck.h \
+  /home/duzevich/.config/swiftpm/swift-sdks/darwin.artifactbundle/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS27.0.sdk/usr/include/machine/limits.h \
+  /home/duzevich/.config/swiftpm/swift-sdks/darwin.artifactbundle/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS27.0.sdk/usr/include/arm/limits.h \
+  /home/duzevich/.config/swiftpm/swift-sdks/darwin.artifactbundle/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS27.0.sdk/usr/include/arm/_limits.h \
+  /home/duzevich/.config/swiftpm/swift-sdks/darwin.artifactbundle/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS27.0.sdk/usr/include/sys/syslimits.h \
+  /home/duzevich/OrcaPad/upstream/orcaslicer/deps_src/glu-libtess/src/gluos.h \
+  /home/duzevich/.config/swiftpm/swift-sdks/darwin.artifactbundle/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS27.0.sdk/usr/include/assert.h \
+  /home/duzevich/.config/swiftpm/swift-sdks/darwin.artifactbundle/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS27.0.sdk/usr/include/_assert.h \
+  /home/duzevich/.config/swiftpm/swift-sdks/darwin.artifactbundle/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS27.0.sdk/usr/include/_bounds.h \
+  /home/duzevich/.config/swiftpm/swift-sdks/darwin.artifactbundle/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS27.0.sdk/usr/include/_static_assert.h \
+  /home/duzevich/OrcaPad/upstream/orcaslicer/deps_src/glu-libtess/src/mesh.h \
+  /home/duzevich/OrcaPad/upstream/orcaslicer/deps_src/glu-libtess/include/glu-libtess.h \
+  /home/duzevich/OrcaPad/upstream/orcaslicer/deps_src/glu-libtess/src/geom.h

@@ -65,22 +65,32 @@ remaining -= set(defs.keys())
 dem = subprocess.run(["c++filt"], input="\n".join(remaining), capture_output=True, text=True).stdout.splitlines()
 pairs = list(zip(remaining, dem))
 
-# --- duplicate-strong-symbol audit (any T/t symbol defined 2+ times) ---
-strong_defs = collections.defaultdict(list)
+# --- duplicate audit (Mach-O aware) ---
+# Weak external symbols (C++ inline/implicit emissions) coalesce at link;
+# llvm-nm's brief format prints them as 'T', so parse `nm -m` detail lines
+# and flag ONLY non-weak duplicate definitions.
+strong_defs = collections.defaultdict(set)
 for m in members:
-    out = subprocess.run([nm, os.path.join(work, m)], capture_output=True, text=True).stdout
+    out = subprocess.run([nm, "-m", os.path.join(work, m)], capture_output=True, text=True).stdout
     for line in out.splitlines():
-        parts = line.split()
-        if len(parts) == 3 and parts[1] in ("T", "t"):
-            strong_defs[parts[2]].append(m)
-dups = {s: ms for s, ms in strong_defs.items() if len(set(ms)) > 1}
+        if "(__TEXT,__text)" not in line:
+            continue
+        sym = line.split()[-1]
+        if "weak" in line:
+            continue
+        if sym.startswith("___clang_call_terminate") or sym.startswith("_OUTLINED_FUNCTION"):
+            continue  # per-TU locals
+        if sym.startswith("ltmp") or ".cold." in sym:
+            continue  # section labels / cold fragments of weak parents
+        strong_defs[sym].add(m)
+dups = {s: ms for s, ms in strong_defs.items() if len(ms) > 1}
 if dups:
-    print(f"== DUPLICATE STRONG SYMBOLS: {len(dups)} ==")
+    print(f"== DUPLICATE NON-WEAK SYMBOLS: {len(dups)} ==")
     for s, ms in list(dups.items())[:20]:
         d = subprocess.run(["c++filt"], input=s, capture_output=True, text=True).stdout.strip()
-        print(f"  {d}  <- {len(set(ms))} members")
+        print(f"  {d}  <- {len(ms)} members: {[x.split('_orcaslicer_')[-1][:50] for x in ms]}")
 else:
-    print("== duplicate strong symbol audit: CLEAN ==")
+    print("== duplicate symbol audit (non-weak): CLEAN ==")
 
 slic3r = [(m, d) for m, d in pairs if d.startswith("Slic3r::")]
 other = [(m, d) for m, d in pairs if not d.startswith("Slic3r::")]

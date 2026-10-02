@@ -22,7 +22,7 @@ TARGET="arm64-apple-ios17.0"
 
 BUILD="$ROOT/Engine/build-ios"
 OUT="$ROOT/Prebuilt/OrcaCore.xcframework/ios-arm64"
-rm -rf "$BUILD"
+# INCREMENTAL: obj/ persists across runs; see needs_build + flags stamp.
 mkdir -p "$BUILD/gen/libslic3r" "$BUILD/obj" "$OUT/Headers"
 
 CFLAGS=(
@@ -49,8 +49,11 @@ CONLY_FLAGS=(
 # -I/usr/include — glibc headers must not shadow the Darwin SDK).
 CEREAL="$ROOT/Engine/cache/cereal/include/cereal"
 if [ ! -f "$CEREAL/access.hpp" ]; then
-    echo "FATAL: cereal cache missing — git clone USCiLab/cereal v1.3.0 into Engine/cache/" >&2; exit 1
+    echo "==> fetching cereal v1.3.0 (OrcaSlicer's pin) into Engine/cache/" >&2
+    mkdir -p "$ROOT/Engine/cache"
+    git clone -q --depth 1 -b v1.3.0 https://github.com/USCiLab/cereal "$ROOT/Engine/cache/cereal"
 fi
+[ -f "$CEREAL/access.hpp" ] || { echo "FATAL: cereal fetch failed" >&2; exit 1; }
 ln -sfn /usr/include/boost "$BUILD/gen/boost"
 ln -sfn /usr/include/eigen3/Eigen "$BUILD/gen/Eigen"
 ln -sfn /usr/include/eigen3/unsupported "$BUILD/gen/unsupported"
@@ -61,7 +64,8 @@ ln -sfn /usr/include/x86_64-linux-gnu/mpfr.h "$BUILD/gen/mpfr.h"
 
 # --- 1. generated version header (normally done by CMake configure) ---
 # Written to BOTH locations: bare name (same-dir include style) and
-# prefixed (libslic3r/... include style).
+# prefixed (libslic3r/... include style). Content-conditional write so the
+# mtime (and thus incremental rebuilds) stay stable across no-op runs.
 for vpath in "$BUILD/gen/libslic3r_version.h" "$BUILD/gen/libslic3r/libslic3r_version.h"; do
     sed -e 's/@SLIC3R_VERSION@/2.4.2/g' \
         -e 's/@SLIC3R_BUILD_ID@/OrcaPad-2.4.2/g' \
@@ -69,33 +73,58 @@ for vpath in "$BUILD/gen/libslic3r_version.h" "$BUILD/gen/libslic3r/libslic3r_ve
         -e 's/@SLIC3R_APP_NAME@/OrcaSlicer/g' \
         -e 's/@BBL_INTERNAL_TESTING@/0/g' \
         -e 's/@ORCA_CHECK_GCODE_PLACEHOLDERS@/0/g' \
-        "$SRC/libslic3r/libslic3r_version.h.in" > "$vpath"
+        "$SRC/libslic3r/libslic3r_version.h.in" > "$vpath.tmp"
+    if [ ! -f "$vpath" ] || ! cmp -s "$vpath.tmp" "$vpath"; then mv "$vpath.tmp" "$vpath"; else rm -f "$vpath.tmp"; fi
 done
 
-# --- 2. compile sources ---
-# Hard-fail semantics: a failed compile MUST abort the build (command
-# substitution swallows exit codes; compile() exits explicitly instead).
+# --- 2. incremental compile machinery ---
 OBJ="$BUILD/obj"
 MANIFEST="$BUILD/objects.txt"
 : > "$MANIFEST"
 
+# Flags stamp: toolchain/flag changes force a full rebuild.
+FLAGS_HASH="$(printf '%s\n' "${CFLAGS[@]}" "${CONLY_FLAGS[@]}" "$CLANG" "$SDK" | sha256sum | cut -c1-16)"
+if [ -f "$BUILD/flags.sha" ] && [ "$(cat "$BUILD/flags.sha")" != "$FLAGS_HASH" ]; then
+    echo "==> flags/toolchain changed — full rebuild" >&2
+    rm -rf "$OBJ"
+fi
+mkdir -p "$OBJ"
+echo "$FLAGS_HASH" > "$BUILD/flags.sha"
+
+needs_build() { # needs_build <src> <obj> — true if recompile required
+    local src="$1" o="$2"
+    [ -f "$o" ] || return 0
+    [ "$src" -nt "$o" ] && return 0
+    local d="$o.d" p
+    [ -f "$d" ] || return 0   # no depfile → conservative rebuild
+    while IFS= read -r p; do
+        [ -z "$p" ] && continue
+        [ -e "$p" ] && [ "$p" -nt "$o" ] && return 0
+    done < <(sed '1s/[^:]*://' "$d" | tr '\\ ' '\n\n' | sed '/^$/d')
+    return 1                    # NOTE: paths with spaces unsupported (none here)
+}
+
+compile_one() { # compile_one <src> <obj> <compiler+flags...>
+    local src="$1" o="$2"; shift 2
+    if needs_build "$src" "$o"; then
+        if ! "$@" -MD -MF "$o.d" -c "$src" -o "$o" 2>"$o.err"; then
+            cat "$o.err" >&2; echo "FAILED: $src" >&2; exit 1
+        fi
+        rm -f "$o.err"
+        echo "  cc $(basename "$src")" >&2
+    fi
+    echo "$o" >> "$MANIFEST"
+}
+
 compile() { # compile <srcfile> (C++, extra flags after src)
     local src="$1"; shift
     local o="$OBJ/$(echo "$src" | sed 's|/|_|g').o"
-    if ! "$CLANG" "${CFLAGS[@]}" "$@" -c "$src" -o "$o" 2>"$o.err"; then
-        cat "$o.err" >&2; echo "FAILED: $src" >&2; exit 1
-    fi
-    rm -f "$o.err"
-    echo "$o" >> "$MANIFEST"
+    compile_one "$src" "$o" "$CLANG" "${CFLAGS[@]}" "$@"
 }
 compile_c() { # compile_c <srcfile> (C)
     local src="$1"
     local o="$OBJ/$(echo "$src" | sed 's|/|_|g').o"
-    if ! "${CLANG%++}" "${CONLY_FLAGS[@]}" -c "$src" -o "$o" 2>"$o.err"; then
-        cat "$o.err" >&2; echo "FAILED: $src" >&2; exit 1
-    fi
-    rm -f "$o.err"
-    echo "$o" >> "$MANIFEST"
+    compile_one "$src" "$o" "${CLANG%++}" "${CONLY_FLAGS[@]}"
 }
 
 OBJS=()
@@ -105,21 +134,20 @@ for f in connect normals shared stl_io stlinit util; do
     compile "$DEPS/admesh/$f.cpp"
 done
 
-# vendored qhull (convex hull): C core + C++ wrappers
-for f in "$DEPS"/qhull/src/libqhull_r/*.c; do
-    case "$f" in
-        *userprintf_r.c) continue ;; # qh_fprintf also defined in libqhullcpp/QhullQh.cpp — keep exactly one
-    esac
-    compile_c "$f"
+# vendored qhull — EXACT file lists from deps_src/qhull/CMakeLists.txt
+# (libqhull_SOURCES). Do not glob, do not "fix": the C/C++ hook split
+# (qh_fprintf vs qh_malloc vs qh_fprintf_rbox ownership) is deliberate.
+for f in global_r stat_r geom2_r poly2_r merge_r libqhull_r geom_r poly_r \
+         qset_r mem_r random_r usermem_r io_r user_r rboxlib_r; do
+    compile_c "$DEPS/qhull/src/libqhull_r/$f.c"
 done
-for f in "$DEPS"/qhull/src/libqhullcpp/*.cpp; do
-    case "$f" in
-        *qt-qhull.cpp) continue ;;          # Qt shim, not needed
-        *userprintf_r-cpp.cpp) continue ;; # duplicates C qh_fprintf from libqhull_r
-    esac
+for f in Coordinates PointCoordinates Qhull QhullFacet QhullFacetList \
+         QhullFacetSet QhullHyperplane QhullPoint QhullPointSet QhullPoints \
+         QhullQh QhullRidge QhullSet QhullStat QhullVertex QhullVertexSet \
+         RboxPoints RoadError RoadLogEvent; do
     # upstream quirk: usermem_r-cpp.cpp relies on transitive stdarg/stdio —
-    # force-include instead of patching the vendored source
-    compile "$f" -include stdarg.h -include stdio.h
+    # (file is NOT in upstream's list, but this fix pattern stays for reference)
+    compile "$DEPS/qhull/src/libqhullcpp/$f.cpp"
 done
 
 # libslic3r geometry subset (grows link-error-driven)
@@ -139,8 +167,11 @@ for f in libslic3r.cpp Point.cpp Line.cpp MultiPoint.cpp Polygon.cpp Polyline.cp
 done
 
 # vendored glu-libtess (triangulation backend for Tesselate.cpp)
-for f in "$DEPS"/glu-libtess/src/*.c; do
-    compile_c "$f"
+# File list mirrors upstream deps_src/glu-libtess/CMakeLists.txt EXACTLY:
+# priorityq-heap.c / priorityq-sort.c are NOT standalone TUs upstream —
+# compiling them duplicates __gl_pqHeap* strong C symbols.
+for f in dict geom memalloc mesh normal priorityq render sweep tess tessmono; do
+    compile_c "$DEPS/glu-libtess/src/$f.c"
 done
 
 # our C boundary
