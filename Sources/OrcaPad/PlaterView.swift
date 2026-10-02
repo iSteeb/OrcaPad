@@ -1,9 +1,11 @@
 import SwiftUI
+import Engine
 
 /// Root scene: the plater. 3D canvas full-bleed, lightweight overlays on top.
 /// This is the Phase 0 scaffold — shell exists, engine not linked yet.
 struct PlaterView: View {
     @State private var rendererStatus = "Metal: starting…"
+    @State private var engineStatus = "C++: not probed"
 
     var body: some View {
         ZStack(alignment: .topLeading) {
@@ -20,6 +22,10 @@ struct PlaterView: View {
                     .font(.caption2.monospaced())
                     .foregroundStyle(.secondary)
                     .lineLimit(3)
+                Text(engineStatus)
+                    .font(.caption2.monospaced())
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
             }
             .padding(10)
             .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 10))
@@ -27,6 +33,7 @@ struct PlaterView: View {
         }
         .overlay(alignment: .bottom) { platerToolbar }
         .preferredColorScheme(.dark)
+        .onAppear { engineStatus = EngineProbe.status() }
     }
 
     private var platerToolbar: some View {

@@ -1,0 +1,5 @@
+[submodule "vendor/orcaslicer"]
+	shallow = true
+[submodule "orcaslicer"]
+	path = upstream/orcaslicer
+	url = https://github.com/OrcaSlicer/OrcaSlicer

@@ -15,10 +15,30 @@ let package = Package(
             targets: ["OrcaPad"]
         ),
     ],
+    dependencies: [
+    ],
     targets: [
         .target(
             name: "OrcaPad",
-            path: "Sources/OrcaPad"
+            dependencies: ["Engine"],
+            swiftSettings: [
+                .interoperabilityMode(.Cxx)
+            ]
         ),
-    ]
+        // Swift↔C++ interop layer over the (future) libslic3r static lib.
+        .target(
+            name: "Engine",
+            dependencies: ["CxxProbe"],
+            swiftSettings: [
+                .interoperabilityMode(.Cxx)
+            ]
+        ),
+        // Prebuilt C++ static library (hand-rolled xcframework, built by
+        // clang -target arm64-apple-ios from Linux; see Engine/build.sh).
+        .binaryTarget(
+            name: "CxxProbe",
+            path: "Prebuilt/CxxProbe.xcframework"
+        ),
+    ],
+    cxxLanguageStandard: .cxx17
 )

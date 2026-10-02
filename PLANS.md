@@ -17,7 +17,9 @@ Upstream contact surface (keep it this small): `libslic3r` + config defs +
 - [x] Metal viewer: MTKView, orbit camera, bed grid, lit test cube
 - [x] Runtime MSL compilation (Linux can't build .metallib)
 - [x] Builds green via `xtool dev build` (0 warnings)
-- [ ] Installs + renders on iPoke; syslog shows renderer online
+- [x] Installs + renders on iPoke; syslog shows renderer online
+  (verified 2026-10-02: `renderer online` <600ms after launch, visual
+  confirm by user)
 
 **Accept:** dark 3D scene w/ 256mm bed grid + orange cube; 1-finger orbit,
 2-finger pan, pinch zoom all smooth at ~60fps.
