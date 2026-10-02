@@ -24,10 +24,10 @@ final class Renderer: NSObject, MTKViewDelegate {
     private var linePipeline: MTLRenderPipelineState!
     private var depthState: MTLDepthStencilState!
 
-    // Scene buffers
-    private var cubeVB: MTLBuffer!
-    private var cubeIB: MTLBuffer!
-    private var cubeIndexCount: Int = 0
+    // Scene buffers — "object" starts as the test cube, replaced on import.
+    private var objectVB: MTLBuffer!
+    private var objectIB: MTLBuffer!
+    private var objectIndexCount: Int = 0
     private var gridVB: MTLBuffer!
     private var gridVertexCount: Int = 0
 
@@ -157,11 +157,11 @@ final class Renderer: NSObject, MTKViewDelegate {
 
     private func buildScene() {
         let (cubeVerts, cubeIdx) = Geometry.unitCube()
-        cubeIndexCount = cubeIdx.count
-        cubeVB = device.makeBuffer(
+        objectIndexCount = cubeIdx.count
+        objectVB = device.makeBuffer(
             bytes: cubeVerts, length: MemoryLayout<VertexPNC>.stride * cubeVerts.count,
             options: .storageModeShared)
-        cubeIB = device.makeBuffer(
+        objectIB = device.makeBuffer(
             bytes: cubeIdx, length: MemoryLayout<UInt32>.stride * cubeIdx.count,
             options: .storageModeShared)
 
@@ -170,6 +170,31 @@ final class Renderer: NSObject, MTKViewDelegate {
         gridVB = device.makeBuffer(
             bytes: grid, length: MemoryLayout<VertexPC>.stride * grid.count,
             options: .storageModeShared)
+    }
+
+    /// Replaces the object mesh (imported STL) and frames the camera on it.
+    /// Vertices are already viewer-space, bed-anchored, recentred.
+    func uploadMesh(_ upload: MeshUpload) {
+        guard upload.verts.count > 0, upload.idx.count > 0 else {
+            logger.error("uploadMesh: empty mesh ignored")
+            return
+        }
+        objectVB = device.makeBuffer(
+            bytes: upload.verts, length: MemoryLayout<VertexPNC>.stride * upload.verts.count,
+            options: .storageModeShared)
+        objectIB = device.makeBuffer(
+            bytes: upload.idx, length: MemoryLayout<UInt32>.stride * upload.idx.count,
+            options: .storageModeShared)
+        objectIndexCount = upload.idx.count
+
+        // Frame the camera on the new object.
+        let size = upload.bboxMax - upload.bboxMin
+        let maxDim = max(size.x, max(size.y, size.z))
+        camera.target = SIMD3<Float>(0, size.y * 0.45, 0)
+        camera.distance = min(max(maxDim * 2.6, 110), 1400)
+        camera.pitch = 0.42
+        camera.yaw = -0.65
+        logger.notice("mesh uploaded: \(upload.idx.count / 3) tris")
     }
 
     // MARK: MTKViewDelegate (invoked on the main thread)
@@ -202,7 +227,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         encoder.drawPrimitives(type: .line, vertexStart: 0, vertexCount: gridVertexCount)
         encoder.popDebugGroup()
 
-        // Cube (calibration stand-in object)
+        // Object (test cube, or imported STL after uploadMesh)
         let model = Math.translate(SIMD3<Float>(0, 10, 0)) * Math.scale(20)
         cubeUniforms.mvp = viewProj * model
         cubeUniforms.model = model
@@ -210,13 +235,13 @@ final class Renderer: NSObject, MTKViewDelegate {
         encoder.setRenderPipelineState(litPipeline)
         encoder.setDepthStencilState(depthState)
         encoder.setCullMode(.none)
-        encoder.setVertexBuffer(cubeVB, offset: 0, index: 0)
+        encoder.setVertexBuffer(objectVB, offset: 0, index: 0)
         var cu = cubeUniforms
         encoder.setVertexBytes(&cu, length: MemoryLayout<CubeUniforms>.stride, index: 1)
         encoder.setFragmentBytes(&cu, length: MemoryLayout<CubeUniforms>.stride, index: 1)
         encoder.drawIndexedPrimitives(
-            type: .triangle, indexCount: cubeIndexCount, indexType: .uint32,
-            indexBuffer: cubeIB, indexBufferOffset: 0, instanceCount: 1)
+            type: .triangle, indexCount: objectIndexCount, indexType: .uint32,
+            indexBuffer: objectIB, indexBufferOffset: 0, instanceCount: 1)
         encoder.popDebugGroup()
 
         encoder.endEncoding()

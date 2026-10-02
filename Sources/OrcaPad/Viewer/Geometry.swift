@@ -3,13 +3,13 @@ import simd
 // MARK: - Vertex formats (must match the vertex descriptors in Renderer)
 
 /// Lit triangle vertices: position + normal.
-struct VertexPNC {
+struct VertexPNC: Sendable {
     var position: SIMD3<Float>
     var normal: SIMD3<Float>
 }
 
 /// Unlit line vertices: position + color.
-struct VertexPC {
+struct VertexPC: Sendable {
     var position: SIMD3<Float>
     var color: SIMD4<Float>
 }
@@ -63,5 +63,37 @@ enum Geometry {
             indices.append(contentsOf: [0, 1, 2, 0, 2, 3].map { $0 + base })
         }
         return (verts, indices)
+    }
+}
+
+// MARK: - Engine mesh → viewer mesh
+
+extension Geometry {
+    /// Expands an indexed position-only mesh (engine output) into per-face
+    /// duplicated vertices with flat normals — the viewer's lit format.
+    static func expandFlat(positions: UnsafePointer<Float>?, positionCount: Int,
+                           indices: UnsafePointer<UInt32>?, indexCount: Int)
+        -> (verts: [VertexPNC], idx: [UInt32])
+    {
+        guard let positions, let indices, positionCount > 0, indexCount > 0 else { return ([], []) }
+        let src = UnsafeBufferPointer(start: positions, count: positionCount * 3)
+        let ip = UnsafeBufferPointer(start: indices, count: indexCount)
+        func point(_ i: Int) -> SIMD3<Float> {
+            SIMD3<Float>(src[i * 3], src[i * 3 + 1], src[i * 3 + 2])
+        }
+        var verts: [VertexPNC] = []
+        verts.reserveCapacity(indexCount)
+        for t in 0..<(indexCount / 3) {
+            let a = point(Int(ip[t * 3]))
+            let b = point(Int(ip[t * 3 + 1]))
+            let c = point(Int(ip[t * 3 + 2]))
+            var n = simd_cross(b - a, c - a)
+            let len = simd_length(n)
+            n = len > 1e-12 ? n / len : SIMD3<Float>(repeating: 0)
+            verts.append(VertexPNC(position: a, normal: n))
+            verts.append(VertexPNC(position: b, normal: n))
+            verts.append(VertexPNC(position: c, normal: n))
+        }
+        return (verts, Array(ip))
     }
 }

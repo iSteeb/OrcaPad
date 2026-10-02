@@ -1,11 +1,22 @@
 import MetalKit
 import SwiftUI
 
+/// A mesh ready for the renderer (built off-main during import).
+struct MeshUpload: Identifiable, Sendable {
+    let id = UUID()
+    let verts: [VertexPNC]
+    let idx: [UInt32]
+    let bboxMin: SIMD3<Float>
+    let bboxMax: SIMD3<Float>
+}
+
 /// SwiftUI wrapper around MTKView + gesture recognizers.
 @MainActor
 struct MetalCanvas: UIViewRepresentable {
     /// Receives human-readable renderer status (called on the main thread).
     let onStatus: (String) -> Void
+    /// Set to upload + display a new object mesh (id change triggers load).
+    var upload: MeshUpload?
 
     func makeCoordinator() -> Coordinator {
         Coordinator()
@@ -24,7 +35,10 @@ struct MetalCanvas: UIViewRepresentable {
     }
 
     func updateUIView(_ view: MTKView, context: Context) {
-        // Nothing to update yet; renderer owns continuous drawing.
+        if let up = upload, context.coordinator.lastUploadID != up.id {
+            context.coordinator.lastUploadID = up.id
+            context.coordinator.renderer?.uploadMesh(up)
+        }
     }
 
     // MARK: Coordinator — gestures → camera
@@ -32,6 +46,7 @@ struct MetalCanvas: UIViewRepresentable {
     @MainActor
     final class Coordinator: NSObject {
         var renderer: Renderer?
+        var lastUploadID: UUID?
 
         func attach(view: MTKView, onStatus: @escaping (String) -> Void) {
             renderer = Renderer(view: view, onStatus: onStatus)

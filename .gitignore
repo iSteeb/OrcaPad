@@ -12,3 +12,6 @@ DerivedData/
 
 # fetched build caches (pinned clones, auto-fetched by build scripts)
 /Engine/cache/
+
+# engine cross-build outputs (incremental cache)
+/Engine/build-ios/

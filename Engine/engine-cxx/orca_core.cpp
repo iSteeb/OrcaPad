@@ -1,13 +1,17 @@
 #include "orca_core.h"
 
+#include "libslic3r/ExPolygon.hpp"
 #include "libslic3r/I18N.hpp"
 #include "libslic3r/TriangleMesh.hpp"
+#include "libslic3r/TriangleMeshSlicer.hpp"
 
+#include <algorithm>
 #include <cerrno>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <string>
+#include <vector>
 
 // --- adapter: translation hook --------------------------------------
 // Desktop OrcaSlicer defines I18N::translate_fn in utils.cpp (which needs
@@ -18,106 +22,114 @@ static std::string identity_translate(const char *s) { return s; }
 translate_fn_type translate_fn = &identity_translate;
 }}
 
-// --- generate a binary STL: 20mm cube centred on origin, sitting on z=0 ---
-// All file I/O is NULL/return-value checked: engine errors surface as
-// status strings, never as crashes (lesson: /tmp fopen NULL -> SIGSEGV).
+// --- mesh handle ------------------------------------------------------
 
-static FILE *open_or_fail(const char *path, const char *mode, std::string &err) {
-    FILE *f = fopen(path, mode);
-    if (!f) {
-        err = std::string("fopen failed for ") + path +
-              " (errno " + std::to_string(errno) + ")";
-    }
-    return f;
-}
+struct orca_mesh {
+    Slic3r::TriangleMesh mesh;       // original engine-space (z-up) mesh
+    std::vector<float>    positions; // packed viewer-space xyz
+    std::vector<uint32_t> indices;   // packed triangle indices
+};
 
-static bool write_cube_stl(const char *path, std::string &err) {
-    struct V { float x, y, z; };
-    const float s = 20.f, h = s / 2;
-    const V verts[8] = {
-        {-h, -h, 0}, { h, -h, 0}, { h,  h, 0}, {-h,  h, 0},
-        {-h, -h, s}, { h, -h, s}, { h,  h, s}, {-h,  h, s},
-    };
-    const int tris[12][3] = {
-        {0, 3, 1}, {1, 3, 2},   // bottom
-        {4, 5, 7}, {5, 6, 7},   // top
-        {0, 1, 5}, {0, 5, 4},   // front
-        {1, 2, 6}, {1, 6, 5},   // right
-        {2, 3, 7}, {2, 7, 6},   // back
-        {3, 0, 4}, {3, 4, 7},   // left
-    };
-    FILE *f = open_or_fail(path, "wb", err);
-    if (!f) return false;
-    char header[80] = {0};
-    strncpy(header, "OrcaPad probe cube", 79);
-    if (fwrite(header, 1, 80, f) != 80) { err = "header write failed"; fclose(f); return false; }
-    uint32_t n = 12;
-    if (fwrite(&n, 4, 1, f) != 1) { err = "count write failed"; fclose(f); return false; }
-    for (const auto &t : tris) {
-        float zero[3] = {0, 0, 0};
-        if (fwrite(zero, 4, 3, f) != 3) { err = "normal write failed"; fclose(f); return false; }
-        for (int i = 0; i < 3; ++i) {
-            float v[3] = {verts[t[i]].x, verts[t[i]].y, verts[t[i]].z};
-            if (fwrite(v, 4, 3, f) != 3) { err = "vertex write failed"; fclose(f); return false; }
-        }
-        uint16_t attr = 0;
-        if (fwrite(&attr, 2, 1, f) != 1) { err = "attr write failed"; fclose(f); return false; }
-    }
-    if (fclose(f) != 0) { err = "fclose failed"; return false; }
-    return true;
-}
-
-const char *orca_core_stl_probe(const char *scratch_dir, int *out_facets, float *out_volume) {
+const char *orca_stl_load(const char *path, orca_mesh **out_mesh, orca_mesh_view *out_view) {
     static std::string result;
-    if (!scratch_dir || !scratch_dir[0]) {
-        *out_facets = -1; *out_volume = -1.f;
-        return "OrcaCore: no scratch dir passed";
-    }
-    std::string path = std::string(scratch_dir) + "/orcapad_probe.stl";
-
-    std::string err;
-    if (!write_cube_stl(path.c_str(), err)) {
-        *out_facets = -1; *out_volume = -1.f;
-        result = "OrcaCore: " + err;
-        return result.c_str();
-    }
+    *out_mesh = nullptr;
+    memset(out_view, 0, sizeof(*out_view));
+    if (!path || !path[0]) return "OrcaCore: no path passed";
 
     try {
-        Slic3r::TriangleMesh mesh;
-        if (!mesh.ReadSTLFile(path.c_str())) {
-            *out_facets = -1; *out_volume = -1.f;
-            result = "OrcaCore: STL read FAILED";
-            return result.c_str();
+        orca_mesh *m = new orca_mesh();
+        if (!m->mesh.ReadSTLFile(path)) {
+            delete m;
+            return "OrcaCore: STL read FAILED (bad format?)";
         }
-
-        const auto &its = mesh.its;
-        *out_facets = (int)its.indices.size();
+        const auto &its = m->mesh.its;
         if (its.indices.empty() || its.vertices.empty()) {
-            *out_volume = -1.f;
-            result = "OrcaCore: mesh empty after read";
-            return result.c_str();
+            delete m;
+            return "OrcaCore: mesh empty";
         }
 
-        // Signed volume via divergence theorem over repaired facets.
-        double vol = 0.0;
-        for (const auto &face : its.indices) {
-            const auto &a = its.vertices[face(0)];
-            const auto &b = its.vertices[face(1)];
-            const auto &c = its.vertices[face(2)];
-            vol += (double)a.x() * ((double)b.y() * c.z() - (double)c.y() * b.z())
-                 - (double)a.y() * ((double)b.x() * c.z() - (double)c.x() * b.z())
-                 + (double)a.z() * ((double)b.x() * c.y() - (double)c.x() * b.y());
+        // Engine bbox (z-up).
+        float emin[3] = {1e30f, 1e30f, 1e30f}, emax[3] = {-1e30f, -1e30f, -1e30f};
+        for (const auto &v : its.vertices)
+            for (int i = 0; i < 3; ++i) {
+                float c = v(i);
+                emin[i] = std::min(emin[i], c);
+                emax[i] = std::max(emax[i], c);
+            }
+
+        // Pack viewer-space positions: (x,y,z)e -> (x, z, -y)v, recentred
+        // in x/y(viewer) and bed-anchored (min viewer-y = 0).
+        const float cx = 0.5f * (emin[0] + emax[0]);
+        const float cy = 0.5f * (emin[1] + emax[1]); // engine y -> viewer -z
+        m->positions.reserve(its.vertices.size() * 3);
+        for (const auto &v : its.vertices) {
+            m->positions.push_back(v.x() - cx);
+            m->positions.push_back(v.z());
+            m->positions.push_back(-(v.y() - cy));
         }
-        *out_volume = (float)(vol / 6.0);
-        result = "OrcaCore: STL load+repair ok";
+        m->indices.reserve(its.indices.size() * 3);
+        for (const auto &f : its.indices)
+            for (int i = 0; i < 3; ++i)
+                m->indices.push_back((uint32_t)f(i));
+
+        out_view->positions = m->positions.data();
+        out_view->position_count = (int)its.vertices.size();
+        out_view->indices = m->indices.data();
+        out_view->index_count = (int)m->indices.size();
+        // viewer-space bbox from engine bbox
+        out_view->bbox_min[0] = emin[0] - cx;  out_view->bbox_max[0] = emax[0] - cx;
+        out_view->bbox_min[1] = emin[2];       out_view->bbox_max[1] = emax[2];
+        out_view->bbox_min[2] = -(emax[1] - cy); out_view->bbox_max[2] = -(emin[1] - cy);
+
+        *out_mesh = m;
+        result = "OrcaCore: ok";
         return result.c_str();
     } catch (const std::exception &e) {
-        *out_facets = -1; *out_volume = -1.f;
-        result = std::string("OrcaCore: C++ exception: ") + e.what();
-        return result.c_str();
+        return (result = std::string("OrcaCore: C++ exception: ") + e.what()).c_str();
     } catch (...) {
-        *out_facets = -1; *out_volume = -1.f;
-        result = "OrcaCore: unknown C++ exception";
+        return "OrcaCore: unknown C++ exception";
+    }
+}
+
+void orca_mesh_free(orca_mesh *mesh) { delete mesh; }
+
+const char *orca_slice_report(orca_mesh *m, int levels,
+                              int *out_levels, int *out_mid_islands, double *out_mid_area_mm2) {
+    static std::string result;
+    *out_levels = *out_mid_islands = 0;
+    *out_mid_area_mm2 = 0.0;
+    if (!m) return "OrcaCore: null mesh handle";
+    if (levels < 1) levels = 1;
+
+    try {
+        const auto &its = m->mesh.its;
+        float zmin = 1e30f, zmax = -1e30f;
+        for (const auto &v : its.vertices) {
+            zmin = std::min(zmin, v.z());
+            zmax = std::max(zmax, v.z());
+        }
+        const float first_layer = 0.2f;
+        std::vector<float> zs;
+        zs.reserve((size_t)levels);
+        for (int i = 0; i < levels; ++i) {
+            float t = (float)(i + 1) / (float)(levels + 1); // strictly interior
+            zs.push_back(zmin + first_layer + t * ((zmax - first_layer) - zmin));
+        }
+
+        Slic3r::MeshSlicingParamsEx params; // defaults
+        std::vector<Slic3r::ExPolygons> slices =
+            Slic3r::slice_mesh_ex(its, zs, params);
+
+        *out_levels = (int)slices.size();
+        const size_t mid = slices.size() / 2;
+        *out_mid_islands = (int)slices[mid].size();
+        *out_mid_area_mm2 = Slic3r::area(slices[mid]);
+
+        result = "OrcaCore: slice ok";
         return result.c_str();
+    } catch (const std::exception &e) {
+        return (result = std::string("OrcaCore: C++ exception: ") + e.what()).c_str();
+    } catch (...) {
+        return "OrcaCore: unknown C++ exception";
     }
 }
