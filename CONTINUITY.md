@@ -7,13 +7,14 @@
 - Acceptance (Phase 0): green `xtool dev build`; renders on iPoke at ~60fps
   with orbit/pan/pinch on bed grid + test cube.
 - Next steps:
-  1. Plug in iPoke → `cd ~/OrcaPad && xtool dev > /tmp/orcapad-dev.log 2>&1`
-     (first run registers App ID + provisioning — automatic).
-  2. Verify syslog: `idevicesyslog | grep --line-buffered "OrcaPad\["` — expect
-     `renderer online` + status overlay shows fps.
-  3. Manual launch on phone (xtool launch broken, iOS 17+ issue #44).
-  4. Then Phase 1: libslic3r iOS build (start: CMake toolchain file, minimal
-     dep set, arm64 + simulator slices → xcframework).
+  1. [USER] Visual confirm on iPoke: bed grid + orange cube visible; orbit /
+     pan / pinch work; status chip shows live fps (expect ~60). Then tick
+     the last Phase 0 box.
+  2. Phase 1: libslic3r iOS build — CMake toolchain file, minimal dep set,
+     arm64 + simulator slices → xcframework, Swift↔C++ interop layer in
+     `Engine/`, first on-device slice (cube STL → gcode in Documents).
+  3. Consider `skipLSP: true` decision and Mac collaborator .xcodeproj export
+     (`xtool dev generate-xcode-project`) when Phase 1 C++ enters.
 
 ## DECISIONS
 
@@ -36,6 +37,10 @@
   Meta-files AGENTS/PLANS/CONTINUITY/LESSONS created.
 - [2026-10-02] `xtool dev build` GREEN (3 fix iterations, 0 warnings).
   Committed `P0:` 9bc9586. Phone not connected — install pending.
+- [2026-10-02] Installed on iPoke via `xtool dev` (auto-provisioned). User
+  launched 15:14:13 → `renderer online` at 15:14:14.566 (<600ms), GPU
+  assertion acquired, foregroundRunning, no crash/jetsam through capture
+  window. On-device id: `XTL-C93C0481.ie.duz.OrcaPad`. [TOOL]
 
 ## DISCOVERIES
 
@@ -55,4 +60,7 @@
 
 ## OUTCOMES
 
-- (none yet — nothing installed on device)
+- [2026-10-02] Phase 0 complete (pending visual confirm): OrcaPad builds
+  from Linux, installs on a physical iPhone, Metal pipeline + runtime MSL
+  compile + 60fps render loop verified via syslog. The whole xtool loop
+  (build→sign→install→verify) works for this project.
