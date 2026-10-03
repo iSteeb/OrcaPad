@@ -27,7 +27,7 @@ mkdir -p "$BUILD/gen/libslic3r" "$BUILD/obj" "$OUT/Headers"
 
 CFLAGS=(
     -target "$TARGET" -isysroot "$SDK"
-    -std=c++17 -O2 -Wno-deprecated-declarations
+    -std=c++17 -O2 -DNDEBUG -Wno-deprecated-declarations
     # ORDER MATTERS: shims FIRST so adapter headers (boost/log, boost/nowide,
     # tbb, openssl, occt) win over symlinked real boost headers in gen/.
     -I"$ROOT/Engine/shim" -I"$ROOT/Engine/shim/occt-stub"
@@ -44,7 +44,7 @@ CFLAGS=(
 )
 CONLY_FLAGS=(
     -target "$TARGET" -isysroot "$SDK"
-    -O2 -Wno-deprecated-declarations
+    -O2 -DNDEBUG -Wno-deprecated-declarations
     -include limits.h
     -I"$DEPS" -I"$DEPS/qhull/src" -I"$DEPS/glu-libtess/include"
     -I"$DEPS/libigl" -I"$ROOT/Engine/cache/Orca-deps-libnoise/src"
@@ -113,16 +113,47 @@ needs_build() { # needs_build <src> <obj> — true if recompile required
     return 1                    # NOTE: paths with spaces unsupported (none here)
 }
 
+JOBS="$BUILD/jobs.sh"
+: > "$JOBS"
+PENDING=0
+
 compile_one() { # compile_one <src> <obj> <compiler+flags...>
+    # Phase 1: record the command; execution is parallel (phase 2, below).
     local src="$1" o="$2"; shift 2
     if needs_build "$src" "$o"; then
-        if ! "$@" -MD -MF "$o.d" -c "$src" -o "$o" 2>"$o.err"; then
-            cat "$o.err" >&2; echo "FAILED: $src" >&2; exit 1
-        fi
-        rm -f "$o.err"
-        echo "  cc $(basename "$src")" >&2
+        {
+            printf '%q ' "$@" -MD -MF "$o.d" -c "$src" -o "$o"
+            printf ' 2>%q\n' "$o.err"
+        } >> "$JOBS"
+        PENDING=$((PENDING + 1))
     fi
     echo "$o" >> "$MANIFEST"
+}
+
+run_jobs_parallel() { # phase 2: bounded-parallel compile + hard verification
+    [ "$PENDING" -gt 0 ] || return 0
+    local maxjobs=$(( $(nproc) > 12 ? 12 : $(nproc) ))
+    echo "==> compiling $PENDING files on $maxjobs cores" >&2
+    local p=0
+    while IFS= read -r cmd; do
+        bash -c "$cmd" &
+        p=$((p + 1))
+        if (( p >= maxjobs )); then wait -n; p=$((p - 1)); fi
+    done < "$JOBS"
+    wait
+    # hard verification: every pending .o must exist; every .err must be empty
+    local failed=0 o
+    while IFS= read -r cmd; do
+        o="${cmd##* -o }"; o="${o%% 2>*}"
+        if [ ! -f "$o" ]; then
+            echo "FAILED (no object): ${o}" >&2; head -8 "${o}.err" 2>/dev/null >&2; failed=1
+        elif [ -s "${o}.err" ]; then
+            echo "FAILED: ${o}" >&2; head -8 "${o}.err" >&2; failed=1
+        else
+            rm -f "${o}.err"
+        fi
+    done < "$JOBS"
+    [ "$failed" -eq 0 ] || exit 1
 }
 
 compile() { # compile <srcfile> (C++, extra flags after src)
@@ -270,6 +301,8 @@ compile "$ROOT/Engine/engine-cxx/format_stubs.cpp"
 # our C boundary
 compile "$ROOT/Engine/engine-cxx/boost_filesystem_shim.cpp"
 compile "$ROOT/Engine/engine-cxx/orca_core.cpp"
+
+run_jobs_parallel
 
 # --- 3. archive + xcframework ---
 mapfile -t OBJS < "$MANIFEST"

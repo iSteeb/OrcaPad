@@ -29,12 +29,11 @@ bool store_3mf(const char *, Model *, const DynamicPrintConfig *,
                bool, const ThumbnailData *, bool) {
     orcapad_unsupported("3MF export");
 }
-void delete_object_mesh(ModelObject &) {
-    orcapad_unsupported("3MF mesh cleanup");
-}
-void remove_backup(Model &, bool) {
-    orcapad_unsupported("3MF backup removal");
-}
+// DESTRUCTOR-PATH stubs: must never throw (exception-during-unwind =
+// std::terminate, verified by crash OrcaPad-151846). No-op is CORRECT here:
+// no draco/3mf-managed data exists by construction in this build.
+void delete_object_mesh(ModelObject &) {}
+void remove_backup(Model &, bool) {}
 void delete_temp_file(const std::string &) {
     orcapad_unsupported("3MF temp file cleanup");
 }
@@ -200,8 +199,13 @@ static std::string orcapad_resources_dir;
 void set_resources_dir(const std::string &path) { orcapad_resources_dir = path; }
 const std::string &resources_dir() { return orcapad_resources_dir; }
 
-void save_object_mesh(ModelObject &) {
-    orcapad_unsupported("3MF mesh save");
+// Mirrors the real gate (bbs_3mf.cpp:9017): no-op unless the model opted
+// into project backup (set_need_backup) — which OrcaPad's headless pipeline
+// never does. If something ever enables backup, fail loudly instead.
+void save_object_mesh(ModelObject &object) {
+    if (!object.get_model() || !object.get_model()->is_need_backup()) return;
+    if (object.volumes.empty() || object.instances.empty()) return;
+    orcapad_unsupported("3MF mesh backup");
 }
 
 } // namespace Slic3r
