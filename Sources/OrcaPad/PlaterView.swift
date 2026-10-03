@@ -8,6 +8,9 @@ struct PlaterView: View {
     @State private var engineStatus = "engine: ready (import an STL)"
     @State private var importPresented = false
     @State private var pendingUpload: MeshUpload?
+    @State private var importPath: String?        // sandbox STL awaiting slicing
+    @State private var importName = "model"
+    @State private var slicing = false
 
     var body: some View {
         ZStack(alignment: .topLeading) {
@@ -24,7 +27,7 @@ struct PlaterView: View {
                 Text(engineStatus)
                     .font(.caption2.monospaced())
                     .foregroundStyle(.secondary)
-                    .lineLimit(4)
+                    .lineLimit(6)
             }
             .padding(10)
             .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 10))
@@ -54,11 +57,46 @@ struct PlaterView: View {
                 engineStatus = "import: copy into sandbox failed"
                 return
             }
+            importPath = tmp.path
+            importName = url.lastPathComponent
             let outcome = await Task.detached(priority: .userInitiated) {
                 ImportSupport.process(tmp: tmp, name: url.lastPathComponent)
             }.value
             engineStatus = outcome.status
             pendingUpload = outcome.upload
+        }
+    }
+
+    // MARK: - Slice flow
+
+    private func sliceTapped() {
+        guard let stlPath = importPath, !slicing else { return }
+        slicing = true
+        let name = importName
+        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        let gcodeDir = docs.appendingPathComponent("G-code", isDirectory: true)
+        try? FileManager.default.createDirectory(at: gcodeDir, withIntermediateDirectories: true)
+        let gcodePath = gcodeDir
+            .appendingPathComponent((name as NSString).deletingPathExtension + ".gcode").path
+
+        Task { @MainActor in
+            engineStatus = "\(name): slicing…"
+            let result = await Task.detached(priority: .userInitiated) {
+                EngineSlicer.sliceToGcode(stlPath: stlPath, gcodePath: gcodePath) { pct, msg in
+                    Task { @MainActor in
+                        engineStatus = "\(name): \(pct)% \(msg)"
+                    }
+                }
+            }.value
+            slicing = false
+            switch result {
+            case .failure(let err):
+                engineStatus = "slice FAILED: \(err.message)"
+            case .success(let outcome):
+                let mins = Int(outcome.timeEstimateSeconds / 60)
+                let kb = outcome.gcodeBytes / 1024
+                engineStatus = "\(name): G-code ready\n\(kb) KB · ~\(mins) min print · Files → On My iPhone → OrcaPad"
+            }
         }
     }
 }
@@ -153,8 +191,10 @@ private extension PlaterView {
             ToolbarButton(symbol: "arrow.2.circlepath", label: "Arrange") {
                 // Phase 2: libslic3r arrange
             }
-            ToolbarButton(symbol: "scissors", label: "Slice", disabled: true) {
-                // Phase 3: background slice job
+            ToolbarButton(symbol: "scissors",
+                          label: slicing ? "Slicing" : "Slice",
+                          disabled: importPath == nil || slicing) {
+                sliceTapped()
             }
             ToolbarButton(symbol: "gearshape", label: "Settings") {
                 // Phase 3: generated settings UI

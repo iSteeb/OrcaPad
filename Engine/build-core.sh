@@ -35,6 +35,10 @@ CFLAGS=(
     -I"$DEPS" -I"$DEPS/admesh"
     -I"$DEPS/qhull/src"
     -I"$DEPS/glu-libtess/include"
+    -I"$DEPS/libigl" -I"$ROOT/Engine/cache/Orca-deps-libnoise/src"
+    -I"$DEPS/libnest2d/include"
+    -I"$DEPS/clipper2/Clipper2Lib/include" -I"$DEPS/expat/expat/lib"
+    -I"$DEPS/miniz"
     -I"$ROOT/Engine/engine-cxx"
     -DSLIC3R_APP_KEY='"OrcaSlicer"' -DSLIC3R_APP_NAME='"OrcaSlicer"'
 )
@@ -43,6 +47,10 @@ CONLY_FLAGS=(
     -O2 -Wno-deprecated-declarations
     -include limits.h
     -I"$DEPS" -I"$DEPS/qhull/src" -I"$DEPS/glu-libtess/include"
+    -I"$DEPS/libigl" -I"$ROOT/Engine/cache/Orca-deps-libnoise/src"
+    -I"$DEPS/libnest2d/include"
+    -I"$DEPS/clipper2/Clipper2Lib/include" -I"$DEPS/expat/expat/lib"
+    -I"$DEPS/miniz"
 )
 
 # Host boost/eigen + fetched cereal headers exposed via symlinks (NEVER
@@ -59,6 +67,7 @@ ln -sfn /usr/include/eigen3/Eigen "$BUILD/gen/Eigen"
 ln -sfn /usr/include/eigen3/unsupported "$BUILD/gen/unsupported"
 ln -sfn "$CEREAL" "$BUILD/gen/cereal"
 ln -sfn /usr/include/CGAL "$BUILD/gen/CGAL"
+ln -sfn "$ROOT/Engine/cache/Orca-deps-libnoise/src" "$BUILD/gen/libnoise"
 ln -sfn /usr/include/x86_64-linux-gnu/gmp.h "$BUILD/gen/gmp.h"
 ln -sfn /usr/include/x86_64-linux-gnu/mpfr.h "$BUILD/gen/mpfr.h"
 
@@ -160,10 +169,65 @@ for f in libslic3r.cpp Point.cpp Line.cpp MultiPoint.cpp Polygon.cpp Polyline.cp
          LocalesUtils.cpp TriangleMesh.cpp TriangleMeshSlicer.cpp Format/STL.cpp; do
     extra=()
     case "$f" in
-        LocalesUtils.cpp) extra+=(-include sstream) ;; # upstream relies on transitive include
-        Geometry/VoronoiUtilsCgal.cpp) extra+=(-include boost/multiprecision/gmp.hpp) ;; # CGAL CORE/BigInt needs full gmp_int, not fwd-decl
+        LocalesUtils.cpp) extra+=(-include sstream) ;;
+        Geometry/VoronoiUtilsCgal.cpp) extra+=(-include boost/multiprecision/gmp.hpp) ;;
     esac
     compile "$SRC/libslic3r/$f" "${extra[@]:-}"
+done
+
+# files needing force-includes (transitive-include quirks / CGAL gmp_int)
+compile "$SRC/libslic3r/Feature/FuzzySkin/FuzzySkin.cpp" -include thread
+compile "$SRC/libslic3r/MinimumSpanningTree.cpp"
+compile "$SRC/libslic3r/Triangulation.cpp" -include boost/multiprecision/gmp.hpp
+
+# --- full slicing pipeline (census-verified 2026-10-02) ---
+for f in Model.cpp PrintConfig.cpp PrintBase.cpp Print.cpp PrintApply.cpp \
+         PrintObject.cpp PrintObjectSlice.cpp PrintRegion.cpp \
+         Layer.cpp LayerRegion.cpp PerimeterGenerator.cpp \
+         Surface.cpp SurfaceCollection.cpp Slicing.cpp SlicingAdaptive.cpp \
+         ElephantFootCompensation.cpp Brim.cpp BridgeDetector.cpp EdgeGrid.cpp \
+         MinAreaBoundingBox.cpp MutablePolygon.cpp VariableWidth.cpp \
+         PlaceholderParser.cpp GCodeWriter.cpp GCodeReader.cpp Time.cpp Thread.cpp \
+         Semver.cpp ObjectID.cpp Config.cpp CustomGCode.cpp GCode.cpp Format/OBJ.cpp Format/objparser.cpp Format/AMF.cpp \
+         GCode/WipeTower2.cpp GCode/GCodeProcessor.cpp GCode/ThumbnailData.cpp \
+         GCode/AdaptivePAInterpolator.cpp GCode/AdaptivePAProcessor.cpp \
+         GCode/PchipInterpolatorHelper.cpp GCode/FanMover.cpp \
+         GCode/SmallAreaInfillFlowCompensator.cpp GCode/PrintExtents.cpp \
+         GCode/RetractWhenCrossingPerimeters.cpp GCode/AvoidCrossingPerimeters.cpp \
+         GCode/ConflictChecker.cpp GCode/SeamPlacer.cpp GCode/TimelapsePosPicker.cpp \
+         GCode/CoolingBuffer.cpp GCode/SpiralVase.cpp GCode/PressureEqualizer.cpp \
+         GCode/ToolOrdering.cpp GCode/ToolOrderUtils.cpp GCode/WipeTower.cpp \
+         Algorithm/LineSplit.cpp Algorithm/RegionExpansion.cpp \
+         SLA/IndexedMesh.cpp SVG.cpp \
+         FilamentGroupUtils.cpp ParameterUtils.cpp ShortEdgeCollapse.cpp \
+         IntersectionPoints.cpp FlushVolPredictor.cpp Geometry/Circle.cpp Clipper2Utils.cpp Triangulation.cpp TriangleSetSampling.cpp          FaceDetector.cpp TriangleSelector.cpp BuildVolume.cpp Extruder.cpp SVG.cpp PrincipalComponents2D.cpp MultiMaterialSegmentation.cpp FilamentGroup.cpp ContourZ.cpp Feature/Interlocking/InterlockingGenerator.cpp Feature/Interlocking/VoxelUtils.cpp Feature/FuzzySkin/FuzzySkin.cpp calib.cpp MaterialType.cpp FlushVolCalc.cpp NormalUtils.cpp; do
+    compile "$SRC/libslic3r/$f"
+done
+
+# infills
+for f in Fill.cpp FillBase.cpp FillConcentric.cpp FillConcentricInternal.cpp \
+         FillCrossHatch.cpp FillGyroid.cpp FillHoneycomb.cpp Fill3DHoneycomb.cpp \
+         FillAdaptive.cpp FillLightning.cpp FillLine.cpp FillPlanePath.cpp \
+         FillRectilinear.cpp FillTpmsD.cpp FillTpmsFK.cpp \
+         Lightning/Generator.cpp Lightning/Layer.cpp Lightning/DistanceField.cpp \
+         Lightning/TreeNode.cpp; do
+    compile "$SRC/libslic3r/Fill/$f"
+done
+
+# supports
+for f in SupportCommon.cpp SupportMaterial.cpp SupportSpotsGenerator.cpp \
+         TreeSupport.cpp TreeSupport3D.cpp TreeModelVolumes.cpp; do
+    compile "$SRC/libslic3r/Support/$f"
+done
+
+# Arachne wall generator
+for f in WallToolPaths.cpp SkeletalTrapezoidation.cpp SkeletalTrapezoidationGraph.cpp \
+         utils/ExtrusionLine.cpp utils/PolylineStitcher.cpp utils/SquareGrid.cpp \
+         BeadingStrategy/BeadingStrategy.cpp BeadingStrategy/BeadingStrategyFactory.cpp \
+         BeadingStrategy/DistributedBeadingStrategy.cpp BeadingStrategy/LimitedBeadingStrategy.cpp \
+         BeadingStrategy/OuterWallInsetBeadingStrategy.cpp BeadingStrategy/RedistributeBeadingStrategy.cpp \
+         BeadingStrategy/WideningBeadingStrategy.cpp; do
+    compile "$SRC/libslic3r/Arachne/$f"
 done
 
 # vendored glu-libtess (triangulation backend for Tesselate.cpp)
@@ -174,7 +238,37 @@ for f in dict geom memalloc mesh normal priorityq render sweep tess tessmono; do
     compile_c "$DEPS/glu-libtess/src/$f.c"
 done
 
+# vendored semver (version parsing)
+compile_c "$DEPS/semver/semver.c"
+
+# vendored clipper1 Z-variant (VoronoiUtils / MM segmentation)
+compile "$DEPS/clipper/clipper_z.cpp"
+
+# vendored clipper2 (Clipper2Utils / Fill paths)
+for f in clipper.engine clipper.offset clipper.rectclip clipper.minkowski; do
+    [ -f "$DEPS/clipper2/Clipper2Lib/src/$f.cpp" ] && compile "$DEPS/clipper2/Clipper2Lib/src/$f.cpp"
+done
+
+# vendored expat (XML for AMF/3mf metadata)
+for f in xmlparse xmltok xmlrole; do
+    compile_c "$DEPS/expat/$f.c"
+done
+
+# vendored miniz (zip I/O)
+compile_c "$DEPS/miniz/miniz.c"
+
+# libnoise (fuzzy skin) — full source set
+for f in "$ROOT"/Engine/cache/Orca-deps-libnoise/src/*.cpp \
+         "$ROOT"/Engine/cache/Orca-deps-libnoise/src/model/*.cpp \
+         "$ROOT"/Engine/cache/Orca-deps-libnoise/src/module/*.cpp; do
+    [ -f "$f" ] && compile "$f"
+done
+
+# adapter stubs (3MF/STEP/thumbnails — loud throws, upstream untouched)
+compile "$ROOT/Engine/engine-cxx/format_stubs.cpp"
+
 # our C boundary
+compile "$ROOT/Engine/engine-cxx/boost_filesystem_shim.cpp"
 compile "$ROOT/Engine/engine-cxx/orca_core.cpp"
 
 # --- 3. archive + xcframework ---

@@ -38,3 +38,15 @@ const char *orca_slice_report(orca_mesh *mesh, int levels,
 }
 #endif
 #endif // __cplusplus
+
+/// Progress callback: percent (0-100, engine-reported), message, user ctx.
+typedef void (*orca_progress_fn)(int percent, const char *message, void *ctx);
+
+/// Full slice: STL in → G-code file out, through OrcaSlicer's real pipeline
+/// (Model → Print::apply → Print::process → export_gcode) with default
+/// print settings. Blocking — call off the main thread.
+/// out_time_estimate_s: total estimated print time (normal mode).
+/// out_gcode_bytes: size of the written file.
+const char *orca_slice_to_gcode(const char *stl_path, const char *gcode_path,
+                                orca_progress_fn progress, void *ctx,
+                                double *out_time_estimate_s, long *out_gcode_bytes);

@@ -133,3 +133,58 @@ const char *orca_slice_report(orca_mesh *m, int levels,
         return "OrcaCore: unknown C++ exception";
     }
 }
+
+// --- full slice pipeline ------------------------------------------------
+
+#include "libslic3r/GCode/GCodeProcessor.hpp"
+#include "libslic3r/Model.hpp"
+#include "libslic3r/Print.hpp"
+#include "libslic3r/PrintConfig.hpp"
+
+#include <sys/stat.h>
+
+const char *orca_slice_to_gcode(const char *stl_path, const char *gcode_path,
+                                orca_progress_fn progress, void *ctx,
+                                double *out_time_estimate_s, long *out_gcode_bytes) {
+    static std::string result;
+    if (out_time_estimate_s) *out_time_estimate_s = -1.0;
+    if (out_gcode_bytes) *out_gcode_bytes = -1;
+    if (!stl_path || !gcode_path) return "OrcaCore: null path";
+
+    try {
+        if (progress) progress(1, "loading model", ctx);
+        Slic3r::Model model = Slic3r::Model::read_from_file(stl_path);
+
+        Slic3r::DynamicPrintConfig config = Slic3r::DynamicPrintConfig::full_print_config();
+
+        if (progress) progress(2, "applying config", ctx);
+        Slic3r::Print print;
+        print.set_status_callback([progress, ctx](const Slic3r::PrintBase::SlicingStatus &s) {
+            if (progress) progress(s.percent, s.text.c_str(), ctx);
+        });
+        print.apply(model, std::move(config));
+
+        if (progress) progress(3, "slicing", ctx);
+        print.process(); // status callback drives 0-100 through the pipeline
+
+        if (progress) progress(98, "exporting gcode", ctx);
+        Slic3r::GCodeProcessorResult processor_result;
+        std::string final_path = print.export_gcode(gcode_path, &processor_result, nullptr);
+
+        struct stat st;
+        if (out_gcode_bytes) {
+            *out_gcode_bytes = (stat(final_path.c_str(), &st) == 0) ? (long)st.st_size : -1;
+        }
+        if (out_time_estimate_s && !processor_result.print_statistics.modes.empty()) {
+            *out_time_estimate_s = processor_result.print_statistics.modes.front().time;
+        }
+
+        if (progress) progress(100, "done", ctx);
+        result = "OrcaCore: slice ok";
+        return result.c_str();
+    } catch (const std::exception &e) {
+        return (result = std::string("OrcaCore: C++ exception: ") + e.what()).c_str();
+    } catch (...) {
+        return "OrcaCore: unknown C++ exception";
+    }
+}

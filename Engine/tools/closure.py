@@ -76,8 +76,8 @@ for m in members:
         if "(__TEXT,__text)" not in line:
             continue
         sym = line.split()[-1]
-        if "weak" in line:
-            continue
+        if "weak" in line or "non-external" in line:
+            continue  # coalesced at link / TU-local
         if sym.startswith("___clang_call_terminate") or sym.startswith("_OUTLINED_FUNCTION"):
             continue  # per-TU locals
         if sym.startswith("ltmp") or ".cold." in sym:
