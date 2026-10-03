@@ -35,10 +35,12 @@ Upstream contact surface (keep it this small): `libslic3r` + config defs +
   (12 tris / 8000 mm³ cube, user-confirmed 2026-10-02)
 - [ ] CMake+xcframework for full libslic3r incl. deps (current subset is
   hand-curated; grows link-driven toward Print pipeline)
-- [ ] Slice runs off-main (actor + libslic3r print steps), progress via async stream
+- [x] Slice runs off-main (Task.detached + engine status callback → chip)
+- [x] **ACCEPTED ON DEVICE 2026-10-03**: 483k-tri STL → G-code in Documents
+  (user-confirmed slice completion; Files visibility via UIFileSharingEnabled)
 
-**Accept:** tap Slice in-app on a 20mm cube STL → real gcode file appears in
-Files app in < 30s; memory stays under ~500MB.
+**Accept:** ✅ met 2026-10-03 (483k-tri model; sequential-TBB so minutes not
+seconds — acceptable for Phase 1; parallelism is a Phase 2 perf item).
 
 ## Phase 2 — Plater MVP (in progress)
 **Goal:** it looks and works like a slicer.

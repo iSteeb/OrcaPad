@@ -6,12 +6,14 @@
   scratch (SwiftUI + Metal). See PLANS.md for phases.
 - Acceptance (Phase 1, this push): status chip shows
   `OrcaCore: STL load+repair ok · 12 tris · 8000 mm³` on iPoke.
-- Next steps:
-  1. Next session: full G-code pipeline push (dep map below is the battle
-     plan): Model.cpp + Format/OBJ + GCode family; shims: tbb pipeline trio,
-     nowide/iostream, beast base64; stub TU: load_3mf/load_step/load_amf.
-  2. Then PrintConfig/Print/PrintObject chain → first real slice → Files.
-  3. P2 backlog: object list UI, multi-instance, gizmos, real arrange.
+- Next steps (Phase 2):
+  1. Gizmos: move/rotate/scale via touch (modal toolbar), lay-flat
+     (engine Orient.cpp — add+link), engine arrange (Arrange.cpp +
+     ModelArrange.cpp; needs libnest2d backend objs verified).
+  2. Object list UI; multi-instance; delete/duplicate; picking (ray-cast).
+  3. Real oneTBB for parallel slicing (perf); async slice progress already
+     wired.
+  4. Desktop-interop validation: user transfers .gcode to desktop Orca.
 
 ## G-code pipeline dep map (static analysis 2026-10-02) [CODE]
 
@@ -88,6 +90,14 @@
 - On-device bundle id `XTL-C93C0481.ie.duz.OrcaPad`; launch manually only.
 
 ## OUTCOMES
+
+- [2026-10-03] **PHASE 1 COMPLETE — FULL SLICE ON DEVICE**: user's 483,772-tri
+  STL sliced end-to-end (admesh → slicing → Arachne perimeters → infills →
+  supports → GCodeProcessor → .gcode in Documents). Zero crashes in final
+  build. G-code visibility in Files fixed via UIFileSharingEnabled (`99b048a`).
+  Desktop-parity: engine built with -DNDEBUG (assert semantics identical to
+  desktop Release). Build tooling: parallel engine builds (20min→70s),
+  crash-diagnosis chain (.ips→frame→binary-string extraction) proven 3×.
 
 - [2026-10-02] Phase 0 complete: Linux→iPhone loop + Metal + interop proven.
 - [2026-10-02] Phase 1 gate complete: engine subset runs on device (STL
