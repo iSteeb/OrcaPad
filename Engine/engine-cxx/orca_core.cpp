@@ -156,6 +156,13 @@ const char *orca_slice_to_gcode(const char *stl_path, const char *gcode_path,
         Slic3r::Model model = Slic3r::Model::read_from_file(stl_path);
 
         Slic3r::DynamicPrintConfig config = Slic3r::DynamicPrintConfig::full_print_config();
+        // OrcaPad has no preset bundles yet (Phase 3); raw defaults carry
+        // physical values the desktop never emits because presets always
+        // override them. filament_density = 0 in the exported gcode
+        // SEGFAULTS desktop OrcaSlicer's gcode viewer (division by zero in
+        // filament stats — proven by mutation test on a desktop-sliced
+        // file, 2026-10-03). Generic-PLA overlay until presets land.
+        config.set_key_value("filament_density", new Slic3r::ConfigOptionFloats{1.24});
 
         if (progress) progress(2, "applying config", ctx);
         Slic3r::Print print;
@@ -163,6 +170,12 @@ const char *orca_slice_to_gcode(const char *stl_path, const char *gcode_path,
             if (progress) progress(s.percent, s.text.c_str(), ctx);
         });
         print.apply(model, std::move(config));
+        // Desktop GUI derives this from the preset vendor
+        // (BackgroundSlicingProcess.cpp:199); the upstream member ships
+        // uninitialized and libslic3r never assigns it. OrcaPad slices
+        // with generic-printer settings — never BBL. An accidentally-true
+        // value emits a Bambu-flavored gcode with empty printer identity.
+        print.is_BBL_printer() = false;
 
         if (progress) progress(3, "slicing", ctx);
         print.process(); // status callback drives 0-100 through the pipeline
