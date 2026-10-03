@@ -115,7 +115,9 @@ needs_build() { # needs_build <src> <obj> — true if recompile required
 }
 
 JOBS="$BUILD/jobs.sh"
+PENDING_OBJS="$BUILD/pending-objs.txt"
 : > "$JOBS"
+: > "$PENDING_OBJS"
 PENDING=0
 
 compile_one() { # compile_one <src> <obj> <compiler+flags...>
@@ -126,6 +128,7 @@ compile_one() { # compile_one <src> <obj> <compiler+flags...>
             printf '%q ' "$@" -MD -MF "$o.d" -c "$src" -o "$o"
             printf ' 2>%q\n' "$o.err"
         } >> "$JOBS"
+        echo "$o" >> "$PENDING_OBJS"
         PENDING=$((PENDING + 1))
     fi
     echo "$o" >> "$MANIFEST"
@@ -147,17 +150,21 @@ run_jobs_parallel() { # phase 2: bounded-parallel compile + hard verification
     done < "$JOBS"
     wait
     # hard verification: every pending .o must exist; every .err must be empty
+    # 2026-10-03: parsing "-o <path>" back out of the %q-quoted job line left a
+    # trailing space ("path.o  2>…"), so [ -f "$o" ] failed on GOOD builds —
+    # phantom "FAILED (no object)" on freshly compiled objects. Object paths
+    # are recorded directly at enqueue time now; zero string surgery.
     local failed=0 o
-    while IFS= read -r cmd; do
-        o="${cmd##* -o }"; o="${o%% 2>*}"
+    while IFS= read -r o; do
+        [ -n "$o" ] || continue
         if [ ! -f "$o" ]; then
             echo "FAILED (no object): ${o}" >&2; head -8 "${o}.err" 2>/dev/null >&2; failed=1
-        elif [ -s "${o}.err" ]; then
-            echo "FAILED: ${o}" >&2; head -8 "${o}.err" >&2; failed=1
+        elif grep -q ' error:' "${o}.err" 2>/dev/null; then
+            echo "FAILED (compiler error): ${o}" >&2; grep -m8 ' error:' "${o}.err" >&2; failed=1
         else
             rm -f "${o}.err"
         fi
-    done < "$JOBS"
+    done < "$PENDING_OBJS"
     [ "$failed" -eq 0 ] || exit 1
 }
 
