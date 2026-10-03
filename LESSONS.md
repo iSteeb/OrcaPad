@@ -17,7 +17,20 @@ in ~/xtool-cheatsheet.md — link, don't duplicate.)
   Engine/engine-cxx/. If an adapter becomes load-bearing, document it in
   PLANS.md's risk register.
 
-## Lessons learned (2026-10-02, engine bring-up night)
+## Lessons learned (2026-10-03, engine bring-up night)
+
+### Build-pressure & session discipline (2026-10-03 evening)
+- **12 parallel clang++ jobs froze the box** (14 cores / 14GiB RAM, heavy
+  CGAL/Eigen TUs → swap death; a pi session died mid-build). Cap is now
+  ORCAPAD_JOBS (default 6) + nice 15 in build-core.sh. Don't raise it for
+  interactive sessions.
+- **Never invent script flags.** `build-core.sh --dry-run` doesn't exist —
+  the invocation ran a REAL build with output discarded. If you need a
+  dry-run, add one; otherwise read the script.
+- **Verify state, don't forensically reconstruct it.** When two builds'
+  artifacts interleave, single-run logs mislead (a FAILED(no object) line
+  for an .o that exists seconds later). Ground truth: rerun the script —
+  mtime incremental + archive member guard + strings on the artifact.
 
 ### Process discipline — the expensive ones
 

@@ -77,6 +77,7 @@ ln -sfn /usr/include/x86_64-linux-gnu/mpfr.h "$BUILD/gen/mpfr.h"
 # mtime (and thus incremental rebuilds) stay stable across no-op runs.
 for vpath in "$BUILD/gen/libslic3r_version.h" "$BUILD/gen/libslic3r/libslic3r_version.h"; do
     sed -e 's/@SLIC3R_VERSION@/2.4.2/g' \
+        -e 's/@SoftFever_VERSION@/2.4.2/g' \
         -e 's/@SLIC3R_BUILD_ID@/OrcaPad-2.4.2/g' \
         -e 's/@SLIC3R_APP_KEY@/OrcaSlicer/g' \
         -e 's/@SLIC3R_APP_NAME@/OrcaSlicer/g' \
@@ -132,11 +133,15 @@ compile_one() { # compile_one <src> <obj> <compiler+flags...>
 
 run_jobs_parallel() { # phase 2: bounded-parallel compile + hard verification
     [ "$PENDING" -gt 0 ] || return 0
-    local maxjobs=$(( $(nproc) > 12 ? 12 : $(nproc) ))
-    echo "==> compiling $PENDING files on $maxjobs cores" >&2
+    # 2026-10-03: 12 parallel clang++ jobs on this 14-core/14GiB box OOMed
+    # into swap during the CGAL/Eigen-heavy rebuild and froze the machine
+    # (a pi session died mid-build). Keep concurrency low + nice the jobs;
+    # override for unattended runs with ORCAPAD_JOBS=N.
+    local maxjobs="${ORCAPAD_JOBS:-6}"
+    echo "==> compiling $PENDING files, $maxjobs parallel (niced)" >&2
     local p=0
     while IFS= read -r cmd; do
-        bash -c "$cmd" &
+        nice -n 15 bash -c "$cmd" &
         p=$((p + 1))
         if (( p >= maxjobs )); then wait -n; p=$((p - 1)); fi
     done < "$JOBS"
