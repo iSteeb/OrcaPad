@@ -54,6 +54,20 @@
 
 ## PROGRESS
 
+- [2026-10-03 late] PLATER MVP IMPLEMENTED (build green, NOT yet device-tested —
+  phone away): engine plater API (objects/instances/transforms/ensure-on-bed/
+  plater-slicing; anchors = matrix*pivot so Swift renders T·Ry·S); Swift
+  EnginePlater (locked, @unchecked Sendable); PlaterView rebuilt on plater
+  state (object list sheet, selection HUD ±45/±15 rotate, copy/del instance);
+  Renderer multi-object×instance draws + Möller–Trumbore picking + bed-plane
+  move gesture. Device test pending: import→select→move→rotate→copy→slice.
+- [2026-10-03 eve] Interop fixes: producer header, filament_density 1.24,
+  nozzle_type brass (mutation-in-place, not type-swap), is_BBL_printer=false.
+  Desktop crash root causes all found via mutation tests + gdb-attach:
+  density=0 AND empty nozzle_type both segfault desktop viewer
+  (update_slice_warnings OOB). UNCONFIRMED: on-device slice failure AFTER
+  fixes (user-reported; no crash .ips — engine returned error string; need
+  syslog when phone returns).
 - [2026-10-03 eve] Interop fix landed: header_slic3r_generated() now returns
   `OrcaSlicer 2.4.2` (upstream-identical producer marker; desktop
   GCodeProcessor refuses unrecognized producers). Build pressure fixed:

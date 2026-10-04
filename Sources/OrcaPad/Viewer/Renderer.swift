@@ -2,7 +2,25 @@ import MetalKit
 import os
 import simd
 
+/// One instance to draw: which instance, its model matrix, selection state.
+struct InstanceDraw {
+    let instanceID: Int
+    let model: simd_float4x4
+    let selected: Bool
+}
+
+/// A mesh upload for one plater object (viewer-space, bed-anchored, recentred
+/// — expandFlat output). Structural changes only: import / delete.
+struct SceneObjectUpload {
+    let objectID: Int
+    let verts: [VertexPNC]
+    let idx: [UInt32]
+    let bboxMin: SIMD3<Float>
+    let bboxMax: SIMD3<Float>
+}
+
 /// Owns all Metal state and draws one frame per display-link tick.
+/// Scene = bed grid + N objects × M instances (per-instance model matrices).
 /// @MainActor: MTKView is main-actor isolated in the SDK; its delegate is
 /// invoked on the main thread, so the conformance is `@preconcurrency`.
 @MainActor
@@ -24,12 +42,26 @@ final class Renderer: NSObject, MTKViewDelegate {
     private var linePipeline: MTLRenderPipelineState!
     private var depthState: MTLDepthStencilState!
 
-    // Scene buffers — "object" starts as the test cube, replaced on import.
-    private var objectVB: MTLBuffer!
-    private var objectIB: MTLBuffer!
-    private var objectIndexCount: Int = 0
+    // Bed grid
     private var gridVB: MTLBuffer!
     private var gridVertexCount: Int = 0
+
+    // Scene objects (GPU buffers + CPU picking copies + instance matrices)
+    private struct RenderObject {
+        let objectID: Int
+        let vb: MTLBuffer
+        let ib: MTLBuffer
+        let indexCount: Int
+        let bboxMin: SIMD3<Float>   // object-local (packed) space
+        let bboxMax: SIMD3<Float>
+        let pickPositions: [SIMD3<Float>]  // packed viewer-space (pre-instance)
+        let pickIndices: [UInt32]
+        var instances: [InstanceDraw]
+    }
+    private var objects: [RenderObject] = []
+
+    private static let objectColor = SIMD4<Float>(0.96, 0.52, 0.11, 1)
+    private static let selectedColor = SIMD4<Float>(0.16, 0.80, 0.95, 1)
 
     // Frame uniforms
     private var cubeUniforms = CubeUniforms(
@@ -156,20 +188,6 @@ final class Renderer: NSObject, MTKViewDelegate {
     // MARK: Scene setup
 
     private func buildScene() {
-        // Calibration cube with its transform BAKED IN (20mm, sitting on bed):
-        // the draw path uses an identity model matrix for all objects.
-        let (unitVerts, cubeIdx) = Geometry.unitCube()
-        let cubeVerts = unitVerts.map {
-            VertexPNC(position: $0.position * 20 + SIMD3<Float>(0, 10, 0), normal: $0.normal)
-        }
-        objectIndexCount = cubeIdx.count
-        objectVB = device.makeBuffer(
-            bytes: cubeVerts, length: MemoryLayout<VertexPNC>.stride * cubeVerts.count,
-            options: .storageModeShared)
-        objectIB = device.makeBuffer(
-            bytes: cubeIdx, length: MemoryLayout<UInt32>.stride * cubeIdx.count,
-            options: .storageModeShared)
-
         let grid = Geometry.bedGrid()
         gridVertexCount = grid.count
         gridVB = device.makeBuffer(
@@ -177,29 +195,200 @@ final class Renderer: NSObject, MTKViewDelegate {
             options: .storageModeShared)
     }
 
-    /// Replaces the object mesh (imported STL) and frames the camera on it.
-    /// Vertices are already viewer-space, bed-anchored, recentred.
-    func uploadMesh(_ upload: MeshUpload) {
-        guard upload.verts.count > 0, upload.idx.count > 0 else {
-            logger.error("uploadMesh: empty mesh ignored")
+    // MARK: Scene sync (called from the SwiftUI layer on the main actor)
+
+    /// Full structural replace: object meshes for everything on the plate.
+    /// Instance lists arrive separately via setInstances (cheap path).
+    func setObjectMeshes(_ uploads: [SceneObjectUpload]) {
+        var rebuilt: [RenderObject] = []
+        for up in uploads {
+            guard up.verts.count > 0, up.idx.count > 0 else {
+                logger.error("setObjectMeshes: empty mesh for object \(up.objectID) ignored")
+                continue
+            }
+            let old = objects.first { $0.objectID == up.objectID }
+            let vb = device.makeBuffer(
+                bytes: up.verts, length: MemoryLayout<VertexPNC>.stride * up.verts.count,
+                options: .storageModeShared)
+            let ib = device.makeBuffer(
+                bytes: up.idx, length: MemoryLayout<UInt32>.stride * up.idx.count,
+                options: .storageModeShared)
+            // CPU picking copy: positions from the expanded flat verts
+            // (3 per triangle — indexed by idx 0,1,2,… per tri).
+            var positions = [SIMD3<Float>]()
+            positions.reserveCapacity(up.verts.count)
+            for v in up.verts { positions.append(v.position) }
+            rebuilt.append(RenderObject(
+                objectID: up.objectID,
+                vb: vb!, ib: ib!,
+                indexCount: up.idx.count,
+                bboxMin: up.bboxMin, bboxMax: up.bboxMax,
+                pickPositions: positions,
+                pickIndices: up.idx,
+                instances: old?.instances ?? []))
+        }
+        objects = rebuilt
+        let meshCount = objects.count
+        logger.notice("scene meshes: \(meshCount) object(s)")
+    }
+
+    /// Cheap path: per-object instance matrices + selection flags.
+    func setInstances(objectID: Int, _ list: [InstanceDraw]) {
+        guard let i = objects.firstIndex(where: { $0.objectID == objectID }) else {
+            logger.error("setInstances: unknown object \(objectID)")
             return
         }
-        objectVB = device.makeBuffer(
-            bytes: upload.verts, length: MemoryLayout<VertexPNC>.stride * upload.verts.count,
-            options: .storageModeShared)
-        objectIB = device.makeBuffer(
-            bytes: upload.idx, length: MemoryLayout<UInt32>.stride * upload.idx.count,
-            options: .storageModeShared)
-        objectIndexCount = upload.idx.count
+        objects[i].instances = list
+        let objs = self.objects
+        selectedInstanceIDs = objs.flatMap { obj in
+            obj.instances.filter { $0.selected }
+                .map { (objectID: obj.objectID, instanceID: $0.instanceID) }
+        }
+    }
 
-        // Frame the camera on the new object.
-        let size = upload.bboxMax - upload.bboxMin
+    /// Instances currently flagged selected (for the move-gesture hit test).
+    private(set) var selectedInstanceIDs: [(objectID: Int, instanceID: Int)] = []
+
+    /// Frames the camera on the combined scene bbox (call after import).
+    func frameScene() {
+        var bbMin = SIMD3<Float>(repeating: .infinity)
+        var bbMax = SIMD3<Float>(repeating: -.infinity)
+        var any = false
+        for obj in objects {
+            for inst in obj.instances {
+                let m = inst.model
+                for c in [obj.bboxMin,
+                          SIMD3(obj.bboxMax.x, obj.bboxMin.y, obj.bboxMin.z),
+                          SIMD3(obj.bboxMin.x, obj.bboxMax.y, obj.bboxMin.z),
+                          SIMD3(obj.bboxMin.x, obj.bboxMin.y, obj.bboxMax.z),
+                          SIMD3(obj.bboxMax.x, obj.bboxMax.y, obj.bboxMin.z),
+                          SIMD3(obj.bboxMax.x, obj.bboxMin.y, obj.bboxMax.z),
+                          SIMD3(obj.bboxMin.x, obj.bboxMax.y, obj.bboxMax.z),
+                          obj.bboxMax] {
+                    let w = SIMD3((m * SIMD4(c.x, c.y, c.z, 1)).x,
+                                 (m * SIMD4(c.x, c.y, c.z, 1)).y,
+                                 (m * SIMD4(c.x, c.y, c.z, 1)).z)
+                    bbMin = simd_min(bbMin, w)
+                    bbMax = simd_max(bbMax, w)
+                    any = true
+                }
+            }
+        }
+        guard any else { return }
+        let size = bbMax - bbMin
         let maxDim = max(size.x, max(size.y, size.z))
-        camera.target = SIMD3<Float>(0, size.y * 0.45, 0)
+        camera.target = (bbMin + bbMax) * 0.5 * SIMD3(1, 0.9, 1)
         camera.distance = min(max(maxDim * 2.6, 110), 1400)
         camera.pitch = 0.42
         camera.yaw = -0.65
-        logger.notice("mesh uploaded: \(upload.idx.count / 3) tris")
+    }
+
+    // MARK: Picking / hit-testing (main thread, called from gestures)
+
+    /// Screen point → world-space ray. `point` is in UIKit coordinates of
+    /// the MTKView's coordinate space.
+    func screenRay(at point: CGPoint, in view: MTKView) -> (origin: SIMD3<Float>, dir: SIMD3<Float>) {
+        let size = view.drawableSize
+        let ndcX = Float(point.x / max(size.width, 1)) * 2 - 1
+        let ndcY = 1 - Float(point.y / max(size.height, 1)) * 2
+        let aspect = Float(size.width / max(size.height, 1))
+        let invVP = (camera.projection(aspect: aspect) * camera.viewMatrix).inverse
+        let pn4 = invVP * SIMD4(ndcX, ndcY, -1, 1)
+        let pf4 = invVP * SIMD4(ndcX, ndcY, 1, 1)
+        let pn = SIMD3(pn4.x, pn4.y, pn4.z) / pn4.w
+        let pf = SIMD3(pf4.x, pf4.y, pf4.z) / pf4.w
+        return (pn, simd_normalize(pf - pn))
+    }
+
+    /// Ray ∩ bed plane (y = 0). Nil when the ray runs parallel/away.
+    func bedPlaneHit(at point: CGPoint, in view: MTKView) -> SIMD3<Float>? {
+        let ray = screenRay(at: point, in: view)
+        guard abs(ray.dir.y) > 1e-6 else { return nil }
+        let t = -ray.origin.y / ray.dir.y
+        guard t > 0 else { return nil }
+        return ray.origin + ray.dir * t
+    }
+
+    /// Full pick: nearest instance under the screen point.
+    /// AABB pre-test per instance, then exact ray-triangle (Möller–Trumbore).
+    func pickInstance(at point: CGPoint, in view: MTKView) -> (objectID: Int, instanceID: Int)? {
+        let ray = screenRay(at: point, in: view)
+        var best: (objectID: Int, instanceID: Int, t: Float)?
+        for obj in objects {
+            for inst in obj.instances {
+                guard let tHit = rayCastObject(ray, object: obj, model: inst.model) else { continue }
+                if best == nil || tHit < best!.t {
+                    best = (obj.objectID, inst.instanceID, tHit)
+                }
+            }
+        }
+        guard let b = best else { return nil }
+        return (b.objectID, b.instanceID)
+    }
+
+    /// Ray vs one instance: world-space AABB pre-test, then exact test in
+    /// object space (ray transformed by the inverse model matrix).
+    private func rayCastObject(_ ray: (origin: SIMD3<Float>, dir: SIMD3<Float>),
+                               object: RenderObject, model: simd_float4x4) -> Float? {
+        // AABB in world space (transform 8 corners of the packed bbox).
+        var bbMin = SIMD3<Float>(repeating: .infinity)
+        var bbMax = SIMD3<Float>(repeating: -.infinity)
+        for sx in [object.bboxMin.x, object.bboxMax.x] {
+            for sy in [object.bboxMin.y, object.bboxMax.y] {
+                for sz in [object.bboxMin.z, object.bboxMax.z] {
+                    let w = SIMD3((model * SIMD4(sx, sy, sz, 1)).x,
+                                 (model * SIMD4(sx, sy, sz, 1)).y,
+                                 (model * SIMD4(sx, sy, sz, 1)).z)
+                    bbMin = simd_min(bbMin, w)
+                    bbMax = simd_max(bbMax, w)
+                }
+            }
+        }
+        // Slab test.
+        let inv = 1 / simd_normalize(ray.dir)
+        let t0 = (bbMin - ray.origin) * inv
+        let t1 = (bbMax - ray.origin) * inv
+        let tmin = simd_max(simd_max(simd_min(t0, t1).x, simd_min(t0, t1).y), simd_min(t0, t1).z)
+        let tmax = simd_min(simd_min(simd_max(t0, t1).x, simd_max(t0, t1).y), simd_max(t0, t1).z)
+        guard tmax >= max(tmin, 0) else { return nil }
+
+        // Exact: transform ray into object space.
+        let invModel = model.inverse
+        let ro4 = invModel * SIMD4(ray.origin.x, ray.origin.y, ray.origin.z, 1)
+        let near4 = invModel * SIMD4((ray.origin + ray.dir).x, (ray.origin + ray.dir).y, (ray.origin + ray.dir).z, 1)
+        let ro = SIMD3(ro4.x, ro4.y, ro4.z) / ro4.w
+        let rd = simd_normalize(SIMD3(near4.x, near4.y, near4.z) / near4.w - ro)
+
+        let p = object.pickPositions
+        let idx = object.pickIndices
+        var bestT: Float? = nil
+        var t = 0, i0 = 0, i1 = 0, i2 = 0
+        let triCount = idx.count / 3
+        let e = Float.ulpOfOne
+        while t < triCount {
+            i0 = Int(idx[t * 3]); i1 = Int(idx[t * 3 + 1]); i2 = Int(idx[t * 3 + 2])
+            let a = p[i0], b = p[i1], c = p[i2]
+            let ab = b - a, ac = c - a
+            let pvec = simd_cross(rd, ac)
+            let det = simd_dot(ab, pvec)
+            if abs(det) > e {
+                let invDet = 1 / det
+                let tvec = ro - a
+                let u = simd_dot(tvec, pvec) * invDet
+                if u >= 0 && u <= 1 {
+                    let qvec = simd_cross(tvec, ab)
+                    let v = simd_dot(rd, qvec) * invDet
+                    if v >= 0 && u + v <= 1 {
+                        let dist = simd_dot(ac, qvec) * invDet
+                        if dist > 0.01 && (bestT == nil || dist < bestT!) {
+                            bestT = dist
+                        }
+                    }
+                }
+            }
+            t += 1
+        }
+        return bestT
     }
 
     // MARK: MTKViewDelegate (invoked on the main thread)
@@ -232,22 +421,28 @@ final class Renderer: NSObject, MTKViewDelegate {
         encoder.drawPrimitives(type: .line, vertexStart: 0, vertexCount: gridVertexCount)
         encoder.popDebugGroup()
 
-        // Object: identity model — uploaded vertices are already
-        // viewer-space, bed-anchored, recentred (cube transform is baked in).
-        let model = Math.identity()
-        cubeUniforms.mvp = viewProj * model
-        cubeUniforms.model = model
-        encoder.pushDebugGroup("object")
+        // Objects × instances — uploaded vertices are viewer-space, recentred
+        // (identity model base); each instance applies its own transform.
+        encoder.pushDebugGroup("objects")
         encoder.setRenderPipelineState(litPipeline)
         encoder.setDepthStencilState(depthState)
         encoder.setCullMode(.none)
-        encoder.setVertexBuffer(objectVB, offset: 0, index: 0)
-        var cu = cubeUniforms
-        encoder.setVertexBytes(&cu, length: MemoryLayout<CubeUniforms>.stride, index: 1)
-        encoder.setFragmentBytes(&cu, length: MemoryLayout<CubeUniforms>.stride, index: 1)
-        encoder.drawIndexedPrimitives(
-            type: .triangle, indexCount: objectIndexCount, indexType: .uint32,
-            indexBuffer: objectIB, indexBufferOffset: 0, instanceCount: 1)
+        for obj in objects {
+            guard obj.indexCount > 0, !obj.instances.isEmpty else { continue }
+            encoder.setVertexBuffer(obj.vb, offset: 0, index: 0)
+            for inst in obj.instances {
+                let model = inst.model
+                cubeUniforms.mvp = viewProj * model
+                cubeUniforms.model = model
+                cubeUniforms.color = inst.selected ? Renderer.selectedColor : Renderer.objectColor
+                var cu = cubeUniforms
+                encoder.setVertexBytes(&cu, length: MemoryLayout<CubeUniforms>.stride, index: 1)
+                encoder.setFragmentBytes(&cu, length: MemoryLayout<CubeUniforms>.stride, index: 1)
+                encoder.drawIndexedPrimitives(
+                    type: .triangle, indexCount: obj.indexCount, indexType: .uint32,
+                    indexBuffer: obj.ib, indexBufferOffset: 0, instanceCount: 1)
+            }
+        }
         encoder.popDebugGroup()
 
         encoder.endEncoding()

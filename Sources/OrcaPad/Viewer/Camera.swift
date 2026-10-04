@@ -32,6 +32,18 @@ enum Math {
         simd_float4x4(diagonal: SIMD4<Float>(1, 1, 1, 1))
     }
 
+    /// Rotation about +Y (viewer up). Maps engine z-rotation onto viewer
+    /// space: T·Rz(θ)·T⁻¹ = Ry(θ) for the (x,y,z)e→(x,z,-y)v mapping.
+    static func rotateY(_ a: Float) -> simd_float4x4 {
+        let c = cos(a), s = sin(a)
+        return simd_float4x4(columns: (
+            SIMD4(c, 0, -s, 0),
+            SIMD4(0, 1, 0, 0),
+            SIMD4(s, 0, c, 0),
+            SIMD4(0, 0, 0, 1)
+        ))
+    }
+
     static func translate(_ t: simd_float3) -> simd_float4x4 {
         simd_float4x4(columns: (
             simd_float4(1, 0, 0, 0),

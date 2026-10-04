@@ -17,6 +17,14 @@ in ~/xtool-cheatsheet.md — link, don't duplicate.)
   Engine/engine-cxx/. If an adapter becomes load-bearing, document it in
   PLANS.md's risk register.
 
+### Swift 6 / simd specifics (2026-10-03)
+- `SIMD4<Float>` has NO `.xyz` swizzle in Swift — spell out
+  `SIMD3(v.x, v.y, v.z)`. `simd_min/max` are BINARY only (no variadic).
+- Property access inside string interpolation counts as closure capture →
+  hoist to a local before `logger.notice("\(x)")`.
+- @unchecked Sendable wrapper + internal NSLock is the working pattern for
+  engine handles that must cross into Task.detached (engine not reentrant).
+
 ## Lessons learned (2026-10-03, engine bring-up night)
 
 ### Build-pressure & session discipline (2026-10-03 evening)
