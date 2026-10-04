@@ -21,6 +21,11 @@ let package = Package(
         .target(
             name: "OrcaPad",
             dependencies: ["Engine"],
+            resources: [
+                // OrcaSlicer system profiles (JSON-only subset, upstream tag).
+                // data_dir() points here — PresetBundle reads <dir>/system/…
+                .copy("Resources")
+            ],
             swiftSettings: [
                 .interoperabilityMode(.Cxx)
             ]

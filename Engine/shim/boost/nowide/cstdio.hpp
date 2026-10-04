@@ -7,4 +7,5 @@ inline FILE *fopen(const char *path, const char *mode) { return ::fopen(path, mo
 inline int fclose(FILE *f) { return ::fclose(f); }
 inline FILE *freopen(const char *path, const char *mode, FILE *f) { return ::freopen(path, mode, f); }
 inline int remove(const char *path) { return ::remove(path); }
+inline int rename(const char *from, const char *to) { return ::rename(from, to); }
 }} // namespace boost::nowide

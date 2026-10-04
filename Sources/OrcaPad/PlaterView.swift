@@ -15,6 +15,8 @@ struct PlaterView: View {
     @State private var importPresented = false
     @State private var objectsPresented = false
     @State private var plater: EnginePlater?
+    @State private var presets: EnginePresets?
+    @State private var settingsPresented = false
     @State private var objects: [PlaterObjectState] = []
     @State private var selection: (objectID: Int, instanceID: Int)?
     @State private var slicing = false
@@ -61,6 +63,11 @@ struct PlaterView: View {
                       allowedContentTypes: ImportSupport.stlTypes,
                       onCompletion: handleImport)
         .sheet(isPresented: $objectsPresented) { objectsList }
+        .sheet(isPresented: $settingsPresented) {
+            if let presets {
+                SettingsView(presets: presets) { engineStatus = $0 }
+            }
+        }
         .onAppear {
             if plater == nil {
                 switch EnginePlater.create() {
@@ -68,6 +75,42 @@ struct PlaterView: View {
                     engineStatus = "plater init FAILED: \(err.message)"
                 case .success(let p):
                     plater = p
+                }
+            }
+            if presets == nil {
+                loadPresets()
+            }
+        }
+    }
+
+    /// Preset bundle load walks ~12k JSON files — strictly off-main. The
+    /// resource dir is the app bundle's read-only copy of the upstream
+    /// profile tree (engine expects data_dir()/system/…).
+    private func loadPresets() {
+        guard let resourceDir = Bundle.module.resourceURL?
+            .appendingPathComponent("Resources").path else {
+            engineStatus = "presets FAILED: no module resource bundle"
+            return
+        }
+        engineStatus = "presets: loading…"
+        Task { @MainActor in
+            let result = await Task.detached(priority: .userInitiated) {
+                EnginePresets.create(dataDir: resourceDir)
+            }.value
+            switch result {
+            case .failure(let err):
+                engineStatus = "presets FAILED: \(err.message)"
+            case .success(let p):
+                presets = p
+                engineStatus = "presets: ready"
+                if case .success(let m) = p.current(kind: .machine) {
+                    UserDefaults.standard.set(m, forKey: "preset.machine")
+                }
+                if case .success(let f) = p.current(kind: .filament) {
+                    UserDefaults.standard.set(f, forKey: "preset.filament")
+                }
+                if case .success(let pr) = p.current(kind: .process) {
+                    UserDefaults.standard.set(pr, forKey: "preset.process")
                 }
             }
         }
@@ -309,11 +352,20 @@ struct PlaterView: View {
 
         Task { @MainActor in
             let count = objects.reduce(0) { $0 + $1.instances.count }
-            engineStatus = "\(count) instance(s): slicing…"
-            let result = await Task.detached(priority: .userInitiated) {
-                plater.sliceToGcode(gcodePath: gcodePath) { pct, msg in
-                    Task { @MainActor in
-                        engineStatus = "\(count) instance(s): \(pct)% \(msg)"
+            let presetText = presets != nil ? "" : " (defaults — presets unavailable)"
+            engineStatus = "\(count) instance(s): slicing…\(presetText)"
+            let result = await Task.detached(priority: .userInitiated) { [presets] in
+                if let presets {
+                    return plater.sliceToGcode(presets: presets, gcodePath: gcodePath) { pct, msg in
+                        Task { @MainActor in
+                            engineStatus = "\(count) instance(s): \(pct)% \(msg)"
+                        }
+                    }
+                } else {
+                    return plater.sliceToGcode(gcodePath: gcodePath) { pct, msg in
+                        Task { @MainActor in
+                            engineStatus = "\(count) instance(s): \(pct)% \(msg)"
+                        }
                     }
                 }
             }.value
@@ -434,8 +486,8 @@ struct PlaterView: View {
                 sliceTapped()
             }
             ToolbarButton(symbol: "gearshape", label: "Settings",
-                          disabled: true) {
-                // Phase 3: generated settings UI
+                          disabled: presets == nil) {
+                settingsPresented = true
             }
         }
         .padding(.horizontal, 18)

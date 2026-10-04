@@ -166,6 +166,23 @@ public final class EnginePlater: @unchecked Sendable {
         gcodePath: String,
         progress: @escaping @Sendable (Int, String) -> Void
     ) -> Result<SliceOutcome, EngineError> {
+        return sliceInternal(gcodePath: gcodePath, presets: nil, progress: progress)
+    }
+
+    /// Slicing with the selected system presets (machine+filament+process).
+    public func sliceToGcode(
+        presets: EnginePresets,
+        gcodePath: String,
+        progress: @escaping @Sendable (Int, String) -> Void
+    ) -> Result<SliceOutcome, EngineError> {
+        return sliceInternal(gcodePath: gcodePath, presets: presets, progress: progress)
+    }
+
+    private func sliceInternal(
+        gcodePath: String,
+        presets: EnginePresets?,
+        progress: @escaping @Sendable (Int, String) -> Void
+    ) -> Result<SliceOutcome, EngineError> {
         final class ProgressBox: @unchecked Sendable {
             let cb: @Sendable (Int, String) -> Void
             init(_ cb: @escaping @Sendable (Int, String) -> Void) { self.cb = cb }
@@ -182,16 +199,26 @@ public final class EnginePlater: @unchecked Sendable {
             lock.unlock()
             return .failure(EngineError(message: "plater freed"))
         }
+        // Resolve the preset handle (if any) while holding the plater lock —
+        // safe: nothing ever takes the presets lock before the plater lock.
+        let presetHandle = presets?.rawHandle
         var timeEstimate: Double = 0
         var gcodeBytes = 0
         // NOTE: the engine call may take minutes; the engine does not touch
         // the plater during it (single Print consumed), and the lock keeps
         // other API calls out until slicing completes.
         let status = gcodePath.withCString { gp in
-            String(cString: orca_plater_slice_to_gcode(
-                h, gp, cCallback,
-                Unmanaged.passUnretained(box).toOpaque(),
-                &timeEstimate, &gcodeBytes))
+            if let presets {
+                return String(cString: orca_plater_slice_to_gcode_with_presets(
+                    h, presetHandle, gp, cCallback,
+                    Unmanaged.passUnretained(box).toOpaque(),
+                    &timeEstimate, &gcodeBytes))
+            } else {
+                return String(cString: orca_plater_slice_to_gcode(
+                    h, gp, cCallback,
+                    Unmanaged.passUnretained(box).toOpaque(),
+                    &timeEstimate, &gcodeBytes))
+            }
         }
         lock.unlock()
 

@@ -80,6 +80,24 @@ const char *orca_plater_mesh_view(orca_plater *plater, int object_id,
 /// Drops every object so its lowest z sits on the bed (upstream semantic).
 const char *orca_plater_ensure_on_bed(orca_plater *plater);
 
+/// System preset bundle (machines / filaments / processes) loaded from the
+/// bundled OrcaSlicer profile tree at `data_dir_path` (expects the upstream
+/// layout: <dir>/system/<Vendor>.json + <dir>/system/<Vendor>/…). Read-only
+/// resources — point it at the app bundle, no copying needed.
+typedef struct orca_presets orca_presets;
+
+const char *orca_presets_new(const char *data_dir_path, orca_presets **out);
+void        orca_presets_free(orca_presets *presets);
+
+/// kind: 0 = machine (printer), 1 = filament, 2 = process (print).
+const char *orca_presets_list_count(orca_presets *presets, int kind, int *out_count);
+const char *orca_presets_list_name(orca_presets *presets, int kind, int idx,
+                                   const char **out_name);
+const char *orca_presets_select(orca_presets *presets, const char *machine,
+                                const char *filament, const char *process);
+const char *orca_presets_current(orca_presets *presets, int kind,
+                                 const char **out_name);
+
 /// Progress callback: percent (0-100, engine-reported), message, user ctx.
 typedef void (*orca_progress_fn)(int percent, const char *message, void *ctx);
 
@@ -97,6 +115,16 @@ const char *orca_slice_to_gcode(const char *stl_path, const char *gcode_path,
 const char *orca_plater_slice_to_gcode(orca_plater *plater, const char *gcode_path,
                                        orca_progress_fn progress, void *ctx,
                                        double *out_time_estimate_s, long *out_gcode_bytes);
+
+/// Same pipeline, but slices the plater's current Model with the selected
+/// system presets (machine + filament + process; inheritance resolved by
+/// upstream PresetBundle). Blocking — call off the main thread.
+const char *orca_plater_slice_to_gcode_with_presets(orca_plater *plater,
+                                                    orca_presets *presets,
+                                                    const char *gcode_path,
+                                                    orca_progress_fn progress, void *ctx,
+                                                    double *out_time_estimate_s,
+                                                    long *out_gcode_bytes);
 
 #if defined(__cplusplus)
 }

@@ -243,7 +243,8 @@ for f in Model.cpp PrintConfig.cpp PrintBase.cpp Print.cpp PrintApply.cpp \
          Algorithm/LineSplit.cpp Algorithm/RegionExpansion.cpp \
          SLA/IndexedMesh.cpp SVG.cpp \
          FilamentGroupUtils.cpp ParameterUtils.cpp ShortEdgeCollapse.cpp \
-         IntersectionPoints.cpp FlushVolPredictor.cpp Geometry/Circle.cpp Clipper2Utils.cpp Triangulation.cpp TriangleSetSampling.cpp          FaceDetector.cpp TriangleSelector.cpp BuildVolume.cpp Extruder.cpp SVG.cpp PrincipalComponents2D.cpp MultiMaterialSegmentation.cpp FilamentGroup.cpp ContourZ.cpp Feature/Interlocking/InterlockingGenerator.cpp Feature/Interlocking/VoxelUtils.cpp Feature/FuzzySkin/FuzzySkin.cpp calib.cpp MaterialType.cpp FlushVolCalc.cpp NormalUtils.cpp; do
+         IntersectionPoints.cpp FlushVolPredictor.cpp Geometry/Circle.cpp Clipper2Utils.cpp Triangulation.cpp TriangleSetSampling.cpp          FaceDetector.cpp TriangleSelector.cpp BuildVolume.cpp Extruder.cpp SVG.cpp PrincipalComponents2D.cpp MultiMaterialSegmentation.cpp FilamentGroup.cpp ContourZ.cpp Feature/Interlocking/InterlockingGenerator.cpp Feature/Interlocking/VoxelUtils.cpp Feature/FuzzySkin/FuzzySkin.cpp calib.cpp MaterialType.cpp FlushVolCalc.cpp NormalUtils.cpp \
+         Preset.cpp PresetBundle.cpp AppConfig.cpp; do
     compile "$SRC/libslic3r/$f"
 done
 
@@ -305,6 +306,15 @@ for f in "$ROOT"/Engine/cache/Orca-deps-libnoise/src/*.cpp \
          "$ROOT"/Engine/cache/Orca-deps-libnoise/src/model/*.cpp \
          "$ROOT"/Engine/cache/Orca-deps-libnoise/src/module/*.cpp; do
     [ -f "$f" ] && compile "$f"
+done
+
+# boost::filesystem compiled bits — real upstream source (tag matches the
+# apt-installed headers symlinked into gen/). The preset system (Preset.cpp /
+# PresetBundle.cpp) pulls path iteration + directory ops that headers alone
+# don't provide. windows_file_codecvt is Windows-only.
+for f in path operations directory exception path_traits portability \
+         unique_path codecvt_error_category utf8_codecvt_facet; do
+    compile "$ROOT/Engine/cache/boost-filesystem-1.90/src/$f.cpp" -std=c++20
 done
 
 # adapter stubs (3MF/STEP/thumbnails — loud throws, upstream untouched)

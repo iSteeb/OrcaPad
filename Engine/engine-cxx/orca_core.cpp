@@ -161,8 +161,187 @@ const char *orca_slice_report(orca_mesh *m, int levels,
 #include "libslic3r/Model.hpp"
 #include "libslic3r/Print.hpp"
 #include "libslic3r/PrintConfig.hpp"
+#include "libslic3r/AppConfig.hpp"
+#include "libslic3r/PresetBundle.hpp"
+#include "libslic3r/Utils.hpp"
 
 #include <sys/stat.h>
+
+#include <fstream>
+#include <sstream>
+
+// --- data_dir adapter ----------------------------------------------------
+// Upstream defines set_data_dir/data_dir in utils.cpp (needs macOS-only
+// libproc.h). Swift owns the path: the app bundle's read-only resource dir
+// with the shipped profile tree (<bundle>/system/…).
+namespace Slic3r {
+static std::string orcapad_data_dir;
+void set_data_dir(const std::string &path) { orcapad_data_dir = path; }
+const std::string &data_dir() { return orcapad_data_dir; }
+
+// --- utils.cpp adapters (same reason: macOS-only bits in the real TU) ----
+
+local_encoded_string encode_path(const char *src) { return local_encoded_string(src); }
+
+std::vector<std::string> split_string(const std::string &str, char delimiter) {
+    std::vector<std::string> result;
+    std::stringstream ss(str);
+    std::string substr;
+    while (std::getline(ss, substr, delimiter))
+        result.push_back(substr);
+    return result;
+}
+
+// Upstream: copy to temp + rename so targets are never half-written.
+CopyFileResult copy_file(const std::string &from, const std::string &to,
+                         std::string &error_message, const bool with_check) {
+    std::ifstream src(from, std::ios::in | std::ios::binary);
+    if (!src) {
+        error_message = "OrcaCore copy_file: cannot open " + from;
+        return CopyFileResult::FAIL_CHECK_ORIGIN_NOT_OPENED;
+    }
+    const std::string tmp = to + ".orcapad-tmp";
+    {
+        std::ofstream dst(tmp, std::ios::out | std::ios::binary);
+        if (!dst) {
+            error_message = "OrcaCore copy_file: cannot create " + tmp;
+            return CopyFileResult::FAIL_COPY_FILE;
+        }
+        dst << src.rdbuf();
+        if (!dst.good()) {
+            error_message = "OrcaCore copy_file: write failed " + tmp;
+            return CopyFileResult::FAIL_COPY_FILE;
+        }
+    }
+    if (with_check) {
+        struct stat a, b;
+        if (stat(from.c_str(), &a) != 0 || stat(tmp.c_str(), &b) != 0 || a.st_size != b.st_size) {
+            error_message = "OrcaCore copy_file: size check failed " + tmp;
+            return CopyFileResult::FAIL_FILES_DIFFERENT;
+        }
+    }
+    if (std::rename(tmp.c_str(), to.c_str()) != 0) {
+        error_message = "OrcaCore copy_file: rename failed → " + to;
+        return CopyFileResult::FAIL_RENAMING;
+    }
+    return CopyFileResult::SUCCESS;
+}
+
+bool is_shapes_dir(const std::string &dir) {
+    (void)dir; // OrcaPad ships no shapes gallery yet — nothing is a shapes dir.
+    return false;
+}
+
+std::string header_gcodeviewer_generated() {
+    return std::string(GCODEVIEWER_APP_NAME " ") + SoftFever_VERSION;
+}
+
+bool install_vendor_bundles_from_resources(const std::vector<std::string> &bundle_names,
+                                           const std::string &resource_subdir,
+                                           const std::string &data_subdir) {
+    // OrcaPad adapter: data_dir() points straight at the bundled, read-only
+    // resource tree — the "installation" this function performs on desktop
+    // already happened at app-build time. Nothing to do; success.
+    (void)bundle_names; (void)resource_subdir; (void)data_subdir;
+    return true;
+}
+} // namespace Slic3r
+
+// --- system preset bundle ------------------------------------------------
+
+struct orca_presets {
+    Slic3r::AppConfig    app_config;
+    Slic3r::PresetBundle bundle;
+    std::string          load_errors;   // per-vendor load warnings (non-fatal)
+
+    Slic3r::PresetCollection &collection(int kind) {
+        switch (kind) {
+        case 0: return bundle.printers;
+        case 1: return bundle.filaments;
+        default: return bundle.prints;
+        }
+    }
+};
+
+const char *orca_presets_new(const char *data_dir_path, orca_presets **out) {
+    static std::string result;
+    if (!out) return "OrcaCore: null out";
+    *out = nullptr;
+    if (!data_dir_path || !data_dir_path[0]) return "OrcaCore: null data dir";
+    try {
+        Slic3r::set_data_dir(data_dir_path);
+        std::unique_ptr<orca_presets> p(new orca_presets());
+        auto subs = p->bundle.load_presets(
+            p->app_config,
+            Slic3r::ForwardCompatibilitySubstitutionRule::EnableSilent,
+            Slic3r::PresetBundle::PresetPreferences());
+        (void)subs; // substitutions resolved silently (system presets)
+        const int machines = (int)p->bundle.printers.system_preset_names().size();
+        const int filaments = (int)p->bundle.filaments.system_preset_names().size();
+        const int processes = (int)p->bundle.prints.system_preset_names().size();
+        result = "OrcaCore: presets ok · " + std::to_string(machines) +
+                 " machines · " + std::to_string(filaments) + " filaments · " +
+                 std::to_string(processes) + " processes";
+        *out = p.release();
+        return result.c_str();
+    } catch (const std::exception &e) {
+        return (result = std::string("OrcaCore: C++ exception: ") + e.what()).c_str();
+    } catch (...) {
+        return (result = "OrcaCore: unknown C++ exception").c_str();
+    }
+}
+
+void orca_presets_free(orca_presets *p) { delete p; }
+
+const char *orca_presets_list_count(orca_presets *p, int kind, int *out_count) {
+    if (!p || !out_count) return "OrcaCore: null presets/out";
+    *out_count = (int)p->collection(kind).system_preset_names().size();
+    return "OrcaCore: ok";
+}
+
+const char *orca_presets_list_name(orca_presets *p, int kind, int idx,
+                                   const char **out_name) {
+    if (!p || !out_name) return "OrcaCore: null presets/out";
+    *out_name = nullptr;
+    const auto names = p->collection(kind).system_preset_names();
+    if (idx < 0 || idx >= (int)names.size()) return "OrcaCore: bad index";
+    *out_name = names[idx].c_str();
+    return "OrcaCore: ok";
+}
+
+const char *orca_presets_select(orca_presets *p, const char *machine,
+                                const char *filament, const char *process) {
+    static std::string result;
+    if (!p || !machine || !filament || !process) return "OrcaCore: null args";
+    try {
+        // select_preset_by_name_strict is protected upstream; the public
+        // non-strict call falls back to the default preset on a miss, so we
+        // verify the selection actually took afterwards.
+        p->bundle.printers.select_preset_by_name(machine, false);
+        p->bundle.filaments.select_preset_by_name(filament, false);
+        p->bundle.prints.select_preset_by_name(process, false);
+        std::string miss;
+        if (p->bundle.printers.get_selected_preset().name != machine) miss = machine;
+        else if (p->bundle.filaments.get_selected_preset().name != filament) miss = filament;
+        else if (p->bundle.prints.get_selected_preset().name != process) miss = process;
+        if (!miss.empty()) {
+            result = "OrcaCore: preset not found — " + miss;
+            return result.c_str();
+        }
+        return (result = "OrcaCore: selected").c_str();
+    } catch (const std::exception &e) {
+        return (result = std::string("OrcaCore: C++ exception: ") + e.what()).c_str();
+    } catch (...) {
+        return (result = "OrcaCore: unknown C++ exception").c_str();
+    }
+}
+
+const char *orca_presets_current(orca_presets *p, int kind, const char **out_name) {
+    if (!p || !out_name) return "OrcaCore: null presets/out";
+    const Slic3r::Preset &preset = p->collection(kind).get_selected_preset();
+    *out_name = preset.name.c_str();
+    return "OrcaCore: ok";
+}
 
 // --- plater session ------------------------------------------------------
 
@@ -470,6 +649,36 @@ const char *orca_plater_slice_to_gcode(orca_plater *p, const char *gcode_path,
         Slic3r::Print print;
         print.apply(p->model, std::move(config));
         print.is_BBL_printer() = false; // see note in orca_slice_to_gcode
+        return orcapad_run_print(print, gcode_path, progress, ctx,
+                                 out_time_estimate_s, out_gcode_bytes);
+    } catch (const std::exception &e) {
+        return (result = std::string("OrcaCore: C++ exception: ") + e.what()).c_str();
+    } catch (...) {
+        return (result = "OrcaCore: unknown C++ exception").c_str();
+    }
+}
+
+const char *orca_plater_slice_to_gcode_with_presets(orca_plater *p,
+                                                    orca_presets *presets,
+                                                    const char *gcode_path,
+                                                    orca_progress_fn progress, void *ctx,
+                                                    double *out_time_estimate_s,
+                                                    long *out_gcode_bytes) {
+    static std::string result;
+    if (out_time_estimate_s) *out_time_estimate_s = -1.0;
+    if (out_gcode_bytes) *out_gcode_bytes = -1;
+    if (!p || !presets || !gcode_path) return "OrcaCore: null plater/presets/path";
+    try {
+        if (p->model.objects.empty()) return "OrcaCore: plater empty — nothing to slice";
+        // Merged machine+filament+process config (inheritance resolved by
+        // upstream PresetBundle), then only fill keys the presets left empty.
+        Slic3r::DynamicPrintConfig config = presets->bundle.full_config();
+        orcapad_config_overlays(config);
+        if (progress) progress(1, "applying presets", ctx);
+        Slic3r::Print print;
+        print.apply(p->model, std::move(config));
+        // Proper vendor detection at last — the desktop GUI's own rule.
+        print.is_BBL_printer() = presets->bundle.is_bbl_vendor();
         return orcapad_run_print(print, gcode_path, progress, ctx,
                                  out_time_estimate_s, out_gcode_bytes);
     } catch (const std::exception &e) {
