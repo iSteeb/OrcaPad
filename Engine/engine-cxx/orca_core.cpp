@@ -253,6 +253,7 @@ struct orca_presets {
     Slic3r::AppConfig    app_config;
     Slic3r::PresetBundle bundle;
     std::string          load_errors;   // per-vendor load warnings (non-fatal)
+    std::string          name_scratch;  // stable storage for list_name
 
     Slic3r::PresetCollection &collection(int kind) {
         switch (kind) {
@@ -303,9 +304,14 @@ const char *orca_presets_list_name(orca_presets *p, int kind, int idx,
                                    const char **out_name) {
     if (!p || !out_name) return "OrcaCore: null presets/out";
     *out_name = nullptr;
+    // system_preset_names() returns BY VALUE — c_str() into the temporary
+    // dangles after return (garbled names in the UI). Copy into the
+    // session's stable storage; the caller (under the same lock) reads it
+    // before any further preset call.
     const auto names = p->collection(kind).system_preset_names();
     if (idx < 0 || idx >= (int)names.size()) return "OrcaCore: bad index";
-    *out_name = names[idx].c_str();
+    p->name_scratch = names[idx];
+    *out_name = p->name_scratch.c_str();
     return "OrcaCore: ok";
 }
 

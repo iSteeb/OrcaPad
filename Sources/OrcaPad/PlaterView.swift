@@ -2,6 +2,9 @@ import SwiftUI
 import UniformTypeIdentifiers
 import Engine
 import simd
+import os
+
+private let presetsLogger = Logger(subsystem: "ie.duz.OrcaPad", category: "presets")
 
 /// Root scene: the plater. 3D canvas full-bleed, lightweight overlays on top.
 ///
@@ -87,21 +90,36 @@ struct PlaterView: View {
     /// resource dir is the app bundle's read-only copy of the upstream
     /// profile tree (engine expects data_dir()/system/…).
     private func loadPresets() {
-        guard let resourceDir = Bundle.module.resourceURL?
-            .appendingPathComponent("Resources").path else {
-            engineStatus = "presets FAILED: no module resource bundle"
+        // Desktop contract: data_dir is WRITABLE and contains system/ (vendor
+        // presets, read-only) + user/ (user presets + selections). We provide
+        // Documents/orcapad-data with user/default/ and system/ symlinked to
+        // the bundle's profile tree — zero copying of 12k files.
+        let prep = preparePresetDataDir()
+        if let msg = prep.failure {
+            presetsLogger.error("\(msg, privacy: .public)")
+            engineStatus = msg
             return
         }
+        guard let dataDir = prep.dataDir else {
+            engineStatus = "presets FAILED: no data dir (internal error)"
+            return
+        }
+        loadPresetsFrom(dataDir: dataDir)
+    }
+
+    private func loadPresetsFrom(dataDir: String) {
         engineStatus = "presets: loading…"
         Task { @MainActor in
             let result = await Task.detached(priority: .userInitiated) {
-                EnginePresets.create(dataDir: resourceDir)
+                EnginePresets.create(dataDir: dataDir)
             }.value
             switch result {
             case .failure(let err):
+                presetsLogger.error("load failed (dataDir=\(dataDir, privacy: .public)): \(err.message, privacy: .public)")
                 engineStatus = "presets FAILED: \(err.message)"
             case .success(let p):
                 presets = p
+                presetsLogger.notice("presets ready (dataDir=\(dataDir, privacy: .public))")
                 engineStatus = "presets: ready"
                 if case .success(let m) = p.current(kind: .machine) {
                     UserDefaults.standard.set(m, forKey: "preset.machine")
@@ -222,6 +240,42 @@ struct PlaterView: View {
             case .none:
                 engineStatus = outcome.status
             }
+        }
+    }
+
+    /// Documents/orcapad-data with user/default/ + system symlink → bundle.
+    /// Bundle DIRECTORY resources aren't reachable via Bundle.url(forResource:)
+    /// (iOS quirk) — the path is composed from bundleURL and verified with
+    /// FileManager instead. Failure message is returned for screen + os_log.
+    private func preparePresetDataDir() -> (dataDir: String?, failure: String?) {
+        let fm = FileManager.default
+        let docs = fm.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        let dataDir = docs.appendingPathComponent("orcapad-data", isDirectory: true)
+        do {
+            try fm.createDirectory(at: dataDir.appendingPathComponent("user/default", isDirectory: true),
+                                   withIntermediateDirectories: true)
+            let systemLink = dataDir.appendingPathComponent("system")
+            // The symlink MUST be recreated every launch: the app bundle
+            // path changes UUID on every xtool install, leaving the old
+            // link dangling (fileExists reports false for dangling links,
+            // which made createSymbolicLink throw "already exists").
+            if (try? fm.destinationOfSymbolicLink(atPath: systemLink.path)) != nil {
+                try fm.removeItem(at: systemLink)
+            }
+            let bundleSystem = Bundle.module.bundleURL
+                .appendingPathComponent("Resources", isDirectory: true)
+                .appendingPathComponent("system", isDirectory: true)
+            guard fm.fileExists(atPath: bundleSystem.path) else {
+                let msg = "presets FAILED: no system profiles at \(bundleSystem.path)"
+                presetsLogger.fault("\(msg, privacy: .public)")
+                return (nil, msg)
+            }
+            try fm.createSymbolicLink(at: systemLink, withDestinationURL: bundleSystem)
+            return (dataDir.path, nil)
+        } catch {
+            let msg = "presets FAILED: data-dir prep: \(error.localizedDescription)"
+            presetsLogger.fault("\(msg, privacy: .public)")
+            return (nil, msg)
         }
     }
 
