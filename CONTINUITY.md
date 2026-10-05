@@ -54,6 +54,32 @@
 
 ## PROGRESS
 
+- [2026-10-05] PRESET SELECTION FIXED & VERIFIED END-TO-END: root cause =
+  headless PresetBundle leaves variant-less vendor machines INVISIBLE
+  (293 loaded / 29 selectable; select_preset_by_name rejects invisible) →
+  show-all pass on system printers + update_compatible after machine select.
+  Probe-verified 293/293; device-verified: Positron machine+process land in
+  gcode (printer_model, printable_area 180x180, 0.12mm Fine process, 16MB,
+  2h10m est); desktop loads it. Host probe toolchain (/tmp/build-host-engine.sh
+  + probe2) = fast engine-debugging loop; 259-file host engine build green.
+- [2026-10-05] INTEROP CLOSED ✅: preset-sliced gcode (incl. 60MB 0.05mm
+  Voron-process monster) loads in desktop OrcaSlicer. Presets live on
+  device via writable Documents/orcapad-data (system symlink → bundle,
+  recreated each launch — bundle UUID changes per install). OPEN: machine
+  preset not landing in output (printer_model empty; filament/process do
+  land) — awaiting user info whether machine was actually selected; also
+  want compatibility filtering (process nozzle vs machine) + first-run
+  defaults that don't pick 0.05mm Voron profiles.
+- [2026-10-04] P3 PRESET SYSTEM LANDED (`7286c58`, device test pending):
+  upstream PresetBundle+Preset+AppConfig compiled into engine (inheritance
+  resolved by upstream code — never reimplemented); boost::filesystem
+  compiled from boostorg source tag 1.90 (was the missing compiled lib);
+  12,006 profile JSONs bundled read-only at Resources/system → data_dir()
+  points at the bundle; Settings sheet (machine/filament/process pickers,
+  search, @AppStorage persistence); slicing via full_config() of selection
+  with is_BBL_printer = bundle.is_bbl_vendor(). Desktop interop should now
+  be correct BY CONSTRUCTION (real machine presets set nozzle_type/density).
+  TODO: verify on device + desktop; measure preset load time (12k files).
 - [2026-10-03 late] PLATER MVP IMPLEMENTED (build green, NOT yet device-tested —
   phone away): engine plater API (objects/instances/transforms/ensure-on-bed/
   plater-slicing; anchors = matrix*pivot so Swift renders T·Ry·S); Swift
@@ -101,6 +127,17 @@
   (orca_core.cpp.o + Format_STL.cpp.o — investigate owner).
 
 ## DISCOVERIES
+
+- `system_preset_names()` returns std::vector BY VALUE — returning
+  c_str() into it = dangling pointer → garbled UI text. C-API rule:
+  strings must be copied to session-owned storage before return.
+- Bundle DIRECTORY resources aren't addressable via Bundle.url(forResource:)
+  (iOS quirk) — compose path from bundleURL + FileManager.fileExists.
+- App bundle path changes UUID on EVERY xtool install → symlinks into the
+  bundle dangle after reinstall; recreate per launch. fileExists() returns
+  FALSE for dangling symlinks (bites the exists-check pattern).
+- PresetBundle REQUIRES a writable data_dir with system/ + user/default/;
+  pointing it at the read-only bundle throws directory_iterator ENOENT.
 
 - 2026-10-03 machine-freeze root cause: 12-way parallel clang++ on heavy
   CGAL/Eigen TBB TUs vs 14GiB RAM+4GiB swap → swap-death. 6+nice survives.
