@@ -277,6 +277,16 @@ const char *orca_presets_new(const char *data_dir_path, orca_presets **out) {
             Slic3r::ForwardCompatibilitySubstitutionRule::EnableSilent,
             Slic3r::PresetBundle::PresetPreferences());
         (void)subs; // substitutions resolved silently (system presets)
+        // OrcaPad = desktop "show all presets": vendor machines without
+        // declared nozzle variants in their vendor json (Prusa-style, e.g.
+        // Positron3D) stay invisible after a headless load and
+        // select_preset_by_name rejects invisible presets (293 loaded, only
+        // 29 selectable — probe-verified 2026-10-05). Flip visibility on all
+        // system printers; filaments/processes are gated by compatibility,
+        // re-evaluated below.
+        for (auto &preset : p->bundle.printers)
+            if (preset.is_system) preset.is_visible = true;
+        p->bundle.update_compatible(Slic3r::PresetSelectCompatibleType::Always);
         const int machines = (int)p->bundle.printers.system_preset_names().size();
         const int filaments = (int)p->bundle.filaments.system_preset_names().size();
         const int processes = (int)p->bundle.prints.system_preset_names().size();
@@ -320,10 +330,11 @@ const char *orca_presets_select(orca_presets *p, const char *machine,
     static std::string result;
     if (!p || !machine || !filament || !process) return "OrcaCore: null args";
     try {
-        // select_preset_by_name_strict is protected upstream; the public
-        // non-strict call falls back to the default preset on a miss, so we
-        // verify the selection actually took afterwards.
+        // Machine first, then a compatibility pass — Positron-style processes
+        // only become visible/selectable once their machine is active
+        // (mirrors the desktop preset flow).
         p->bundle.printers.select_preset_by_name(machine, false);
+        p->bundle.update_compatible(Slic3r::PresetSelectCompatibleType::Always);
         p->bundle.filaments.select_preset_by_name(filament, false);
         p->bundle.prints.select_preset_by_name(process, false);
         std::string miss;

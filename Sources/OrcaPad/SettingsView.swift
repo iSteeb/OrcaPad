@@ -122,7 +122,7 @@ private struct PickerList: View {
                 }
             }
         }
-        .searchable(text: $search)
+        .searchable(text: $search, placement: .navigationBarDrawer(displayMode: .always))
         .navigationTitle(title)
     }
 
