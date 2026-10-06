@@ -34,6 +34,26 @@ in ~/xtool-cheatsheet.md — link, don't duplicate.)
   `BackgroundWork` boundary; `@MainActor` stores own observable state and busy
   gates so commands reject rather than silently queue.
 - Build output always redirected to a file: `xtool dev build > /tmp/orcapad-build.log 2>&1`
+- Test/build policy lives in AGENTS.md's "Builds, tests, and audits" matrix.
+  The engine compile list is shared (`Bridge/engine-sources.sh`) — never fork
+  it; host contract tests and the architecture audit are commit gates.
+- Upstream `GCode.hpp` enables `ORCA_CHECK_GCODE_PLACEHOLDERS` in non-NDEBUG
+  builds, and that check rejects upstream's OWN bundled presets
+  (long_retraction_when_cut & co.). Host test builds therefore mirror the
+  shipped `-O2 -DNDEBUG` config exactly — do not "fix" this by patching
+  upstream; it is an upstream debug-mode inconsistency worth reporting there.
+- libstdc++ does not transitively include `<memory>`/`<type_traits>` where
+  Darwin libc++ does: upstream headers relying on that leak
+  (`Format/objparser.hpp`) and our own shims need explicit includes. Adapter
+  pattern: per-file `-include <header>` in `engine-sources.sh`, or fix the
+  shim. Never patch upstream.
+- `boost_filesystem_shim.cpp` is RETIRED: the real boost-filesystem-1.90
+  sources superseded it and both defining the same symbols was a latent
+  multiple-definition hazard. Do not reintroduce it.
+- A host executable links ALL objects (no archive member-pull): pack objects
+  into a static archive before linking host tests (`build-host-tests.sh`) to
+  mirror iOS semantics, or dead-TU references (Thread.cpp →
+  boost::thread::native_handle) surface as undefined symbols.
 - All app logging via `os_log` (`Logger(subsystem: "ie.duz.OrcaPad", …)`);
   `print()` is invisible for home-screen-launched apps.
 - MSL shaders live ONLY in `Viewer/Shaders.swift` (runtime-compiled; the Linux

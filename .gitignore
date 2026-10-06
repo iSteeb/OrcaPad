@@ -16,3 +16,4 @@ DerivedData/
 
 # engine/Bridge cross-build outputs (incremental cache)
 /Bridge/build-ios/
+/Bridge/build-host/

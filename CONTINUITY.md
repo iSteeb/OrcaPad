@@ -8,8 +8,9 @@
   Engine; stable IDs/revisions; immutable Swift snapshots; derived Metal
   caches; typed contextual failures; warning-free redirected device build.
 - Next steps:
-  1. Add Bridge/domain/coordinate/renderer architecture contract tests.
-  2. Run the complete validation/device acceptance census and checkpoint Gate A.
+  1. Final Gate A validation census + device install and acceptance loop.
+  2. Swift-domain contract tests (blocked on Linux-runnable Swift module or
+     Mac CI).
   3. Then introduce immutable cancellable slice jobs so slicing no longer
      retains the live document/preset locks.
 
@@ -35,6 +36,25 @@
 
 ## PROGRESS
 
+- [2026-10-06 CODE][TOOL] HOST CONTRACT TESTS LANDED: `Bridge/build-host-tests.sh`
+  compiles the shared engine closure for Linux (via the new
+  `Bridge/engine-sources.sh` single compile list), links
+  `Bridge/tools/contract_tests.cpp` archive-style (iOS member-pull
+  semantics), and runs it: 183 checks green — ABI v2, typed failures, owned
+  diagnostics + idempotent disposal, stable IDs, +1 revision per successful
+  mutation and +0 per rejection, mutation/snapshot revision equality,
+  deep-copy ownership, NOT_FOUND/INVALID_ARGUMENT taxonomy, transform
+  validation, last-instance atomicity, two-thread process serialization,
+  transactional presets, and all three real slice paths with progress.
+- [2026-10-06 CODE] `Bridge/tools/architecture-audit.sh` (10 static boundary
+  checks: upstream purity, header parity, archive uniqueness, raw-ABI
+  confinement, package direction, no silent-failure patterns, runtime-MSL
+  only, overlay discipline, no client refs in Bridge C++) — all PASS.
+- [2026-10-06 CODE] build-core.sh refactored onto the shared list with a
+  manifest-identical, byte-stable iOS archive; `boost_filesystem_shim.cpp`
+  retired (duplicate definitions of the real boost-filesystem sources);
+  archive now 258 members; app links green.
+
 - [2026-10-06 CODE][TOOL] C ABI v2 stable snapshot state landed in `ef29203`:
   engine object/instance IDs, mutation revisions, owned canonical meshes, one
   coherent snapshot read, immutable Swift values, and stable renderer caches.
@@ -44,19 +64,21 @@
 - [2026-10-06 CODE] All blocking engine/file operations use one typed detached
   work boundary. Document busy/stale/preview rules and transactional preset
   persistence are centralized; slice outcomes carry source revision/config.
-- [2026-10-06 TOOL] Core archive remains 259/259 unique with matching headers;
-  the decomposed Swift client passes a warning-free redirected xtool build.
+- [2026-10-06 TOOL] Core archive rebuilt at 258/258 unique (shim retirement)
+  with matching headers; the decomposed Swift client passes a warning-free
+  redirected xtool build.
 
 ## DISCOVERIES
 
-- [2026-10-06 CODE] Upstream `ObjectBase::s_last_id` is explicitly not thread
-  safe; per-session Swift locks cannot protect IDs across documents/Prints, so
-  the Bridge requires process-wide guarded entry.
-- [2026-10-06 CODE] Moving a `ModelObject*` directly between `Model.objects`
-  vectors leaves its private `m_model` back-pointer dangling. Always transfer
-  through upstream `Model` APIs.
-- [2026-10-06 CODE] The old archive duplicate count came from three duplicate
-  compile-list jobs; build tooling now rejects duplicates and produces 259/259.
+- [2026-10-06 CODE] Upstream `ObjectBase::s_last_id` is not thread safe, so the
+  Bridge process-serializes guarded engine entry. Moving a `ModelObject*`
+  between models leaves `m_model` dangling — transfer only through upstream
+  `Model` APIs.
+- [2026-10-06 CODE] Upstream `GCode.hpp` enables a placeholder check in
+  non-NDEBUG builds that rejects upstream's own bundled presets; host tests
+  mirror the shipped `-O2 -DNDEBUG`. libstdc++ doesn't leak `<memory>`/
+  `<type_traits>` like libc++ — adapters go in `engine-sources.sh` per-file
+  flags or shim fixes, never upstream patches.
 - [2026-10-06 CODE] Current build remains machine-local: manual source closure,
   sequential TBB shims, ignored caches, and duplicated 12,006 profile JSONs.
 

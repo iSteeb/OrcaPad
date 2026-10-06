@@ -17,6 +17,8 @@ SDK="${SDK:-$HOME/.config/swiftpm/swift-sdks/darwin.artifactbundle/Developer/Pla
 CLANG="${CLANG:-$HOME/.local/share/swiftly/toolchains/6.4.0/usr/bin/clang++}"
 TARGET="arm64-apple-ios17.0"
 
+source "$ROOT/Bridge/engine-sources.sh"
+
 BUILD="$ROOT/Bridge/build-ios"
 OUT="$ROOT/Prebuilt/OrcaBridgeCore.xcframework/ios-arm64"
 # INCREMENTAL: obj/ persists across runs; see needs_build + flags stamp.
@@ -177,161 +179,21 @@ run_jobs_parallel() { # phase 2: bounded-parallel compile + hard verification
     [ "$failed" -eq 0 ] && [ "$job_failed" -eq 0 ] || exit 1
 }
 
-compile() { # compile <srcfile> (C++, extra flags after src)
-    local src="$1"; shift
-    local o="$OBJ/$(echo "$src" | sed 's|/|_|g').o"
-    compile_one "$src" "$o" "$CLANG" "${CFLAGS[@]}" "$@"
-}
-compile_c() { # compile_c <srcfile> (C)
-    local src="$1"
-    local o="$OBJ/$(echo "$src" | sed 's|/|_|g').o"
-    compile_one "$src" "$o" "${CLANG%++}" "${CONLY_FLAGS[@]}"
-}
-
-OBJS=()
-
-# vendored admesh (mesh read/repair)
-for f in connect normals shared stl_io stlinit util; do
-    compile "$DEPS/admesh/$f.cpp"
-done
-
-# vendored qhull — EXACT file lists from deps_src/qhull/CMakeLists.txt
-# (libqhull_SOURCES). Do not glob, do not "fix": the C/C++ hook split
-# (qh_fprintf vs qh_malloc vs qh_fprintf_rbox ownership) is deliberate.
-for f in global_r stat_r geom2_r poly2_r merge_r libqhull_r geom_r poly_r \
-         qset_r mem_r random_r usermem_r io_r user_r rboxlib_r; do
-    compile_c "$DEPS/qhull/src/libqhull_r/$f.c"
-done
-for f in Coordinates PointCoordinates Qhull QhullFacet QhullFacetList \
-         QhullFacetSet QhullHyperplane QhullPoint QhullPointSet QhullPoints \
-         QhullQh QhullRidge QhullSet QhullStat QhullVertex QhullVertexSet \
-         RboxPoints RoadError RoadLogEvent; do
-    # upstream quirk: usermem_r-cpp.cpp relies on transitive stdarg/stdio —
-    # (file is NOT in upstream's list, but this fix pattern stays for reference)
-    compile "$DEPS/qhull/src/libqhullcpp/$f.cpp"
-done
-
-# libslic3r geometry subset (grows link-error-driven)
-for f in libslic3r.cpp Point.cpp Line.cpp MultiPoint.cpp Polygon.cpp Polyline.cpp \
-         BoundingBox.cpp ExPolygon.cpp ClipperUtils.cpp clipper.cpp \
-         Circle.cpp ArcFitter.cpp Geometry.cpp Geometry/ConvexHull.cpp \
-         Geometry/MedialAxis.cpp Geometry/Voronoi.cpp Geometry/VoronoiUtils.cpp \
-         Geometry/VoronoiUtilsCgal.cpp Geometry/VoronoiOffset.cpp ShortestPath.cpp \
-         Tesselate.cpp ExtrusionEntity.cpp ExtrusionEntityCollection.cpp Flow.cpp \
-         LocalesUtils.cpp TriangleMesh.cpp TriangleMeshSlicer.cpp Format/STL.cpp; do
-    extra=()
-    case "$f" in
-        LocalesUtils.cpp) extra+=(-include sstream) ;;
-        Geometry/VoronoiUtilsCgal.cpp) extra+=(-include boost/multiprecision/gmp.hpp) ;;
-    esac
-    compile "$SRC/libslic3r/$f" "${extra[@]:-}"
-done
-
-# files needing force-includes (transitive-include quirks / CGAL gmp_int)
-compile "$SRC/libslic3r/Feature/FuzzySkin/FuzzySkin.cpp" -include thread
-compile "$SRC/libslic3r/MinimumSpanningTree.cpp"
-compile "$SRC/libslic3r/Triangulation.cpp" -include boost/multiprecision/gmp.hpp
-
-# --- full slicing pipeline (census-verified 2026-10-02) ---
-for f in Model.cpp PrintConfig.cpp PrintBase.cpp Print.cpp PrintApply.cpp \
-         PrintObject.cpp PrintObjectSlice.cpp PrintRegion.cpp \
-         Layer.cpp LayerRegion.cpp PerimeterGenerator.cpp \
-         Surface.cpp SurfaceCollection.cpp Slicing.cpp SlicingAdaptive.cpp \
-         ElephantFootCompensation.cpp Brim.cpp BridgeDetector.cpp EdgeGrid.cpp \
-         MinAreaBoundingBox.cpp MutablePolygon.cpp VariableWidth.cpp \
-         PlaceholderParser.cpp GCodeWriter.cpp GCodeReader.cpp Time.cpp Thread.cpp \
-         Semver.cpp ObjectID.cpp Config.cpp CustomGCode.cpp GCode.cpp Format/OBJ.cpp Format/objparser.cpp Format/AMF.cpp \
-         GCode/WipeTower2.cpp GCode/GCodeProcessor.cpp GCode/ThumbnailData.cpp \
-         GCode/AdaptivePAInterpolator.cpp GCode/AdaptivePAProcessor.cpp \
-         GCode/PchipInterpolatorHelper.cpp GCode/FanMover.cpp \
-         GCode/SmallAreaInfillFlowCompensator.cpp GCode/PrintExtents.cpp \
-         GCode/RetractWhenCrossingPerimeters.cpp GCode/AvoidCrossingPerimeters.cpp \
-         GCode/ConflictChecker.cpp GCode/SeamPlacer.cpp GCode/TimelapsePosPicker.cpp \
-         GCode/CoolingBuffer.cpp GCode/SpiralVase.cpp GCode/PressureEqualizer.cpp \
-         GCode/ToolOrdering.cpp GCode/ToolOrderUtils.cpp GCode/WipeTower.cpp \
-         Algorithm/LineSplit.cpp Algorithm/RegionExpansion.cpp \
-         SLA/IndexedMesh.cpp SVG.cpp \
-         FilamentGroupUtils.cpp ParameterUtils.cpp ShortEdgeCollapse.cpp \
-         IntersectionPoints.cpp FlushVolPredictor.cpp Geometry/Circle.cpp Clipper2Utils.cpp TriangleSetSampling.cpp FaceDetector.cpp TriangleSelector.cpp BuildVolume.cpp Extruder.cpp PrincipalComponents2D.cpp MultiMaterialSegmentation.cpp FilamentGroup.cpp ContourZ.cpp Feature/Interlocking/InterlockingGenerator.cpp Feature/Interlocking/VoxelUtils.cpp calib.cpp MaterialType.cpp FlushVolCalc.cpp NormalUtils.cpp \
-         Preset.cpp PresetBundle.cpp AppConfig.cpp; do
-    compile "$SRC/libslic3r/$f"
-done
-
-# infills
-for f in Fill.cpp FillBase.cpp FillConcentric.cpp FillConcentricInternal.cpp \
-         FillCrossHatch.cpp FillGyroid.cpp FillHoneycomb.cpp Fill3DHoneycomb.cpp \
-         FillAdaptive.cpp FillLightning.cpp FillLine.cpp FillPlanePath.cpp \
-         FillRectilinear.cpp FillTpmsD.cpp FillTpmsFK.cpp \
-         Lightning/Generator.cpp Lightning/Layer.cpp Lightning/DistanceField.cpp \
-         Lightning/TreeNode.cpp; do
-    compile "$SRC/libslic3r/Fill/$f"
-done
-
-# supports
-for f in SupportCommon.cpp SupportMaterial.cpp SupportSpotsGenerator.cpp \
-         TreeSupport.cpp TreeSupport3D.cpp TreeModelVolumes.cpp; do
-    compile "$SRC/libslic3r/Support/$f"
-done
-
-# Arachne wall generator
-for f in WallToolPaths.cpp SkeletalTrapezoidation.cpp SkeletalTrapezoidationGraph.cpp \
-         utils/ExtrusionLine.cpp utils/PolylineStitcher.cpp utils/SquareGrid.cpp \
-         BeadingStrategy/BeadingStrategy.cpp BeadingStrategy/BeadingStrategyFactory.cpp \
-         BeadingStrategy/DistributedBeadingStrategy.cpp BeadingStrategy/LimitedBeadingStrategy.cpp \
-         BeadingStrategy/OuterWallInsetBeadingStrategy.cpp BeadingStrategy/RedistributeBeadingStrategy.cpp \
-         BeadingStrategy/WideningBeadingStrategy.cpp; do
-    compile "$SRC/libslic3r/Arachne/$f"
-done
-
-# vendored glu-libtess (triangulation backend for Tesselate.cpp)
-# File list mirrors upstream deps_src/glu-libtess/CMakeLists.txt EXACTLY:
-# priorityq-heap.c / priorityq-sort.c are NOT standalone TUs upstream —
-# compiling them duplicates __gl_pqHeap* strong C symbols.
-for f in dict geom memalloc mesh normal priorityq render sweep tess tessmono; do
-    compile_c "$DEPS/glu-libtess/src/$f.c"
-done
-
-# vendored semver (version parsing)
-compile_c "$DEPS/semver/semver.c"
-
-# vendored clipper1 Z-variant (VoronoiUtils / MM segmentation)
-compile "$DEPS/clipper/clipper_z.cpp"
-
-# vendored clipper2 (Clipper2Utils / Fill paths)
-for f in clipper.engine clipper.offset clipper.rectclip clipper.minkowski; do
-    [ -f "$DEPS/clipper2/Clipper2Lib/src/$f.cpp" ] && compile "$DEPS/clipper2/Clipper2Lib/src/$f.cpp"
-done
-
-# vendored expat (XML for AMF/3mf metadata)
-for f in xmlparse xmltok xmlrole; do
-    compile_c "$DEPS/expat/$f.c"
-done
-
-# vendored miniz (zip I/O)
-compile_c "$DEPS/miniz/miniz.c"
-
-# libnoise (fuzzy skin) — full source set
-for f in "$ROOT"/Bridge/cache/Orca-deps-libnoise/src/*.cpp \
-         "$ROOT"/Bridge/cache/Orca-deps-libnoise/src/model/*.cpp \
-         "$ROOT"/Bridge/cache/Orca-deps-libnoise/src/module/*.cpp; do
-    [ -f "$f" ] && compile "$f"
-done
-
-# boost::filesystem compiled bits — real upstream source (tag matches the
-# apt-installed headers symlinked into gen/). The preset system (Preset.cpp /
-# PresetBundle.cpp) pulls path iteration + directory ops that headers alone
-# don't provide. windows_file_codecvt is Windows-only.
-for f in path operations directory exception path_traits portability \
-         unique_path codecvt_error_category utf8_codecvt_facet; do
-    compile "$ROOT/Bridge/cache/boost-filesystem-1.90/src/$f.cpp" -std=c++20
-done
-
-# adapter stubs (3MF/STEP/thumbnails — loud throws, upstream untouched)
-compile "$ROOT/Bridge/engine-cxx/format_stubs.cpp"
-
-# our C Bridge boundary
-compile "$ROOT/Bridge/engine-cxx/boost_filesystem_shim.cpp"
-compile "$ROOT/Bridge/engine-cxx/orca_bridge.cpp"
+# --- 2b. compile the shared engine source list ---
+# Single source of truth: Bridge/engine-sources.sh (shared verbatim with the
+# host contract-test build — lists must never drift apart again).
+# Records: cxx<TAB>path<TAB>[extra flags...] | c<TAB>path
+while IFS=$'\t' read -r kind src extra_str; do
+    [ -n "${src:-}" ] || continue
+    extra_args=()
+    [ -n "${extra_str:-}" ] && read -ra extra_args <<< "$extra_str"
+    o="$OBJ/$(echo "$src" | sed 's|/|_|g').o"
+    if [ "$kind" = "cxx" ]; then
+        compile_one "$src" "$o" "$CLANG" "${CFLAGS[@]}" "${extra_args[@]}"
+    else
+        compile_one "$src" "$o" "${CLANG%++}" "${CONLY_FLAGS[@]}"
+    fi
+done < <(engine_sources)
 
 run_jobs_parallel
 

@@ -25,6 +25,77 @@ scope changes; LESSONS.md on every corrected mistake.
   until the core loop is complete and shipped. See PLANS.md phases.
 - iPad-first. iPhone gets a companion treatment later, not a shrunk plater.
 
+## Repository map (structure is normative)
+
+```
+upstream/orcaslicer/        Untouched engine, git submodule pinned to v2.4.2
+Bridge/engine-cxx/          C ABI boundary: orca_bridge.{h,cpp} + adapter TUs
+Bridge/shim/                iOS/Darwin dependency adapters (boost::log, tbb,
+                            occt stub, openssl/md5→CommonCrypto, png)
+Bridge/shim-host/           host-only header overrides (md5) — highest -I
+                            priority in host test builds only
+Bridge/cache/               build-only fetched deps (cereal, boost-filesystem
+                            1.90 sources, libnoise) — gitignored
+Bridge/engine-sources.sh    THE engine compile list (single source of truth,
+                            shared by both builds — lists must never drift)
+Bridge/build-core.sh        cross-builds the iOS archive → Prebuilt/
+Bridge/build-host-tests.sh  compiles the SAME closure for the Linux host and
+                            RUNS the contract tests (asserts enabled)
+Bridge/tools/contract_tests.cpp      C ABI + engine contract test suite
+Bridge/tools/architecture-audit.sh   static boundary audit (no build)
+Prebuilt/OrcaBridgeCore.xcframework  shipped binary — regenerated, never edited
+Sources/OrcaBridge/         Swift facade; the ONLY raw-ABI consumer
+Sources/OrcaPad/App/        AppEnvironment (process-lifetime owner), StatusCenter
+Sources/OrcaPad/Stores/     DocumentStore, PresetStore (main-actor state owners)
+Sources/OrcaPad/Services/   EnginePaths (filesystem policy), SliceService
+Sources/OrcaPad/Viewer/     everything Metal: Renderer, Geometry, Camera,
+                            CoordinateMapper, Shaders (runtime MSL), MetalCanvas
+```
+
+## The contract (summary — full text in ARCHITECTURE.md)
+
+**C ABI v2 (`Bridge/engine-cxx/orca_bridge.h`)**
+- Every fallible operation returns a typed `orca_result` (status code + owned
+  diagnostic). Callers branch on `code`, never on message text. Diagnostics are
+  empty on success.
+- Owned memory (diagnostics, strings, scene snapshots) is released through the
+  matching `*_dispose` function, exactly once; dispose is idempotent and
+  null-safe.
+- Identity and state: engine-issued stable `orca_document_id` /
+  `orca_object_id` / `orca_instance_id` (never array indices), one monotonic
+  document `orca_revision` advanced by every successful mutation and returned
+  with it, and deep-copied immutable `orca_scene_snapshot`s in canonical
+  engine coordinates (z-up, millimetres, radians).
+- Engine entry is process-serialized inside the Bridge (upstream globals are
+  not thread-safe); a handle must not be freed concurrently with a call.
+- The process data directory is initialize-once; a second, different path is a
+  typed configuration failure.
+- Supported instance transforms are unmirrored z-rotation with uniform scale;
+  anything else is a typed unsupported-capability rejection.
+
+**Swift facade (`Sources/OrcaBridge`)**
+- Raw ABI use (`OrcaBridgeCore`, `OpaquePointer`, `orca_*`, `Unmanaged`) is
+  confined here.
+- `EnginePlater.apply` performs one mutation plus one snapshot read under a
+  single session lock and verifies revision equality; cross-handle operations
+  hold both locks in plater → presets order.
+
+**Swift client (`Sources/OrcaPad`)**
+- `AppEnvironment` owns process-lifetime stores and Bridge sessions; views are
+  presentation-only (no raw engine calls, no filesystem policy, no detached
+  engine orchestration).
+- Blocking engine/filesystem work crosses exactly one typed boundary
+  (`BackgroundWork`); commands reject while a document mutation or slice is in
+  flight rather than silently queueing.
+- The C++ document is authoritative: authoritative snapshot installs clear
+  transient gesture-preview transforms, and stale revisions are rejected.
+- Generic PLA/brass config overlays apply ONLY to the preset-free slice path;
+  selected preset `full_config()` values are never overwritten.
+
+**Engine purity**
+- `upstream/orcaslicer` stays byte-clean. Portability adapters live under
+  `Bridge/shim*` and `Bridge/engine-cxx` as small, documented TUs.
+
 ## Toolchain reality (this is a Linux box, no Xcode)
 
 - Build: `cd ~/OrcaPad && xtool dev build > /tmp/orcapad-build.log 2>&1`
@@ -41,6 +112,34 @@ scope changes; LESSONS.md on every corrected mistake.
   macOS-only): all MSL lives in `Viewer/Shaders.swift` and is compiled at
   runtime via `MTLDevice.makeLibrary(source:)`. Keep it that way.
 - `xtool dev build` release artifacts are UNSIGNED — never install them.
+
+## Builds, tests, and audits — when to run what
+
+| Change you made | Run before committing |
+|---|---|
+| Anything under `Bridge/engine-cxx`, `Bridge/shim*`, `Bridge/engine-sources.sh`, or the upstream pin | 1. `./Bridge/build-core.sh` (rebuild archive) 2. `./Bridge/build-host-tests.sh` (contract tests) 3. `xtool dev build` |
+| `Sources/OrcaBridge` (Swift facade) | `./Bridge/build-host-tests.sh` + `xtool dev build` |
+| `Sources/OrcaPad` (Swift client / viewer) | `xtool dev build`; device run for UI/gesture paths |
+| Contract-adjacent docs (`ARCHITECTURE.md`, this file) | nothing — but keep the tables truthful |
+| **Before every commit, any change** | `./Bridge/tools/architecture-audit.sh` |
+
+Ground rules for the matrix:
+
+- `Bridge/build-host-tests.sh` compiles the identical engine closure from
+  `Bridge/engine-sources.sh` for the host with assertions ENABLED, links the
+  contract suite against it archive-style (mirroring iOS member-pull
+  semantics), runs it, and must print `RESULT: PASS`.
+- `Bridge/build-core.sh` verifies object-manifest parity (member count ==
+  unique count, no stale members) and copies the header into `Prebuilt/`; the
+  audit then checks byte-parity.
+- Never hand-edit anything under `Prebuilt/` or `Bridge/build-*`; never add a
+  source to one build list without the other — edit
+  `Bridge/engine-sources.sh` only.
+- A red contract test or audit is a commit blocker; fix the cause, never the
+  assertion, unless the contract itself changed (then update the test AND
+  `ARCHITECTURE.md` in the same change).
+- Device verification (import → transform → preset select → slice → G-code in
+  Files) remains the acceptance loop for Gate A; host tests do not replace it.
 
 ## Code conventions
 

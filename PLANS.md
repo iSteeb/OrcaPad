@@ -22,7 +22,16 @@ Engine before feature breadth makes the current coupling permanent.
 - [x] Introduce stable engine object/instance IDs and document revisions
 - [x] Replace mutable index-coupled Swift scene mirroring with immutable snapshots
 - [x] Move orchestration/filesystem/slicing state out of `PlaterView`
-- [ ] Add bridge/domain architecture contract tests
+- [x] Add bridge contract tests (host C-ABI suite, 183 checks) + static
+  architecture audit; Swift-domain unit tests remain (need a host-runnable
+  Swift module or Mac CI — tracked below)
+- [ ] Swift-domain contract tests (DocumentStore/CoordinateMapper) — blocked
+  on a Linux-runnable Swift test target or a Mac runner
+
+**Gate A close-out:** one authoritative C++ document; raw ABI confined to the
+Bridge; Swift and Metal consume revisioned derived state; all failures are
+typed and loud; host contract tests, static audit, and the physical-device
+slice loop all green.
 
 Build-system reproducibility remains a later upstreaming gate. The current
 machine-local build is accepted while this architecture is cleaned up, but new
