@@ -21,7 +21,7 @@ Engine before feature breadth makes the current coupling permanent.
 - [x] Remove shared static bridge result strings and define data ownership
 - [x] Introduce stable engine object/instance IDs and document revisions
 - [x] Replace mutable index-coupled Swift scene mirroring with immutable snapshots
-- [ ] Move orchestration/filesystem/slicing state out of `PlaterView`
+- [x] Move orchestration/filesystem/slicing state out of `PlaterView`
 - [ ] Add bridge/domain architecture contract tests
 
 Build-system reproducibility remains a later upstreaming gate. The current

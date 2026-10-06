@@ -27,6 +27,12 @@ in ~/xtool-cheatsheet.md — link, don't duplicate.)
 - Authoritative `SceneSnapshot` values stay immutable. Gesture previews are a
   separate transient transform overlay and are cleared on every authoritative
   snapshot install.
+- `AppEnvironment` is the process-lifetime owner of client stores and Bridge
+  sessions. SwiftUI views are presentation-only: no raw engine calls,
+  `FileManager` policy, preset persistence, or detached slicing orchestration.
+- Blocking engine and filesystem work crosses the single typed
+  `BackgroundWork` boundary; `@MainActor` stores own observable state and busy
+  gates so commands reject rather than silently queue.
 - Build output always redirected to a file: `xtool dev build > /tmp/orcapad-build.log 2>&1`
 - All app logging via `os_log` (`Logger(subsystem: "ie.duz.OrcaPad", …)`);
   `print()` is invisible for home-screen-launched apps.

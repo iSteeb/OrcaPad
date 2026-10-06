@@ -8,11 +8,10 @@
   Engine; stable IDs/revisions; immutable Swift snapshots; derived Metal
   caches; typed contextual failures; warning-free redirected device build.
 - Next steps:
-  1. Extract document/preset/file/slice orchestration from `PlaterView`.
-  2. Introduce the runtime owner and immutable cancellable slice jobs so long
-     slices no longer retain the live document/preset locks.
-  3. Add Bridge/domain/coordinate/renderer contract tests.
-  4. Resume feature parity, starting with project/3MF capability work.
+  1. Add Bridge/domain/coordinate/renderer architecture contract tests.
+  2. Run the complete validation/device acceptance census and checkpoint Gate A.
+  3. Then introduce immutable cancellable slice jobs so slicing no longer
+     retains the live document/preset locks.
 
 ## DECISIONS
 
@@ -36,27 +35,17 @@
 
 ## PROGRESS
 
-- [2026-10-06 CODE][TOOL] STABLE SNAPSHOT STATE LANDED: C ABI v2 exposes
-  document/object/instance IDs, mutation revisions, owned full-scene snapshots,
-  copied canonical meshes, names/bounds/pivots, and one disposal function.
-  Index/count/get/borrowed-mesh proof APIs are removed.
-- [2026-10-06 CODE] `EnginePlater.apply` retains its session lock across a
-  mutation plus snapshot and verifies returned revision equality. Swift scene
-  values are all-let and ABI ownership/validation stays in OrcaBridge.
-- [2026-10-06 CODE] `PlaterView` no longer maintains `PlaterObjectState` or
-  UUID sync tokens. Selection and commands use stable IDs; gesture preview is
-  a separate overlay; mutations/snapshot copies execute off-main; stale
-  revisions are rejected.
-- [2026-10-06 CODE] Renderer consumes coherent snapshots atomically, caches GPU
-  meshes by object ID + mesh revision, and emits stable IDs from picking.
-  Coordinate conversion is centralized and old anchor coupling is removed.
-- [2026-10-06 CODE] Model imports use upstream `Model::add_object`, preserving
-  parent pointers and generating valid engine IDs. Transform/ensure-on-bed
-  mutations stage candidate state before commit; unsupported mirror/non-z/
-  nonuniform transforms fail explicitly.
-- [2026-10-06 TOOL] Core archive rebuilt: 259 members / 259 unique; packaged
-  header equals source; new snapshot invariants verified in the archive;
-  redirected `xtool dev build` completes with no warnings.
+- [2026-10-06 CODE][TOOL] C ABI v2 stable snapshot state landed in `ef29203`:
+  engine object/instance IDs, mutation revisions, owned canonical meshes, one
+  coherent snapshot read, immutable Swift values, and stable renderer caches.
+- [2026-10-06 CODE] `AppEnvironment` now owns process-lifetime client stores.
+  `DocumentStore`, `PresetStore`, `SliceService`, `EnginePaths`, and
+  `StatusCenter` own engine/file/job policy; `PlaterView` is presentation-only.
+- [2026-10-06 CODE] All blocking engine/file operations use one typed detached
+  work boundary. Document busy/stale/preview rules and transactional preset
+  persistence are centralized; slice outcomes carry source revision/config.
+- [2026-10-06 TOOL] Core archive remains 259/259 unique with matching headers;
+  the decomposed Swift client passes a warning-free redirected xtool build.
 
 ## DISCOVERIES
 
