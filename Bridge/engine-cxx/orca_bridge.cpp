@@ -1,9 +1,6 @@
 #include "orca_bridge.h"
 
-#include "libslic3r/ExPolygon.hpp"
 #include "libslic3r/I18N.hpp"
-#include "libslic3r/TriangleMesh.hpp"
-#include "libslic3r/TriangleMeshSlicer.hpp"
 
 #include <algorithm>
 #include <cerrno>
@@ -18,6 +15,7 @@
 #include <new>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include <sys/stat.h>
@@ -84,9 +82,16 @@ static orca_result orcapad_fail(orca_status_code code, const char *operation,
     return result;
 }
 
+// Upstream ObjectBase ID allocation and multiple other engine globals assume
+// single-threaded entry. Swift session locks protect handles, while this
+// recursive process lock protects the untouched engine across all handles and
+// permits same-thread progress callbacks to re-enter the Bridge deliberately.
+static std::recursive_mutex orcapad_engine_mutex;
+
 template <class Function>
 static orca_result orcapad_guard(const char *operation, Function &&function) noexcept {
     try {
+        std::lock_guard<std::recursive_mutex> engine_lock(orcapad_engine_mutex);
         return function();
     } catch (const std::bad_alloc &) {
         return orcapad_fail(ORCA_STATUS_OUT_OF_MEMORY, operation, "allocation failed");
@@ -110,167 +115,6 @@ void orca_result_dispose(orca_result *result) {
     if (!result) return;
     orca_owned_string_dispose(&result->diagnostic);
     result->code = ORCA_STATUS_OK;
-}
-
-// --- mesh handle ------------------------------------------------------
-
-// --- shared packing: engine z-up mesh → viewer-space (y-up) buffers -----
-// Packed geometry is recentred on the object's bbox centre (x/y) so it can
-// be rendered per-instance as: T(anchor) * Ry(rot_z) * S(scale), where
-// anchor = instance_matrix * centre (computed in orca_plater_instance_get).
-struct orcapad_packed {
-    std::vector<float>    positions;        // viewer-space xyz
-    std::vector<uint32_t> indices;          // triangle indices
-    float                 emin[3], emax[3]; // engine-space bbox
-    float                 center[2];        // engine-space xy pivot
-    bool                  valid = false;
-};
-
-static void orcapad_pack(const Slic3r::TriangleMesh &mesh, orcapad_packed *out) {
-    const auto &its = mesh.its;
-    for (int i = 0; i < 3; ++i) { out->emin[i] = 1e30f; out->emax[i] = -1e30f; }
-    for (const auto &v : its.vertices)
-        for (int i = 0; i < 3; ++i) {
-            float c = v(i);
-            out->emin[i] = std::min(out->emin[i], c);
-            out->emax[i] = std::max(out->emax[i], c);
-        }
-    const float cx = 0.5f * (out->emin[0] + out->emax[0]);
-    const float cy = 0.5f * (out->emin[1] + out->emax[1]);
-    out->center[0] = cx; out->center[1] = cy;
-    out->positions.clear(); out->indices.clear();
-    out->positions.reserve(its.vertices.size() * 3);
-    for (const auto &v : its.vertices) {
-        out->positions.push_back(v.x() - cx);
-        out->positions.push_back(v.z());
-        out->positions.push_back(-(v.y() - cy));
-    }
-    out->indices.reserve(its.indices.size() * 3);
-    for (const auto &f : its.indices)
-        for (int i = 0; i < 3; ++i)
-            out->indices.push_back((uint32_t)f(i));
-    out->valid = true;
-}
-
-static bool orcapad_fill_view(const orcapad_packed &p, orca_mesh_view *v) {
-    memset(v, 0, sizeof(*v));
-    const size_t position_count = p.positions.size() / 3;
-    if (position_count > static_cast<size_t>(std::numeric_limits<int32_t>::max()) ||
-        p.indices.size() > static_cast<size_t>(std::numeric_limits<int32_t>::max()))
-        return false;
-    v->positions = p.positions.data();
-    v->position_count = static_cast<int32_t>(position_count);
-    v->indices = p.indices.data();
-    v->index_count = static_cast<int32_t>(p.indices.size());
-    v->bbox_min[0] = p.emin[0] - p.center[0];
-    v->bbox_max[0] = p.emax[0] - p.center[0];
-    v->bbox_min[1] = p.emin[2];
-    v->bbox_max[1] = p.emax[2];
-    v->bbox_min[2] = -(p.emax[1] - p.center[1]);
-    v->bbox_max[2] = -(p.emin[1] - p.center[1]);
-    return true;
-}
-
-struct orca_mesh {
-    Slic3r::TriangleMesh mesh;       // original engine-space (z-up) mesh
-    orcapad_packed       packed;     // viewer-space buffers + pivot
-};
-
-orca_result orca_stl_load(const char *path, orca_mesh **out_mesh,
-                          orca_mesh_view *out_view) {
-    constexpr const char *operation = "orca_stl_load";
-    if (out_mesh) *out_mesh = nullptr;
-    if (out_view) std::memset(out_view, 0, sizeof(*out_view));
-    if (!out_mesh || !out_view)
-        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
-                            "output pointer is null");
-    if (!path || !path[0])
-        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
-                            "path is empty");
-    struct stat path_status;
-    if (stat(path, &path_status) != 0)
-        return orcapad_fail(ORCA_STATUS_IO_FAILURE, operation,
-                            "input file is not accessible");
-
-    return orcapad_guard(operation, [&]() -> orca_result {
-        auto mesh = std::make_unique<orca_mesh>();
-        if (!mesh->mesh.ReadSTLFile(path))
-            return orcapad_fail(ORCA_STATUS_INVALID_MODEL, operation,
-                                "STL could not be read");
-        const auto &indexed = mesh->mesh.its;
-        if (indexed.indices.empty() || indexed.vertices.empty())
-            return orcapad_fail(ORCA_STATUS_INVALID_MODEL, operation,
-                                "mesh is empty");
-
-        orcapad_pack(mesh->mesh, &mesh->packed);
-        if (!orcapad_fill_view(mesh->packed, out_view))
-            return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
-                                "mesh exceeds ABI count range");
-        *out_mesh = mesh.release();
-        return orcapad_ok();
-    });
-}
-
-void orca_mesh_free(orca_mesh *mesh) { delete mesh; }
-
-orca_result orca_slice_report(orca_mesh *mesh, int32_t levels,
-                              int32_t *out_levels, int32_t *out_mid_islands,
-                              double *out_mid_area_mm2) {
-    constexpr const char *operation = "orca_slice_report";
-    if (out_levels) *out_levels = 0;
-    if (out_mid_islands) *out_mid_islands = 0;
-    if (out_mid_area_mm2) *out_mid_area_mm2 = 0.0;
-    if (!out_levels || !out_mid_islands || !out_mid_area_mm2)
-        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
-                            "output pointer is null");
-    if (!mesh)
-        return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation,
-                            "mesh handle is null");
-    if (levels < 1)
-        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
-                            "levels must be positive");
-
-    return orcapad_guard(operation, [&]() -> orca_result {
-        const auto &indexed = mesh->mesh.its;
-        float zmin = 1e30f, zmax = -1e30f;
-        for (const auto &vertex : indexed.vertices) {
-            zmin = std::min(zmin, vertex.z());
-            zmax = std::max(zmax, vertex.z());
-        }
-        const float first_layer = 0.2f;
-        std::vector<float> zs;
-        zs.reserve(static_cast<size_t>(levels));
-        for (int32_t index = 0; index < levels; ++index) {
-            const float fraction = static_cast<float>(index + 1) /
-                                   static_cast<float>(levels + 1);
-            zs.push_back(zmin + first_layer +
-                         fraction * ((zmax - first_layer) - zmin));
-        }
-
-        Slic3r::MeshSlicingParamsEx params;
-        std::vector<Slic3r::ExPolygons> slices =
-            Slic3r::slice_mesh_ex(indexed, zs, params);
-        if (slices.empty())
-            return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
-                                "engine returned no slice levels");
-        if (slices.size() > static_cast<size_t>(std::numeric_limits<int32_t>::max()))
-            return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
-                                "slice level count exceeds ABI range");
-
-        const size_t middle = slices.size() / 2;
-        if (slices[middle].size() >
-            static_cast<size_t>(std::numeric_limits<int32_t>::max()))
-            return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
-                                "island count exceeds ABI range");
-        const int32_t level_count = static_cast<int32_t>(slices.size());
-        const int32_t island_count =
-            static_cast<int32_t>(slices[middle].size());
-        const double area_mm2 = Slic3r::area(slices[middle]);
-        *out_levels = level_count;
-        *out_mid_islands = island_count;
-        *out_mid_area_mm2 = area_mm2;
-        return orcapad_ok();
-    });
 }
 
 // --- full slice pipeline ------------------------------------------------
@@ -574,24 +418,37 @@ orca_result orca_presets_current(orca_presets *presets, int32_t kind,
 // --- plater session ------------------------------------------------------
 
 struct orca_plater {
-    Slic3r::Model               model;
-    std::vector<orcapad_packed> cache;   // per object; only add/delete invalidates
-
-    orcapad_packed *packed_for(int32_t object_id) {
-        if (object_id < 0 || static_cast<size_t>(object_id) >= model.objects.size())
-            return nullptr;
-        orcapad_packed *packed = &cache[static_cast<size_t>(object_id)];
-        if (!packed->valid)
-            orcapad_pack(model.objects[static_cast<size_t>(object_id)]->raw_mesh(),
-                         packed);
-        return packed;
-    }
+    Slic3r::Model model;
+    orca_revision revision = 0;
+    std::unordered_map<orca_object_id, uint64_t> mesh_revisions;
 };
 
-static Slic3r::ModelObject *plater_obj(orca_plater *plater, int32_t id) {
-    if (!plater || id < 0 || static_cast<size_t>(id) >= plater->model.objects.size())
+static Slic3r::ModelObject *plater_obj(orca_plater *plater,
+                                      orca_object_id id) {
+    if (!plater || id == 0 || id > std::numeric_limits<size_t>::max())
         return nullptr;
-    return plater->model.objects[static_cast<size_t>(id)];
+    for (Slic3r::ModelObject *object : plater->model.objects)
+        if (object->id().id == static_cast<size_t>(id)) return object;
+    return nullptr;
+}
+
+static Slic3r::ModelInstance *plater_instance(Slic3r::ModelObject *object,
+                                              orca_instance_id id,
+                                              size_t *out_index = nullptr) {
+    if (!object || id == 0 || id > std::numeric_limits<size_t>::max())
+        return nullptr;
+    for (size_t index = 0; index < object->instances.size(); ++index) {
+        Slic3r::ModelInstance *instance = object->instances[index];
+        if (instance->id().id == static_cast<size_t>(id)) {
+            if (out_index) *out_index = index;
+            return instance;
+        }
+    }
+    return nullptr;
+}
+
+static bool orcapad_revision_available(const orca_plater &plater) {
+    return plater.revision < std::numeric_limits<orca_revision>::max();
 }
 
 static bool orcapad_valid_transform(const orca_instance_transform &transform) {
@@ -617,13 +474,15 @@ orca_result orca_plater_new(orca_plater **out) {
 void orca_plater_free(orca_plater *plater) { delete plater; }
 
 orca_result orca_plater_add_stl(orca_plater *plater, const char *path,
-                                int32_t *out_object_id) {
+                                orca_object_id *out_object_id,
+                                orca_revision *out_revision) {
     constexpr const char *operation = "orca_plater_add_stl";
-    if (out_object_id) *out_object_id = -1;
+    if (out_object_id) *out_object_id = 0;
+    if (out_revision) *out_revision = 0;
     if (!plater)
         return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation,
                             "plater handle is null");
-    if (!path || !path[0] || !out_object_id)
+    if (!path || !path[0] || !out_object_id || !out_revision)
         return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
                             "path is empty or output pointer is null");
     struct stat path_status;
@@ -632,80 +491,92 @@ orca_result orca_plater_add_stl(orca_plater *plater, const char *path,
                             "input file is not accessible");
 
     return orcapad_guard(operation, [&]() -> orca_result {
+        if (!orcapad_revision_available(*plater))
+            return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
+                                "document revision is exhausted");
         Slic3r::Model temporary = Slic3r::Model::read_from_file(path);
         if (temporary.objects.empty())
             return orcapad_fail(ORCA_STATUS_INVALID_MODEL, operation,
                                 "input contains no model object");
-        if (plater->model.objects.size() >=
-            static_cast<size_t>(std::numeric_limits<int32_t>::max()))
-            return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
-                                "object count exceeds ABI range");
         temporary.objects[0]->ensure_on_bed(false);
-        plater->cache.emplace_back();
+        Slic3r::ModelObject *object =
+            plater->model.add_object(*temporary.objects[0]);
+        if (!object)
+            return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
+                                "engine did not create a document object");
+        const orca_object_id id = static_cast<orca_object_id>(object->id().id);
+        if (id == 0) {
+            plater->model.delete_object(object);
+            return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
+                                "engine returned an invalid object ID");
+        }
         try {
-            plater->model.objects.push_back(std::move(temporary.objects[0]));
+            const auto inserted = plater->mesh_revisions.emplace(id, 1);
+            if (!inserted.second) {
+                plater->model.delete_object(object);
+                return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
+                                    "engine reused an existing object ID");
+            }
         } catch (...) {
-            plater->cache.pop_back();
+            plater->model.delete_object(object);
             throw;
         }
-        temporary.objects.clear();
-        *out_object_id = static_cast<int32_t>(plater->model.objects.size() - 1);
+        ++plater->revision;
+        *out_object_id = id;
+        *out_revision = plater->revision;
         return orcapad_ok();
     });
 }
 
-orca_result orca_plater_object_count(orca_plater *plater, int32_t *out_count) {
-    constexpr const char *operation = "orca_plater_object_count";
-    if (out_count) *out_count = 0;
-    if (!plater)
-        return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation,
-                            "plater handle is null");
-    if (!out_count)
-        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
-                            "output pointer is null");
-    const size_t count = plater->model.objects.size();
-    if (count > static_cast<size_t>(std::numeric_limits<int32_t>::max()))
-        return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
-                            "object count exceeds ABI range");
-    *out_count = static_cast<int32_t>(count);
-    return orcapad_ok();
-}
-
-orca_result orca_plater_object_delete(orca_plater *plater, int32_t object_id) {
+orca_result orca_plater_object_delete(orca_plater *plater,
+                                      orca_object_id object_id,
+                                      orca_revision *out_revision) {
     constexpr const char *operation = "orca_plater_object_delete";
+    if (out_revision) *out_revision = 0;
     if (!plater)
         return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation,
                             "plater handle is null");
-    if (!plater_obj(plater, object_id))
-        return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation,
-                            "object was not found");
+    if (!out_revision)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "output pointer is null");
     return orcapad_guard(operation, [&]() -> orca_result {
-        plater->model.delete_object(static_cast<size_t>(object_id));
-        plater->cache.erase(plater->cache.begin() + object_id);
+        if (!plater_obj(plater, object_id))
+            return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation,
+                                "object was not found");
+        if (!orcapad_revision_available(*plater))
+            return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
+                                "document revision is exhausted");
+        if (!plater->model.delete_object(
+                Slic3r::ObjectID(static_cast<size_t>(object_id))))
+            return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
+                                "engine did not delete the object");
+        plater->mesh_revisions.erase(object_id);
+        *out_revision = ++plater->revision;
         return orcapad_ok();
     });
 }
 
-orca_result orca_plater_instance_add(orca_plater *plater, int32_t object_id,
-                                     int32_t *out_instance_id) {
+orca_result orca_plater_instance_add(orca_plater *plater,
+                                     orca_object_id object_id,
+                                     orca_instance_id *out_instance_id,
+                                     orca_revision *out_revision) {
     constexpr const char *operation = "orca_plater_instance_add";
-    if (out_instance_id) *out_instance_id = -1;
+    if (out_instance_id) *out_instance_id = 0;
+    if (out_revision) *out_revision = 0;
     if (!plater)
         return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation,
                             "plater handle is null");
-    if (!out_instance_id)
+    if (!out_instance_id || !out_revision)
         return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
                             "output pointer is null");
-    Slic3r::ModelObject *object = plater_obj(plater, object_id);
-    if (!object)
-        return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation,
-                            "object was not found");
-    if (object->instances.size() >=
-        static_cast<size_t>(std::numeric_limits<int32_t>::max()))
-        return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
-                            "instance count exceeds ABI range");
-
     return orcapad_guard(operation, [&]() -> orca_result {
+        Slic3r::ModelObject *object = plater_obj(plater, object_id);
+        if (!object)
+            return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation,
+                                "object was not found");
+        if (!orcapad_revision_available(*plater))
+            return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
+                                "document revision is exhausted");
         const size_t original_count = object->instances.size();
         Slic3r::ModelInstance *instance = object->instances.empty()
             ? object->add_instance()
@@ -722,172 +593,308 @@ orca_result orca_plater_instance_add(orca_plater *plater, int32_t object_id,
                 object->delete_instance(object->instances.size() - 1);
             throw;
         }
-        *out_instance_id = static_cast<int32_t>(object->instances.size() - 1);
+        const orca_instance_id id =
+            static_cast<orca_instance_id>(instance->id().id);
+        if (id == 0) {
+            object->delete_instance(object->instances.size() - 1);
+            return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
+                                "engine returned an invalid instance ID");
+        }
+        *out_instance_id = id;
+        *out_revision = ++plater->revision;
         return orcapad_ok();
     });
 }
 
-orca_result orca_plater_instance_delete(orca_plater *plater, int32_t object_id,
-                                        int32_t instance_id) {
+orca_result orca_plater_instance_delete(orca_plater *plater,
+                                        orca_object_id object_id,
+                                        orca_instance_id instance_id,
+                                        orca_revision *out_revision) {
     constexpr const char *operation = "orca_plater_instance_delete";
+    if (out_revision) *out_revision = 0;
     if (!plater)
         return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation,
                             "plater handle is null");
-    Slic3r::ModelObject *object = plater_obj(plater, object_id);
-    if (!object)
-        return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation,
-                            "object was not found");
-    if (instance_id < 0 ||
-        static_cast<size_t>(instance_id) >= object->instances.size())
-        return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation,
-                            "instance was not found");
-    if (object->instances.size() == 1)
-        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
-                            "last instance requires deleting the object");
-
-    return orcapad_guard(operation, [&]() -> orca_result {
-        object->delete_instance(static_cast<size_t>(instance_id));
-        return orcapad_ok();
-    });
-}
-
-orca_result orca_plater_instance_count(orca_plater *plater, int32_t object_id,
-                                       int32_t *out_count) {
-    constexpr const char *operation = "orca_plater_instance_count";
-    if (out_count) *out_count = 0;
-    if (!plater)
-        return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation,
-                            "plater handle is null");
-    if (!out_count)
+    if (!out_revision)
         return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
                             "output pointer is null");
-    Slic3r::ModelObject *object = plater_obj(plater, object_id);
-    if (!object)
-        return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation,
-                            "object was not found");
-    const size_t count = object->instances.size();
-    if (count > static_cast<size_t>(std::numeric_limits<int32_t>::max()))
-        return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
-                            "instance count exceeds ABI range");
-    *out_count = static_cast<int32_t>(count);
-    return orcapad_ok();
+    return orcapad_guard(operation, [&]() -> orca_result {
+        Slic3r::ModelObject *object = plater_obj(plater, object_id);
+        if (!object)
+            return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation,
+                                "object was not found");
+        size_t instance_index = 0;
+        if (!plater_instance(object, instance_id, &instance_index))
+            return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation,
+                                "instance was not found");
+        if (object->instances.size() == 1)
+            return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                                "last instance requires deleting the object");
+        if (!orcapad_revision_available(*plater))
+            return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
+                                "document revision is exhausted");
+        object->delete_instance(instance_index);
+        *out_revision = ++plater->revision;
+        return orcapad_ok();
+    });
 }
 
-orca_result orca_plater_instance_set(orca_plater *plater, int32_t object_id,
-                                     int32_t instance_id,
-                                     const orca_instance_transform *transform) {
+orca_result orca_plater_instance_set(orca_plater *plater,
+                                     orca_object_id object_id,
+                                     orca_instance_id instance_id,
+                                     const orca_instance_transform *transform,
+                                     orca_revision *out_revision) {
     constexpr const char *operation = "orca_plater_instance_set";
+    if (out_revision) *out_revision = 0;
     if (!plater)
         return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation,
                             "plater handle is null");
-    if (!transform)
+    if (!transform || !out_revision)
         return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
-                            "transform pointer is null");
+                            "transform or output pointer is null");
     if (!orcapad_valid_transform(*transform))
         return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
                             "transform contains a non-finite value or invalid scale");
-    Slic3r::ModelObject *object = plater_obj(plater, object_id);
-    if (!object)
-        return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation,
-                            "object was not found");
-    if (instance_id < 0 ||
-        static_cast<size_t>(instance_id) >= object->instances.size())
-        return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation,
-                            "instance was not found");
-
     return orcapad_guard(operation, [&]() -> orca_result {
-        Slic3r::ModelInstance *instance =
-            object->instances[static_cast<size_t>(instance_id)];
-        instance->set_offset(Slic3r::Vec3d(
+        Slic3r::ModelObject *object = plater_obj(plater, object_id);
+        if (!object)
+            return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation,
+                                "object was not found");
+        Slic3r::ModelInstance *instance = plater_instance(object, instance_id);
+        if (!instance)
+            return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation,
+                                "instance was not found");
+        if (!orcapad_revision_available(*plater))
+            return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
+                                "document revision is exhausted");
+        Slic3r::Geometry::Transformation candidate =
+            instance->get_transformation();
+        candidate.set_offset(Slic3r::Vec3d(
             transform->offset_x, transform->offset_y, transform->offset_z));
-        instance->set_rotation(
+        candidate.set_rotation(
             Slic3r::Vec3d(0.0, 0.0, transform->rotation_z));
-        instance->set_scaling_factor(Slic3r::Vec3d(
+        candidate.set_scaling_factor(Slic3r::Vec3d(
             transform->scale, transform->scale, transform->scale));
+        instance->set_transformation(candidate);
         object->invalidate_bounding_box();
+        *out_revision = ++plater->revision;
         return orcapad_ok();
     });
 }
 
-orca_result orca_plater_instance_get(orca_plater *plater, int32_t object_id,
-                                     int32_t instance_id,
-                                     orca_instance_transform *out_transform) {
-    constexpr const char *operation = "orca_plater_instance_get";
-    if (out_transform) std::memset(out_transform, 0, sizeof(*out_transform));
-    if (!plater)
-        return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation,
-                            "plater handle is null");
-    if (!out_transform)
-        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
-                            "output pointer is null");
-    Slic3r::ModelObject *object = plater_obj(plater, object_id);
-    if (!object)
-        return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation,
-                            "object was not found");
-    if (instance_id < 0 ||
-        static_cast<size_t>(instance_id) >= object->instances.size())
-        return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation,
-                            "instance was not found");
-
-    return orcapad_guard(operation, [&]() -> orca_result {
-        const Slic3r::ModelInstance *instance =
-            object->instances[static_cast<size_t>(instance_id)];
-        orca_instance_transform value {};
-        value.offset_x = instance->get_offset().x();
-        value.offset_y = instance->get_offset().y();
-        value.offset_z = instance->get_offset().z();
-        value.rotation_z = instance->get_rotation().z();
-        value.scale = instance->get_scaling_factor().x();
-        orcapad_packed *packed = plater->packed_for(object_id);
-        if (!packed)
-            return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
-                                "packing cache is unavailable");
-        const Slic3r::Transform3d matrix = instance->get_matrix();
-        const Slic3r::Vec3d anchor =
-            (matrix * Slic3r::Vec4d(
-                packed->center[0], packed->center[1], 0.0, 1.0)).head<3>();
-        value.anchor_x = anchor.x();
-        value.anchor_y = anchor.y();
-        value.anchor_z = anchor.z();
-        *out_transform = value;
-        return orcapad_ok();
-    });
-}
-
-orca_result orca_plater_mesh_view(orca_plater *plater, int32_t object_id,
-                                  orca_mesh_view *out_view) {
-    constexpr const char *operation = "orca_plater_mesh_view";
-    if (out_view) std::memset(out_view, 0, sizeof(*out_view));
-    if (!plater)
-        return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation,
-                            "plater handle is null");
-    if (!out_view)
-        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
-                            "output pointer is null");
-    if (!plater_obj(plater, object_id))
-        return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation,
-                            "object was not found");
-
-    return orcapad_guard(operation, [&]() -> orca_result {
-        orcapad_packed *packed = plater->packed_for(object_id);
-        if (!packed)
-            return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
-                                "packing cache is unavailable");
-        if (!orcapad_fill_view(*packed, out_view))
-            return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
-                                "mesh exceeds ABI count range");
-        return orcapad_ok();
-    });
-}
-
-orca_result orca_plater_ensure_on_bed(orca_plater *plater) {
+orca_result orca_plater_ensure_on_bed(orca_plater *plater,
+                                      orca_revision *out_revision) {
     constexpr const char *operation = "orca_plater_ensure_on_bed";
+    if (out_revision) *out_revision = 0;
     if (!plater)
         return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation,
                             "plater handle is null");
+    if (!out_revision)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "output pointer is null");
     return orcapad_guard(operation, [&]() -> orca_result {
-        for (Slic3r::ModelObject *object : plater->model.objects)
+        if (!orcapad_revision_available(*plater))
+            return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
+                                "document revision is exhausted");
+        Slic3r::Model candidate(plater->model);
+        for (Slic3r::ModelObject *object : candidate.objects)
             object->ensure_on_bed(false);
+        plater->model = std::move(candidate);
+        *out_revision = ++plater->revision;
+        return orcapad_ok();
+    });
+}
+
+static orca_scene_snapshot orcapad_empty_snapshot() noexcept {
+    return { 0, 0, nullptr, 0 };
+}
+
+void orca_scene_snapshot_dispose(orca_scene_snapshot *snapshot) {
+    if (!snapshot) return;
+    if (snapshot->objects) {
+        for (int32_t index = 0; index < snapshot->object_count; ++index) {
+            orca_scene_object &object = snapshot->objects[index];
+            orca_owned_string_dispose(&object.name);
+            std::free(object.positions);
+            std::free(object.indices);
+            std::free(object.instances);
+        }
+    }
+    std::free(snapshot->objects);
+    *snapshot = orcapad_empty_snapshot();
+}
+
+orca_result orca_plater_snapshot(orca_plater *plater,
+                                 orca_scene_snapshot *out_snapshot) {
+    constexpr const char *operation = "orca_plater_snapshot";
+    if (out_snapshot) *out_snapshot = orcapad_empty_snapshot();
+    if (!plater)
+        return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation,
+                            "plater handle is null");
+    if (!out_snapshot)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "output pointer is null");
+
+    return orcapad_guard(operation, [&]() -> orca_result {
+        if (plater->model.objects.size() >
+            static_cast<size_t>(std::numeric_limits<int32_t>::max()))
+            return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
+                                "object count exceeds ABI range");
+
+        orca_scene_snapshot snapshot = orcapad_empty_snapshot();
+        std::unique_ptr<orca_scene_snapshot,
+                        void (*)(orca_scene_snapshot *)> cleanup(
+            &snapshot, &orca_scene_snapshot_dispose);
+        snapshot.document_id =
+            static_cast<orca_document_id>(plater->model.id().id);
+        snapshot.revision = plater->revision;
+        snapshot.object_count =
+            static_cast<int32_t>(plater->model.objects.size());
+        if (snapshot.document_id == 0) {
+            return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
+                                "engine returned an invalid document ID");
+        }
+        if (snapshot.object_count > 0) {
+            snapshot.objects = static_cast<orca_scene_object *>(std::calloc(
+                static_cast<size_t>(snapshot.object_count),
+                sizeof(orca_scene_object)));
+            if (!snapshot.objects)
+                return orcapad_fail(ORCA_STATUS_OUT_OF_MEMORY, operation,
+                                    "could not allocate snapshot objects");
+        }
+
+        auto fail_snapshot = [&](orca_status_code code,
+                                 const char *detail) -> orca_result {
+            orca_scene_snapshot_dispose(&snapshot);
+            return orcapad_fail(code, operation, detail);
+        };
+
+        for (int32_t object_index = 0;
+             object_index < snapshot.object_count; ++object_index) {
+            const Slic3r::ModelObject *model_object =
+                plater->model.objects[static_cast<size_t>(object_index)];
+            orca_scene_object &object = snapshot.objects[object_index];
+            object.id = static_cast<orca_object_id>(model_object->id().id);
+            if (object.id == 0)
+                return fail_snapshot(ORCA_STATUS_INTERNAL_INVARIANT,
+                                     "engine returned an invalid object ID");
+            const auto mesh_revision = plater->mesh_revisions.find(object.id);
+            if (mesh_revision == plater->mesh_revisions.end())
+                return fail_snapshot(ORCA_STATUS_INTERNAL_INVARIANT,
+                                     "object mesh revision is missing");
+            object.mesh_revision = mesh_revision->second;
+            if (!orcapad_copy_string(model_object->name.c_str(), &object.name))
+                return fail_snapshot(ORCA_STATUS_OUT_OF_MEMORY,
+                                     "could not allocate object name");
+
+            const auto &indexed = model_object->raw_mesh().its;
+            if (indexed.vertices.empty() || indexed.indices.empty())
+                return fail_snapshot(ORCA_STATUS_INVALID_MODEL,
+                                     "object mesh is empty");
+            if (indexed.vertices.size() >
+                    static_cast<size_t>(std::numeric_limits<int32_t>::max()) ||
+                indexed.indices.size() >
+                    static_cast<size_t>(std::numeric_limits<int32_t>::max() / 3))
+                return fail_snapshot(ORCA_STATUS_INTERNAL_INVARIANT,
+                                     "mesh exceeds ABI count range");
+
+            object.position_count =
+                static_cast<int32_t>(indexed.vertices.size());
+            object.index_count =
+                static_cast<int32_t>(indexed.indices.size() * 3);
+            object.positions = static_cast<float *>(std::malloc(
+                static_cast<size_t>(object.position_count) * 3 * sizeof(float)));
+            object.indices = static_cast<uint32_t *>(std::malloc(
+                static_cast<size_t>(object.index_count) * sizeof(uint32_t)));
+            if (!object.positions || !object.indices)
+                return fail_snapshot(ORCA_STATUS_OUT_OF_MEMORY,
+                                     "could not allocate snapshot mesh");
+
+            for (int axis = 0; axis < 3; ++axis) {
+                object.bbox_min[axis] = std::numeric_limits<float>::max();
+                object.bbox_max[axis] = std::numeric_limits<float>::lowest();
+            }
+            for (int32_t vertex_index = 0;
+                 vertex_index < object.position_count; ++vertex_index) {
+                const auto &vertex =
+                    indexed.vertices[static_cast<size_t>(vertex_index)];
+                for (int axis = 0; axis < 3; ++axis) {
+                    const float coordinate = vertex(axis);
+                    if (!std::isfinite(coordinate))
+                        return fail_snapshot(ORCA_STATUS_INVALID_MODEL,
+                                             "mesh contains a non-finite vertex");
+                    object.positions[static_cast<size_t>(vertex_index) * 3 + axis] =
+                        coordinate;
+                    object.bbox_min[axis] =
+                        std::min(object.bbox_min[axis], coordinate);
+                    object.bbox_max[axis] =
+                        std::max(object.bbox_max[axis], coordinate);
+                }
+            }
+            object.pivot[0] = 0.5f * (object.bbox_min[0] + object.bbox_max[0]);
+            object.pivot[1] = 0.5f * (object.bbox_min[1] + object.bbox_max[1]);
+            object.pivot[2] = 0.0f;
+
+            size_t flat_index = 0;
+            for (const auto &triangle : indexed.indices)
+                for (int corner = 0; corner < 3; ++corner) {
+                    if (triangle(corner) < 0 ||
+                        triangle(corner) >= object.position_count)
+                        return fail_snapshot(ORCA_STATUS_INVALID_MODEL,
+                                             "mesh index is out of range");
+                    object.indices[flat_index++] =
+                        static_cast<uint32_t>(triangle(corner));
+                }
+
+            if (model_object->instances.size() >
+                static_cast<size_t>(std::numeric_limits<int32_t>::max()))
+                return fail_snapshot(ORCA_STATUS_INTERNAL_INVARIANT,
+                                     "instance count exceeds ABI range");
+            object.instance_count =
+                static_cast<int32_t>(model_object->instances.size());
+            if (object.instance_count > 0) {
+                object.instances = static_cast<orca_scene_instance *>(std::calloc(
+                    static_cast<size_t>(object.instance_count),
+                    sizeof(orca_scene_instance)));
+                if (!object.instances)
+                    return fail_snapshot(ORCA_STATUS_OUT_OF_MEMORY,
+                                         "could not allocate snapshot instances");
+            }
+            for (int32_t instance_index = 0;
+                 instance_index < object.instance_count; ++instance_index) {
+                const Slic3r::ModelInstance *model_instance =
+                    model_object->instances[static_cast<size_t>(instance_index)];
+                orca_scene_instance &instance = object.instances[instance_index];
+                instance.id =
+                    static_cast<orca_instance_id>(model_instance->id().id);
+                if (instance.id == 0)
+                    return fail_snapshot(ORCA_STATUS_INTERNAL_INVARIANT,
+                                         "engine returned an invalid instance ID");
+                const Slic3r::Vec3d rotation = model_instance->get_rotation();
+                const Slic3r::Vec3d scaling =
+                    model_instance->get_scaling_factor();
+                const Slic3r::Vec3d mirror = model_instance->get_mirror();
+                if (std::abs(rotation.x()) > 1e-12 ||
+                    std::abs(rotation.y()) > 1e-12 ||
+                    std::abs(scaling.x() - scaling.y()) > 1e-12 ||
+                    std::abs(scaling.x() - scaling.z()) > 1e-12 ||
+                    !mirror.isApprox(Slic3r::Vec3d::Ones(), 1e-12))
+                    return fail_snapshot(
+                        ORCA_STATUS_UNSUPPORTED_CAPABILITY,
+                        "snapshot transform is not unmirrored z-rotation with uniform scale");
+                instance.transform.offset_x = model_instance->get_offset().x();
+                instance.transform.offset_y = model_instance->get_offset().y();
+                instance.transform.offset_z = model_instance->get_offset().z();
+                instance.transform.rotation_z = rotation.z();
+                instance.transform.scale = scaling.x();
+                if (!orcapad_valid_transform(instance.transform))
+                    return fail_snapshot(ORCA_STATUS_INTERNAL_INVARIANT,
+                                         "engine returned an invalid transform");
+            }
+        }
+
+        *out_snapshot = snapshot;
+        cleanup.release();
         return orcapad_ok();
     });
 }

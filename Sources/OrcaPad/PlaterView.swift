@@ -6,12 +6,8 @@ import os
 
 private let presetsLogger = Logger(subsystem: "ie.duz.OrcaPad", category: "presets")
 
-/// Root scene: the plater. 3D canvas full-bleed, lightweight overlays on top.
-///
-/// State model: `objects` (array-indexed == engine object ids; deletes on
-/// both sides shift identically) with per-instance transforms. Structural
-/// changes (import/delete) rebuild mesh uploads; transforms/selection only
-/// refresh instance matrices (cheap path).
+/// Root scene: the plater. The C++ document is authoritative; this view keeps
+/// only its latest immutable snapshot plus transient gesture presentation.
 struct PlaterView: View {
     @State private var rendererStatus = "Metal: starting…"
     @State private var engineStatus = "engine: ready (import an STL)"
@@ -20,15 +16,13 @@ struct PlaterView: View {
     @State private var plater: EnginePlater?
     @State private var presets: EnginePresets?
     @State private var settingsPresented = false
-    @State private var objects: [PlaterObjectState] = []
-    @State private var selection: (objectID: Int, instanceID: Int)?
+    @State private var scene: SceneSnapshot?
+    @State private var selection: (objectID: ObjectID, instanceID: InstanceID)?
     @State private var slicing = false
-
-    // Renderer sync (tokens gate application; see MetalCanvas.updateUIView)
-    @State private var meshToken = UUID()
-    @State private var instanceToken = UUID()
-    @State private var frameToken = UUID()
-    @State private var meshUploads: [SceneObjectUpload]? = nil
+    @State private var documentMutationInFlight = false
+    @State private var previewTransform: InstanceTransform?
+    @State private var presentationRevision: UInt64 = 0
+    @State private var frameRequest: UInt64 = 0
 
     var body: some View {
         ZStack(alignment: .topLeading) {
@@ -53,9 +47,10 @@ struct PlaterView: View {
         }
         .overlay(alignment: .bottom) {
             VStack(spacing: 10) {
-                if let sel = selection, sel.objectID >= 0,
-                   let obj = objectState(sel.objectID), !obj.instances.isEmpty {
-                    selectionHUD(for: sel, object: obj)
+                if let selection,
+                   let object = scene?.object(id: selection.objectID),
+                   !object.instances.isEmpty {
+                    selectionHUD(for: selection, object: object)
                 }
                 platerToolbar
             }
@@ -73,11 +68,12 @@ struct PlaterView: View {
         }
         .onAppear {
             if plater == nil {
-                switch EnginePlater.create() {
-                case .failure(let err):
-                    engineStatus = "plater init FAILED: \(err.message)"
-                case .success(let p):
-                    plater = p
+                do {
+                    let document = try EnginePlater()
+                    scene = try document.snapshot()
+                    plater = document
+                } catch {
+                    engineStatus = "plater init FAILED: \(error.localizedDescription)"
                 }
             }
             if presets == nil {
@@ -134,40 +130,34 @@ struct PlaterView: View {
         }
     }
 
-    private var canvas: MetalCanvas {
-        var instanceSets: [Int: [InstanceDraw]] = [:]
-        for obj in objects {
-            instanceSets[obj.objectID] = obj.instances.enumerated().map { i, st in
-                InstanceDraw(
-                    instanceID: i,
-                    model: PlaterView.modelMatrix(st),
-                    selected: selection?.objectID == obj.objectID && selection?.instanceID == i)
-            }
+    @ViewBuilder
+    private var canvas: some View {
+        if let scene {
+            MetalCanvas(
+                onStatus: { rendererStatus = $0 },
+                scene: SceneSync(
+                    snapshot: scene,
+                    selectedObjectID: selection?.objectID,
+                    selectedInstanceID: selection?.instanceID,
+                    previewTransform: previewTransform,
+                    presentationRevision: presentationRevision,
+                    frameRequest: frameRequest
+                ),
+                onSelect: { objectID, instanceID in
+                    if let objectID, let instanceID {
+                        selection = (objectID, instanceID)
+                    } else {
+                        selection = nil
+                    }
+                    previewTransform = nil
+                    presentationRevision += 1
+                },
+                onMoveSelected: { delta in moveSelected(by: delta) },
+                onMoveEnded: { commitSelectedTransform() }
+            )
+        } else {
+            Color(red: 0.075, green: 0.078, blue: 0.093)
         }
-        return MetalCanvas(
-            onStatus: { rendererStatus = $0 },
-            scene: SceneSync(
-                meshes: meshUploads,
-                meshesToken: meshToken,
-                instances: instanceSets,
-                instancesToken: instanceToken,
-                frameToken: frameToken),
-            onSelect: { oid, iid in
-                selection = (oid >= 0 && iid >= 0) ? (oid, iid) : nil
-                instanceToken = UUID()
-            },
-            onMoveSelected: { delta in moveSelected(by: delta) },
-            onMoveEnded: { commitSelectedTransform() })
-    }
-
-    // MARK: - Engine-space transform → viewer model matrix
-
-    static func modelMatrix(_ t: EnginePlater.Transform) -> simd_float4x4 {
-        // engine world = anchor + R·s·q (q = packed, recentred mesh);
-        // viewer mapping (x,y,z)e → (x,z,-y)v, and Rz(θ)e ≅ Ry(θ)v.
-        Math.translate(SIMD3<Float>(Float(t.anchorX), Float(t.anchorZ), -Float(t.anchorY)))
-            * Math.rotateY(Float(t.rotationZ))
-            * Math.scale(Float(t.scale))
     }
 
     // MARK: - Import flow
@@ -182,64 +172,51 @@ struct PlaterView: View {
     }
 
     private func importSTL(_ url: URL) {
-        guard let plater else { return }
+        guard let plater, !documentMutationInFlight, !slicing else { return }
         guard let tmp = ImportSupport.copyIntoSandbox(url) else {
             engineStatus = "import: copy into sandbox failed"
             return
         }
         let name = url.lastPathComponent
+        documentMutationInFlight = true
         engineStatus = "\(name): loading…"
         Task { @MainActor in
             let outcome = await Task.detached(priority: .userInitiated) {
-                // Blocking engine work off-main: STL read+repair, packing,
-                // flat-shading expansion.
-                switch plater.addSTL(path: tmp.path) {
-                case .failure(let err):
-                    return ImportSupport.Outcome(status: err.message, object: nil)
-                case .success(let objectID):
-                    var transform = EnginePlater.Transform()
-                    var built: ObjectMeshData?
-                    let tRes = plater.getTransform(objectID: objectID, instanceID: 0)
-                    if case .success(let t) = tRes { transform = t }
-                    let mRes = plater.withMeshView(objectID: objectID) { view -> ObjectMeshData in
-                        let expanded = Geometry.expandFlat(
-                            positions: view.positions,
-                            positionCount: Int(view.position_count),
-                            indices: view.indices,
-                            indexCount: Int(view.index_count))
-                        return ObjectMeshData(
-                            verts: expanded.verts,
-                            idx: expanded.idx,
-                            bboxMin: SIMD3<Float>(view.bbox_min.0, view.bbox_min.1, view.bbox_min.2),
-                            bboxMax: SIMD3<Float>(view.bbox_max.0, view.bbox_max.1, view.bbox_max.2))
-                    }
-                    if case .success(let mesh) = mRes { built = mesh }
-                    guard let mesh = built else {
+                do {
+                    let mutation = try plater.apply(.importModel(path: tmp.path))
+                    guard let objectID = mutation.createdObjectID,
+                          let object = mutation.snapshot.object(id: objectID) else {
                         return ImportSupport.Outcome(
-                            status: "import FAILED: mesh packing", object: nil)
+                            status: "import FAILED: created object is absent from snapshot",
+                            mutation: nil
+                        )
                     }
-                    let dims = mesh.bboxMax - mesh.bboxMin
-                    let line = "\(name) · \(mesh.idx.count / 3) tris · " +
-                        String(format: "%.0f×%.0f×%.0f mm", dims.x, dims.y, dims.z)
+                    let dimensions = object.mesh.bounds.size
+                    let line = "\(name) · \(object.mesh.indices.count / 3) tris · " +
+                        String(
+                            format: "%.0f×%.0f×%.0f mm",
+                            dimensions.x,
+                            dimensions.y,
+                            dimensions.z
+                        )
                     return ImportSupport.Outcome(
                         status: line,
-                        object: PlaterObjectState(
-                            objectID: objectID, name: name,
-                            mesh: mesh, instances: [transform]))
+                        mutation: mutation
+                    )
+                } catch {
+                    return ImportSupport.Outcome(
+                        status: "import FAILED: \(error.localizedDescription)",
+                        mutation: nil
+                    )
                 }
             }.value
 
-            switch outcome.object {
-            case .some(let state):
-                objects.append(state)
-                rebuildMeshUploads()
-                meshToken = UUID()
-                instanceToken = UUID()
-                frameToken = UUID()
-                engineStatus = outcome.status
-            case .none:
-                engineStatus = outcome.status
+            documentMutationInFlight = false
+            if let mutation = outcome.mutation {
+                install(mutation.snapshot)
+                frameRequest += 1
             }
+            engineStatus = outcome.status
         }
     }
 
@@ -281,156 +258,248 @@ struct PlaterView: View {
 
     // MARK: - Instance ops
 
-    private func addInstance(to objectID: Int) {
-        guard let plater else { return }
-        switch plater.addInstance(objectID: objectID) {
-        case .failure(let err):
-            engineStatus = "add instance FAILED: \(err.message)"
-        case .success(let iid):
-            if case .success(let t) = plater.getTransform(objectID: objectID, instanceID: iid),
-               let i = objects.firstIndex(where: { $0.objectID == objectID }) {
-                objects[i].instances.append(t)
-            }
-            instanceToken = UUID()
-        }
-    }
-
-    private func deleteInstance(_ iid: Int, of objectID: Int) {
-        guard let plater else { return }
-        switch plater.deleteInstance(objectID: objectID, instanceID: iid) {
-        case .failure(let err):
-            engineStatus = "delete instance FAILED: \(err.message)"
-        case .success:
-            if let i = objects.firstIndex(where: { $0.objectID == objectID }) {
-                objects[i].instances.remove(at: iid)
-                if selection?.objectID == objectID { selection = nil }
-                instanceToken = UUID()
+    private func addInstance(to objectID: ObjectID) {
+        runMutation(
+            .addInstance(objectID: objectID),
+            operation: "add instance"
+        ) { mutation in
+            if let instanceID = mutation.createdInstanceID {
+                selection = (objectID, instanceID)
             }
         }
     }
 
-    private func deleteObject(_ objectID: Int) {
-        guard let plater else { return }
-        switch plater.deleteObject(objectID) {
-        case .failure(let err):
-            engineStatus = "delete object FAILED: \(err.message)"
-        case .success:
-            // Engine ids are indices and renumber on delete — our array is
-            // index-aligned, so removing the element keeps both in sync.
-            if let i = objects.firstIndex(where: { $0.objectID == objectID }) {
-                objects.remove(at: i)
-                for j in objects.indices { objects[j].objectID = j }
+    private func deleteInstance(_ instanceID: InstanceID, of objectID: ObjectID) {
+        runMutation(
+            .deleteInstance(objectID: objectID, instanceID: instanceID),
+            operation: "delete instance"
+        )
+    }
+
+    private func deleteObject(_ objectID: ObjectID) {
+        runMutation(.deleteObject(objectID), operation: "delete object")
+    }
+
+    private func deleteObjects(_ objectIDs: [ObjectID]) {
+        guard let plater, !documentMutationInFlight, !slicing else {
+            engineStatus = "delete objects blocked: document is busy"
+            return
+        }
+        documentMutationInFlight = true
+        Task { @MainActor in
+            let outcome = await Task.detached(priority: .userInitiated) {
+                var latest: EnginePlater.MutationResult?
+                for objectID in objectIDs {
+                    do {
+                        latest = try plater.apply(.deleteObject(objectID))
+                    } catch {
+                        return DocumentMutationTaskOutcome(
+                            mutation: latest,
+                            failure: error.localizedDescription
+                        )
+                    }
+                }
+                return DocumentMutationTaskOutcome(
+                    mutation: latest,
+                    failure: nil
+                )
+            }.value
+            documentMutationInFlight = false
+            if let mutation = outcome.mutation {
+                install(mutation.snapshot)
             }
-            selection = nil
-            rebuildMeshUploads()
-            meshToken = UUID()
-            instanceToken = UUID()
+            if let failure = outcome.failure {
+                engineStatus = "delete objects FAILED: \(failure)"
+            }
+        }
+    }
+
+    private func runMutation(
+        _ mutation: EnginePlater.Mutation,
+        operation: String,
+        onSuccess: @escaping (EnginePlater.MutationResult) -> Void = { _ in }
+    ) {
+        guard let plater, !documentMutationInFlight, !slicing else {
+            engineStatus = "\(operation) blocked: document is busy"
+            return
+        }
+        documentMutationInFlight = true
+        Task { @MainActor in
+            let outcome = await Task.detached(priority: .userInitiated) {
+                do {
+                    return DocumentMutationTaskOutcome(
+                        mutation: try plater.apply(mutation),
+                        failure: nil
+                    )
+                } catch {
+                    return DocumentMutationTaskOutcome(
+                        mutation: nil,
+                        failure: error.localizedDescription
+                    )
+                }
+            }.value
+            documentMutationInFlight = false
+            if let mutation = outcome.mutation {
+                install(mutation.snapshot)
+                onSuccess(mutation)
+            } else if let failure = outcome.failure {
+                previewTransform = nil
+                presentationRevision += 1
+                engineStatus = "\(operation) FAILED: \(failure)"
+            }
         }
     }
 
     // MARK: - Move / rotate (selected instance)
 
     private func moveSelected(by delta: SIMD2<Float>) {
-        guard let sel = selection,
-              let oi = objects.firstIndex(where: { $0.objectID == sel.objectID }),
-              objects[oi].instances.indices.contains(sel.instanceID) else { return }
-        // Pure bed translation: offset and anchor both shift by the delta.
-        objects[oi].instances[sel.instanceID].offsetX += Double(delta.x)
-        objects[oi].instances[sel.instanceID].offsetY += Double(delta.y)
-        objects[oi].instances[sel.instanceID].anchorX += Double(delta.x)
-        objects[oi].instances[sel.instanceID].anchorY += Double(delta.y)
-        instanceToken = UUID()
+        guard !documentMutationInFlight,
+              !slicing,
+              let selection,
+              let authoritative = scene?.instance(
+                  objectID: selection.objectID,
+                  instanceID: selection.instanceID
+              )?.transform else { return }
+        var transform = previewTransform ?? authoritative
+        transform.offsetX += Double(delta.x)
+        transform.offsetY += Double(delta.y)
+        previewTransform = transform
+        presentationRevision += 1
     }
 
     private func commitSelectedTransform() {
-        commitTransform(recomputeAnchor: false)
+        commitTransform()
     }
 
     private func rotateSelected(by degrees: Double) {
-        guard let sel = selection,
-              let oi = objects.firstIndex(where: { $0.objectID == sel.objectID }),
-              objects[oi].instances.indices.contains(sel.instanceID) else { return }
-        objects[oi].instances[sel.instanceID].rotationZ += degrees * .pi / 180
-        commitTransform(recomputeAnchor: true)
+        guard !documentMutationInFlight,
+              !slicing,
+              let selection,
+              let authoritative = scene?.instance(
+                  objectID: selection.objectID,
+                  instanceID: selection.instanceID
+              )?.transform else { return }
+        var transform = previewTransform ?? authoritative
+        transform.rotationZ += degrees * .pi / 180
+        previewTransform = transform
+        presentationRevision += 1
+        commitTransform()
     }
 
-    /// Pushes the selected instance's transform to the engine, then re-reads
-    /// the authoritative state (the anchor shifts when rotation ≠ 0).
-    private func commitTransform(recomputeAnchor: Bool) {
-        guard let plater, let sel = selection,
-              let oi = objects.firstIndex(where: { $0.objectID == sel.objectID }),
-              objects[oi].instances.indices.contains(sel.instanceID) else { return }
-        let t = objects[oi].instances[sel.instanceID]
-        if case .failure(let err) = plater.setTransform(
-            objectID: sel.objectID, instanceID: sel.instanceID, t) {
-            engineStatus = "transform FAILED: \(err.message)"
+    private func commitTransform() {
+        guard let selection,
+              let authoritative = scene?.instance(
+                  objectID: selection.objectID,
+                  instanceID: selection.instanceID
+              )?.transform else { return }
+        let transform = previewTransform ?? authoritative
+        runMutation(
+            .setTransform(
+                objectID: selection.objectID,
+                instanceID: selection.instanceID,
+                transform: transform
+            ),
+            operation: "transform"
+        )
+    }
+
+    private func install(_ authoritativeScene: SceneSnapshot) {
+        if let current = scene,
+           current.documentID == authoritativeScene.documentID,
+           authoritativeScene.revision < current.revision {
+            previewTransform = nil
+            presentationRevision += 1
+            engineStatus = "snapshot rejected: stale revision " +
+                "\(authoritativeScene.revision.rawValue) < \(current.revision.rawValue)"
             return
         }
-        if recomputeAnchor,
-           case .success(let authoritative) = plater.getTransform(
-               objectID: sel.objectID, instanceID: sel.instanceID) {
-            objects[oi].instances[sel.instanceID] = authoritative
+        scene = authoritativeScene
+        previewTransform = nil
+        if let selection,
+           authoritativeScene.instance(
+               objectID: selection.objectID,
+               instanceID: selection.instanceID
+           ) == nil {
+            self.selection = nil
         }
-        instanceToken = UUID()
-    }
-
-    // MARK: - Mesh upload rebuild (structural changes only)
-
-    private func rebuildMeshUploads() {
-        meshUploads = objects.compactMap { st in
-            guard let mesh = st.mesh else { return nil }
-            return SceneObjectUpload(
-                objectID: st.objectID,
-                verts: mesh.verts,
-                idx: mesh.idx,
-                bboxMin: mesh.bboxMin,
-                bboxMax: mesh.bboxMax)
-        }
-    }
-
-    private func objectState(_ objectID: Int) -> PlaterObjectState? {
-        objects.first { $0.objectID == objectID }
+        presentationRevision += 1
     }
 
     // MARK: - Slice flow
 
     private func sliceTapped() {
-        guard let plater, !objects.isEmpty, !slicing else { return }
+        guard let plater,
+              let scene,
+              !scene.objects.isEmpty,
+              !documentMutationInFlight,
+              !slicing else { return }
+        let name = scene.objects.first?.name.isEmpty == false
+            ? scene.objects[0].name
+            : "plater"
+        let documents = FileManager.default.urls(
+            for: .documentDirectory,
+            in: .userDomainMask
+        )[0]
+        let gcodeDirectory = documents.appendingPathComponent(
+            "G-code",
+            isDirectory: true
+        )
+        do {
+            try FileManager.default.createDirectory(
+                at: gcodeDirectory,
+                withIntermediateDirectories: true
+            )
+        } catch {
+            engineStatus = "slice FAILED: \(error.localizedDescription)"
+            return
+        }
+        let gcodePath = gcodeDirectory.appendingPathComponent(
+            (name as NSString).deletingPathExtension + ".gcode"
+        ).path
+        let count = scene.objects.reduce(0) { $0 + $1.instances.count }
         slicing = true
-        let name = objects.first.map { $0.name } ?? "plater"
-        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-        let gcodeDir = docs.appendingPathComponent("G-code", isDirectory: true)
-        try? FileManager.default.createDirectory(at: gcodeDir, withIntermediateDirectories: true)
-        let gcodePath = gcodeDir
-            .appendingPathComponent((name as NSString).deletingPathExtension + ".gcode").path
 
         Task { @MainActor in
-            let count = objects.reduce(0) { $0 + $1.instances.count }
-            let presetText = presets != nil ? "" : " (defaults — presets unavailable)"
+            let presetText = presets != nil
+                ? ""
+                : " (defaults — presets unavailable)"
             engineStatus = "\(count) instance(s): slicing…\(presetText)"
-            let result = await Task.detached(priority: .userInitiated) { [presets] in
-                if let presets {
-                    return plater.sliceToGcode(presets: presets, gcodePath: gcodePath) { pct, msg in
-                        Task { @MainActor in
-                            engineStatus = "\(count) instance(s): \(pct)% \(msg)"
+            let outcome = await Task.detached(priority: .userInitiated) { [presets] in
+                do {
+                    let result: SliceResult
+                    if let presets {
+                        result = try plater.slice(
+                            to: gcodePath,
+                            presets: presets
+                        ) { percent, message in
+                            Task { @MainActor in
+                                engineStatus = "\(count) instance(s): \(percent)% \(message)"
+                            }
+                        }
+                    } else {
+                        result = try plater.slice(to: gcodePath) { percent, message in
+                            Task { @MainActor in
+                                engineStatus = "\(count) instance(s): \(percent)% \(message)"
+                            }
                         }
                     }
-                } else {
-                    return plater.sliceToGcode(gcodePath: gcodePath) { pct, msg in
-                        Task { @MainActor in
-                            engineStatus = "\(count) instance(s): \(pct)% \(msg)"
-                        }
-                    }
+                    return SliceTaskOutcome(result: result, failure: nil)
+                } catch {
+                    return SliceTaskOutcome(
+                        result: nil,
+                        failure: error.localizedDescription
+                    )
                 }
             }.value
             slicing = false
-            switch result {
-            case .failure(let err):
-                engineStatus = "slice FAILED: \(err.message)"
-            case .success(let outcome):
-                let mins = Int(outcome.timeEstimateSeconds / 60)
-                let kb = outcome.gcodeBytes / 1024
-                engineStatus = "\(count) instance(s): G-code ready\n\(kb) KB · ~\(mins) min print · Files → On My iPhone → OrcaPad"
+            if let failure = outcome.failure {
+                engineStatus = "slice FAILED: \(failure)"
+            } else if let result = outcome.result {
+                let minutes = Int(result.timeEstimateSeconds / 60)
+                let kilobytes = result.gcodeBytes / 1024
+                engineStatus = "\(count) instance(s): G-code ready\n" +
+                    "\(kilobytes) KB · ~\(minutes) min print · " +
+                    "Files → On My iPhone → OrcaPad"
             }
         }
     }
@@ -438,14 +507,19 @@ struct PlaterView: View {
     // MARK: - Selection HUD
 
     @ViewBuilder
-    private func selectionHUD(for sel: (objectID: Int, instanceID: Int),
-                              object: PlaterObjectState) -> some View {
+    private func selectionHUD(
+        for selection: (objectID: ObjectID, instanceID: InstanceID),
+        object: SceneObject
+    ) -> some View {
+        let ordinal = (object.instances.firstIndex {
+            $0.id == selection.instanceID
+        } ?? 0) + 1
         HStack(spacing: 18) {
             VStack(alignment: .leading, spacing: 2) {
                 Text(object.name)
                     .font(.caption.weight(.semibold))
                     .lineLimit(1)
-                Text("instance \(sel.instanceID + 1)/\(object.instances.count) · drag to move")
+                Text("instance \(ordinal)/\(object.instances.count) · drag to move")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
             }
@@ -457,13 +531,13 @@ struct PlaterView: View {
             HUDButton(symbol: "rotate.right", label: "+45°") { rotateSelected(by: 45) }
             Divider().frame(height: 30)
             HUDButton(symbol: "plus.rectangle.on.rectangle", label: "Copy") {
-                addInstance(to: sel.objectID)
+                addInstance(to: selection.objectID)
             }
             HUDButton(symbol: "trash", label: "Del inst") {
                 if object.instances.count > 1 {
-                    deleteInstance(sel.instanceID, of: sel.objectID)
+                    deleteInstance(selection.instanceID, of: selection.objectID)
                 } else {
-                    deleteObject(sel.objectID)
+                    deleteObject(selection.objectID)
                 }
             }
         }
@@ -475,7 +549,8 @@ struct PlaterView: View {
     // MARK: - Objects sheet
 
     private var objectsList: some View {
-        NavigationStack {
+        let objects = scene?.objects ?? []
+        return NavigationStack {
             Group {
                 if objects.isEmpty {
                     Text("No objects — import an STL")
@@ -491,11 +566,11 @@ struct PlaterView: View {
                                         .foregroundStyle(.secondary)
                                 }
                                 Spacer()
-                                Button { addInstance(to: obj.objectID) } label: {
+                                Button { addInstance(to: obj.id) } label: {
                                     Image(systemName: "plus.rectangle.on.rectangle")
                                 }
                                 .buttonStyle(.borderless)
-                                Button { deleteObject(obj.objectID) } label: {
+                                Button { deleteObject(obj.id) } label: {
                                     Image(systemName: "trash")
                                         .foregroundStyle(.red)
                                 }
@@ -503,13 +578,17 @@ struct PlaterView: View {
                             }
                             .contentShape(Rectangle())
                             .onTapGesture {
-                                selection = (obj.objectID, 0)
-                                instanceToken = UUID()
+                                if let instanceID = obj.instances.first?.id {
+                                    selection = (obj.id, instanceID)
+                                    previewTransform = nil
+                                    presentationRevision += 1
+                                }
                                 objectsPresented = false
                             }
                         }
                         .onDelete { indexSet in
-                            for i in indexSet { deleteObject(objects[i].objectID) }
+                            let objectIDs = indexSet.map { objects[$0].id }
+                            deleteObjects(objectIDs)
                         }
                     }
                 }
@@ -527,16 +606,24 @@ struct PlaterView: View {
 
     private var platerToolbar: some View {
         HStack(spacing: 22) {
-            ToolbarButton(symbol: "plus", label: "Import") { importPresented = true }
-            ToolbarButton(symbol: "list.bullet", label: "Objects",
-                          disabled: objects.isEmpty) { objectsPresented = true }
+            ToolbarButton(
+                symbol: "plus",
+                label: "Import",
+                disabled: documentMutationInFlight
+            ) { importPresented = true }
+            ToolbarButton(
+                symbol: "list.bullet",
+                label: "Objects",
+                disabled: scene?.objects.isEmpty != false || documentMutationInFlight
+            ) { objectsPresented = true }
             ToolbarButton(symbol: "arrow.2.circlepath", label: "Arrange",
                           disabled: true) {
                 // Phase 2: engine arrange (Arrange.cpp + libnest2d)
             }
             ToolbarButton(symbol: "scissors",
                           label: slicing ? "Slicing" : "Slice",
-                          disabled: objects.isEmpty || slicing) {
+                          disabled: scene?.objects.isEmpty != false ||
+                              documentMutationInFlight || slicing) {
                 sliceTapped()
             }
             ToolbarButton(symbol: "gearshape", label: "Settings",
@@ -550,30 +637,14 @@ struct PlaterView: View {
     }
 }
 
-// MARK: - State types
-
-/// Object mesh for the renderer (reference type — these are multi-MB;
-// immutable ⇒ safe to cross concurrency domains).
-final class ObjectMeshData: Sendable {
-    let verts: [VertexPNC]
-    let idx: [UInt32]
-    let bboxMin: SIMD3<Float>
-    let bboxMax: SIMD3<Float>
-    init(verts: [VertexPNC], idx: [UInt32],
-         bboxMin: SIMD3<Float>, bboxMax: SIMD3<Float>) {
-        self.verts = verts
-        self.idx = idx
-        self.bboxMin = bboxMin
-        self.bboxMax = bboxMax
-    }
+private struct DocumentMutationTaskOutcome: Sendable {
+    let mutation: EnginePlater.MutationResult?
+    let failure: String?
 }
 
-struct PlaterObjectState: Identifiable, Sendable {
-    let id = UUID()
-    var objectID: Int
-    let name: String
-    let mesh: ObjectMeshData?
-    var instances: [EnginePlater.Transform]
+private struct SliceTaskOutcome: Sendable {
+    let result: SliceResult?
+    let failure: String?
 }
 
 // MARK: - Import support (pure statics — no view capture, Sendable-safe)
@@ -583,7 +654,7 @@ private enum ImportSupport {
 
     struct Outcome: Sendable {
         let status: String
-        let object: PlaterObjectState?
+        let mutation: EnginePlater.MutationResult?
     }
 
     /// Security-scoped read + copy into the app sandbox (Swift owns paths).
@@ -593,7 +664,9 @@ private enum ImportSupport {
         do {
             let tmp = FileManager.default.temporaryDirectory
                 .appendingPathComponent("import.stl")
-            try? FileManager.default.removeItem(at: tmp)
+            if FileManager.default.fileExists(atPath: tmp.path) {
+                try FileManager.default.removeItem(at: tmp)
+            }
             try FileManager.default.copyItem(at: url, to: tmp)
             return tmp
         } catch {

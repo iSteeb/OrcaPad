@@ -1,3 +1,4 @@
+import OrcaBridge
 import simd
 
 // MARK: - Vertex formats (must match the vertex descriptors in Renderer)
@@ -69,34 +70,37 @@ enum Geometry {
 // MARK: - Engine mesh → viewer mesh
 
 extension Geometry {
-    /// Expands an indexed position-only mesh (engine output) into per-face
-    /// duplicated vertices with flat normals — the viewer's lit format.
-    static func expandFlat(positions: UnsafePointer<Float>?, positionCount: Int,
-                           indices: UnsafePointer<UInt32>?, indexCount: Int)
-        -> (verts: [VertexPNC], idx: [UInt32])
-    {
-        guard let positions, let indices, positionCount > 0, indexCount > 0 else { return ([], []) }
-        let src = UnsafeBufferPointer(start: positions, count: positionCount * 3)
-        let ip = UnsafeBufferPointer(start: indices, count: indexCount)
-        func point(_ i: Int) -> SIMD3<Float> {
-            SIMD3<Float>(src[i * 3], src[i * 3 + 1], src[i * 3 + 2])
+    /// Expands an owned engine-space mesh into viewer-space, per-face
+    /// duplicated vertices with flat normals. The object pivot is removed
+    /// here and restored by CoordinateMapper.modelMatrix per instance.
+    static func expandFlat(mesh: SceneMesh) -> (verts: [VertexPNC], idx: [UInt32]) {
+        guard !mesh.positions.isEmpty,
+              !mesh.indices.isEmpty,
+              mesh.indices.count.isMultiple(of: 3),
+              mesh.indices.allSatisfy({ Int($0) < mesh.positions.count }) else {
+            return ([], [])
+        }
+        func point(_ index: Int) -> SIMD3<Float> {
+            CoordinateMapper.viewerPoint(
+                fromEngine: mesh.positions[index] - mesh.pivot
+            )
         }
         var verts: [VertexPNC] = []
-        verts.reserveCapacity(indexCount)
-        for t in 0..<(indexCount / 3) {
-            let a = point(Int(ip[t * 3]))
-            let b = point(Int(ip[t * 3 + 1]))
-            let c = point(Int(ip[t * 3 + 2]))
-            var n = simd_cross(b - a, c - a)
-            let len = simd_length(n)
-            n = len > 1e-12 ? n / len : SIMD3<Float>(repeating: 0)
-            verts.append(VertexPNC(position: a, normal: n))
-            verts.append(VertexPNC(position: b, normal: n))
-            verts.append(VertexPNC(position: c, normal: n))
+        verts.reserveCapacity(mesh.indices.count)
+        for triangle in 0..<(mesh.indices.count / 3) {
+            let a = point(Int(mesh.indices[triangle * 3]))
+            let b = point(Int(mesh.indices[triangle * 3 + 1]))
+            let c = point(Int(mesh.indices[triangle * 3 + 2]))
+            var normal = simd_cross(b - a, c - a)
+            let length = simd_length(normal)
+            normal = length > 1e-12
+                ? normal / length
+                : SIMD3<Float>(repeating: 0)
+            verts.append(VertexPNC(position: a, normal: normal))
+            verts.append(VertexPNC(position: b, normal: normal))
+            verts.append(VertexPNC(position: c, normal: normal))
         }
-        // Face-duplicated vertices need SEQUENTIAL indices (0,1,2, 3,4,5, …):
-        // the engine's shared-vertex indices would point into wrong verts.
-        // (Storing original `ip` here garbles every repaired/deduped mesh.)
+        // Face-duplicated vertices need sequential indices.
         return (verts, (0..<verts.count).map { UInt32($0) })
     }
 }

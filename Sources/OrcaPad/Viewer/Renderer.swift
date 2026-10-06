@@ -1,22 +1,13 @@
 import MetalKit
+import OrcaBridge
 import os
 import simd
 
-/// One instance to draw: which instance, its model matrix, selection state.
-struct InstanceDraw {
-    let instanceID: Int
+/// One immutable instance draw derived from a revisioned scene snapshot.
+private struct InstanceDraw {
+    let instanceID: InstanceID
     let model: simd_float4x4
     let selected: Bool
-}
-
-/// A mesh upload for one plater object (viewer-space, bed-anchored, recentred
-/// — expandFlat output). Structural changes only: import / delete.
-struct SceneObjectUpload {
-    let objectID: Int
-    let verts: [VertexPNC]
-    let idx: [UInt32]
-    let bboxMin: SIMD3<Float>
-    let bboxMax: SIMD3<Float>
 }
 
 /// Owns all Metal state and draws one frame per display-link tick.
@@ -48,7 +39,8 @@ final class Renderer: NSObject, MTKViewDelegate {
 
     // Scene objects (GPU buffers + CPU picking copies + instance matrices)
     private struct RenderObject {
-        let objectID: Int
+        let objectID: ObjectID
+        let meshRevision: UInt64
         let vb: MTLBuffer
         let ib: MTLBuffer
         let indexCount: Int
@@ -59,6 +51,8 @@ final class Renderer: NSObject, MTKViewDelegate {
         var instances: [InstanceDraw]
     }
     private var objects: [RenderObject] = []
+    private var documentID: DocumentID?
+    private var appliedRevision = DocumentRevision(rawValue: 0)
 
     private static let objectColor = SIMD4<Float>(0.96, 0.52, 0.11, 1)
     private static let selectedColor = SIMD4<Float>(0.16, 0.80, 0.95, 1)
@@ -154,9 +148,12 @@ final class Renderer: NSObject, MTKViewDelegate {
 
     private enum MetalError: Error, CustomStringConvertible {
         case missing(String)
+        case invalidScene(String)
+
         var description: String {
             switch self {
             case .missing(let what): return "Metal: missing \(what)"
+            case .invalidScene(let detail): return "Metal: invalid scene — \(detail)"
             }
         }
     }
@@ -197,57 +194,113 @@ final class Renderer: NSObject, MTKViewDelegate {
 
     // MARK: Scene sync (called from the SwiftUI layer on the main actor)
 
-    /// Full structural replace: object meshes for everything on the plate.
-    /// Instance lists arrive separately via setInstances (cheap path).
-    func setObjectMeshes(_ uploads: [SceneObjectUpload]) {
+    /// Atomically replaces the derived render scene from one coherent engine
+    /// snapshot. GPU mesh buffers are reused by stable object ID + mesh
+    /// revision; transforms and selection remain cheap derived state.
+    func applyScene(
+        _ scene: SceneSnapshot,
+        selectedObjectID: ObjectID?,
+        selectedInstanceID: InstanceID?,
+        previewTransform: InstanceTransform?
+    ) throws {
+        if let currentDocumentID = documentID,
+           currentDocumentID == scene.documentID,
+           scene.revision < appliedRevision {
+            throw MetalError.invalidScene(
+                "snapshot revision regressed from \(appliedRevision.rawValue) to \(scene.revision.rawValue)"
+            )
+        }
+
         var rebuilt: [RenderObject] = []
-        for up in uploads {
-            guard up.verts.count > 0, up.idx.count > 0 else {
-                logger.error("setObjectMeshes: empty mesh for object \(up.objectID) ignored")
+        rebuilt.reserveCapacity(scene.objects.count)
+        for sceneObject in scene.objects {
+            let instances = sceneObject.instances.map { instance in
+                let usesPreview = sceneObject.id == selectedObjectID &&
+                    instance.id == selectedInstanceID
+                return InstanceDraw(
+                    instanceID: instance.id,
+                    model: CoordinateMapper.modelMatrix(
+                        transform: usesPreview
+                            ? previewTransform ?? instance.transform
+                            : instance.transform,
+                        enginePivot: sceneObject.mesh.pivot
+                    ),
+                    selected: sceneObject.id == selectedObjectID &&
+                        instance.id == selectedInstanceID
+                )
+            }
+
+            if let existing = objects.first(where: {
+                $0.objectID == sceneObject.id &&
+                    $0.meshRevision == sceneObject.mesh.revision
+            }) {
+                var reused = existing
+                reused.instances = instances
+                rebuilt.append(reused)
                 continue
             }
-            let old = objects.first { $0.objectID == up.objectID }
-            let vb = device.makeBuffer(
-                bytes: up.verts, length: MemoryLayout<VertexPNC>.stride * up.verts.count,
-                options: .storageModeShared)
-            let ib = device.makeBuffer(
-                bytes: up.idx, length: MemoryLayout<UInt32>.stride * up.idx.count,
-                options: .storageModeShared)
-            // CPU picking copy: positions from the expanded flat verts
-            // (3 per triangle — indexed by idx 0,1,2,… per tri).
-            var positions = [SIMD3<Float>]()
-            positions.reserveCapacity(up.verts.count)
-            for v in up.verts { positions.append(v.position) }
-            rebuilt.append(RenderObject(
-                objectID: up.objectID,
-                vb: vb!, ib: ib!,
-                indexCount: up.idx.count,
-                bboxMin: up.bboxMin, bboxMax: up.bboxMax,
-                pickPositions: positions,
-                pickIndices: up.idx,
-                instances: old?.instances ?? []))
-        }
-        objects = rebuilt
-        let meshCount = objects.count
-        logger.notice("scene meshes: \(meshCount) object(s)")
-    }
 
-    /// Cheap path: per-object instance matrices + selection flags.
-    func setInstances(objectID: Int, _ list: [InstanceDraw]) {
-        guard let i = objects.firstIndex(where: { $0.objectID == objectID }) else {
-            logger.error("setInstances: unknown object \(objectID)")
-            return
+            let geometry = Geometry.expandFlat(mesh: sceneObject.mesh)
+            guard !geometry.verts.isEmpty, !geometry.idx.isEmpty else {
+                throw MetalError.invalidScene(
+                    "object \(sceneObject.id) has empty render geometry"
+                )
+            }
+            guard let vertexBuffer = device.makeBuffer(
+                bytes: geometry.verts,
+                length: MemoryLayout<VertexPNC>.stride * geometry.verts.count,
+                options: .storageModeShared
+            ), let indexBuffer = device.makeBuffer(
+                bytes: geometry.idx,
+                length: MemoryLayout<UInt32>.stride * geometry.idx.count,
+                options: .storageModeShared
+            ) else {
+                throw MetalError.missing(
+                    "mesh buffers for object \(sceneObject.id)"
+                )
+            }
+
+            let positions = geometry.verts.map(\.position)
+            let bounds = positions.reduce(
+                into: (
+                    minimum: SIMD3<Float>(repeating: .infinity),
+                    maximum: SIMD3<Float>(repeating: -.infinity)
+                )
+            ) { bounds, position in
+                bounds.minimum = simd_min(bounds.minimum, position)
+                bounds.maximum = simd_max(bounds.maximum, position)
+            }
+            rebuilt.append(RenderObject(
+                objectID: sceneObject.id,
+                meshRevision: sceneObject.mesh.revision,
+                vb: vertexBuffer,
+                ib: indexBuffer,
+                indexCount: geometry.idx.count,
+                bboxMin: bounds.minimum,
+                bboxMax: bounds.maximum,
+                pickPositions: positions,
+                pickIndices: geometry.idx,
+                instances: instances
+            ))
         }
-        objects[i].instances = list
-        let objs = self.objects
-        selectedInstanceIDs = objs.flatMap { obj in
-            obj.instances.filter { $0.selected }
-                .map { (objectID: obj.objectID, instanceID: $0.instanceID) }
+
+        objects = rebuilt
+        documentID = scene.documentID
+        appliedRevision = scene.revision
+        selectedInstanceIDs = rebuilt.flatMap { object in
+            object.instances.filter(\.selected).map {
+                (objectID: object.objectID, instanceID: $0.instanceID)
+            }
         }
+        logger.notice(
+            "scene revision \(scene.revision.rawValue): \(rebuilt.count) object(s)"
+        )
     }
 
     /// Instances currently flagged selected (for the move-gesture hit test).
-    private(set) var selectedInstanceIDs: [(objectID: Int, instanceID: Int)] = []
+    private(set) var selectedInstanceIDs: [
+        (objectID: ObjectID, instanceID: InstanceID)
+    ] = []
 
     /// Frames the camera on the combined scene bbox (call after import).
     func frameScene() {
@@ -311,9 +364,12 @@ final class Renderer: NSObject, MTKViewDelegate {
 
     /// Full pick: nearest instance under the screen point.
     /// AABB pre-test per instance, then exact ray-triangle (Möller–Trumbore).
-    func pickInstance(at point: CGPoint, in view: MTKView) -> (objectID: Int, instanceID: Int)? {
+    func pickInstance(
+        at point: CGPoint,
+        in view: MTKView
+    ) -> (objectID: ObjectID, instanceID: InstanceID)? {
         let ray = screenRay(at: point, in: view)
-        var best: (objectID: Int, instanceID: Int, t: Float)?
+        var best: (objectID: ObjectID, instanceID: InstanceID, t: Float)?
         for obj in objects {
             for inst in obj.instances {
                 guard let tHit = rayCastObject(ray, object: obj, model: inst.model) else { continue }

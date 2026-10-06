@@ -19,8 +19,8 @@ Engine before feature breadth makes the current coupling permanent.
 - [x] Align repository and Swift target names with explicit Bridge ownership
 - [x] Replace diagnostic-string success checks with one typed bridge result
 - [x] Remove shared static bridge result strings and define data ownership
-- [ ] Introduce stable engine IDs and document revisions
-- [ ] Replace mutable index-coupled Swift scene mirroring with snapshots
+- [x] Introduce stable engine object/instance IDs and document revisions
+- [x] Replace mutable index-coupled Swift scene mirroring with immutable snapshots
 - [ ] Move orchestration/filesystem/slicing state out of `PlaterView`
 - [ ] Add bridge/domain architecture contract tests
 
@@ -53,7 +53,7 @@ typed and loud; current physical-device slice behavior remains green.
 - [x] Cross-compile the real FFF libslic3r pipeline and dependencies from Linux
   (current archive: 259 members / 259 unique sources)
 - [x] Initial extern-C bridge proving Swift can drive the C++ engine
-- [ ] Harden that proof into the typed Bridge contract in Architecture Gate A
+- [x] Harden that proof into the typed Bridge contract in Architecture Gate A
 - [x] On-device proof: STL load + admesh repair verified on iPhone
   (12 tris / 8000 mm³ cube, user-confirmed 2026-10-02)
 - [ ] Later upstreaming gate: reproducible CMake+xcframework for required
@@ -78,8 +78,9 @@ seconds — acceptable for Phase 1; parallelism is a Phase 2 perf item).
 - [x] Basic move/rotate controls, object list, multi-instance copy/delete,
   and CPU ray-cast picking implemented (device acceptance still required)
 - [ ] Snap, lay-flat, and auto-arrange (engine algorithms — never reimplement)
-- [ ] Replace index-coupled scene state and O(triangle × instance) picking
-  before treating large plates as production-ready
+- [x] Replace index-coupled scene state with stable snapshot identity
+- [ ] Replace O(triangle × instance) picking before treating large plates as
+  production-ready
 
 **Accept:** import a real-world STL, arrange 3 copies, zoom/inspect, slice.
 

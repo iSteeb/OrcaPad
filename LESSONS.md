@@ -17,6 +17,16 @@ in ~/xtool-cheatsheet.md — link, don't duplicate.)
   and hardware values.
 - Cross-handle calls hold both session locks for the full C operation, always
   in plater → presets order; borrowing an unlocked raw handle is a data race.
+- Upstream `ObjectBase::s_last_id` and other process globals assume
+  single-threaded engine entry. Every guarded C ABI engine operation is
+  process-serialized in the Bridge; do not weaken this until an upstream-safe
+  runtime owner replaces it.
+- Move/copy model objects only through upstream `Model` APIs such as
+  `add_object`; pushing raw object pointers leaves `ModelObject::m_model`
+  pointing at the source model and creates latent use-after-free failures.
+- Authoritative `SceneSnapshot` values stay immutable. Gesture previews are a
+  separate transient transform overlay and are cleared on every authoritative
+  snapshot install.
 - Build output always redirected to a file: `xtool dev build > /tmp/orcapad-build.log 2>&1`
 - All app logging via `os_log` (`Logger(subsystem: "ie.duz.OrcaPad", …)`);
   `print()` is invisible for home-screen-launched apps.

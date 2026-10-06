@@ -47,7 +47,7 @@ public struct BridgeError: Error, Sendable, LocalizedError {
     }
 }
 
-private let expectedBridgeABIVersion: UInt32 = 1
+private let expectedBridgeABIVersion: UInt32 = 2
 
 func bridgeABIFailure(operation: String) -> BridgeError? {
     let actual = orca_bridge_abi_version()
@@ -118,6 +118,18 @@ func bridgeFailure(
         diagnostic: diagnostic,
         rawStatus: rawStatus
     )
+}
+
+enum BridgeResult {
+    static func validateABI(operation: String = "validate Bridge ABI") throws {
+        if let error = bridgeABIFailure(operation: operation) { throw error }
+    }
+
+    static func consume(_ result: orca_result, operation: String) throws {
+        if let error = bridgeFailure(operation: operation, call: { result }) {
+            throw error
+        }
+    }
 }
 
 /// Copies and releases a caller-owned C Bridge string.

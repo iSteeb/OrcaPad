@@ -1,382 +1,484 @@
 import Foundation
-import OrcaBridgeCore
+@preconcurrency import OrcaBridgeCore
+import simd
 
-/// Swift wrapper over the engine's plater session (Model-backed objects +
-/// instances). Engine calls are blocking and the engine is not reentrant, so
-/// every call funnels through an internal lock.
-///
-/// Object/instance IDs remain indices temporarily; Architecture Gate A
-/// replaces them with stable engine-issued IDs.
+/// One authoritative C++ document session. Mutable engine state never escapes
+/// this type; callers receive owned, revisioned snapshots.
 public final class EnginePlater: @unchecked Sendable {
-    private var handle: OpaquePointer?
-    private let lock = NSLock()
-
-    public static func create() -> Result<EnginePlater, BridgeError> {
-        let operation = "EnginePlater.create"
-        if let error = bridgeABIFailure(operation: operation) {
-            return .failure(error)
-        }
-        var handle: OpaquePointer?
-        if let error = bridgeFailure(operation: operation, call: {
-            orca_plater_new(&handle)
-        }) {
-            return .failure(error)
-        }
-        guard let handle else {
-            return .failure(.local(
-                .internalInvariant,
-                operation: operation,
-                diagnostic: "\(operation): Bridge succeeded without returning a handle"
-            ))
-        }
-        return .success(EnginePlater(handle: handle))
+    public enum Mutation: Sendable {
+        case importModel(path: String)
+        case deleteObject(ObjectID)
+        case addInstance(objectID: ObjectID)
+        case deleteInstance(objectID: ObjectID, instanceID: InstanceID)
+        case setTransform(
+            objectID: ObjectID,
+            instanceID: InstanceID,
+            transform: InstanceTransform
+        )
+        case ensureOnBed
     }
 
-    private init(handle: OpaquePointer) {
-        self.handle = handle
+    public struct MutationResult: Sendable {
+        public let snapshot: SceneSnapshot
+        public let createdObjectID: ObjectID?
+        public let createdInstanceID: InstanceID?
+
+        fileprivate init(
+            snapshot: SceneSnapshot,
+            createdObjectID: ObjectID? = nil,
+            createdInstanceID: InstanceID? = nil
+        ) {
+            self.snapshot = snapshot
+            self.createdObjectID = createdObjectID
+            self.createdInstanceID = createdInstanceID
+        }
+    }
+
+    private let handle: OpaquePointer
+    private let lock = NSLock()
+
+    public init() throws {
+        try BridgeResult.validateABI()
+        var pointer: OpaquePointer?
+        try BridgeResult.consume(orca_plater_new(&pointer), operation: "create document")
+        guard let pointer else {
+            throw BridgeError.local(
+                .internalInvariant,
+                operation: "create document",
+                diagnostic: "Bridge returned success without a document handle"
+            )
+        }
+        handle = pointer
     }
 
     deinit {
-        if let handle { orca_plater_free(handle) }
+        orca_plater_free(handle)
     }
 
-    public struct Transform: Sendable {
-        public var offsetX: Double = 0
-        public var offsetY: Double = 0
-        public var offsetZ: Double = 0
-        public var rotationZ: Double = 0
-        public var scale: Double = 1
-        /// Instance-matrix-transformed packing pivot (engine space) — the
-        /// point that sits at (anchorX, anchorZ, -anchorY) in viewer space.
-        public var anchorX: Double = 0
-        public var anchorY: Double = 0
-        public var anchorZ: Double = 0
-
-        public init() {}
+    public func snapshot() throws -> SceneSnapshot {
+        try lock.withLock {
+            try snapshotLocked()
+        }
     }
 
-    // MARK: - Objects
+    /// Applies exactly one engine mutation and returns the complete scene at
+    /// the resulting revision while retaining the document lock throughout.
+    public func apply(_ mutation: Mutation) throws -> MutationResult {
+        try lock.withLock {
+            var mutationRevision: UInt64 = 0
+            var createdObjectID: ObjectID?
+            var createdInstanceID: InstanceID?
 
-    /// Blocking (STL load + repair) — call off-main.
-    public func addSTL(path: String) -> Result<Int, BridgeError> {
-        let operation = "EnginePlater.addSTL"
-        lock.lock(); defer { lock.unlock() }
-        guard let handle else { return .failure(invalidHandle(operation)) }
-        var objectID: Int32 = -1
-        if let error = bridgeFailure(operation: operation, call: {
-            path.withCString { orca_plater_add_stl(handle, $0, &objectID) }
-        }) {
-            return .failure(error)
-        }
-        guard objectID >= 0 else {
-            return .failure(.local(
-                .internalInvariant,
-                operation: operation,
-                diagnostic: "\(operation): Bridge succeeded with an invalid object ID"
-            ))
-        }
-        return .success(Int(objectID))
-    }
-
-    public func objectCount() -> Result<Int, BridgeError> {
-        let operation = "EnginePlater.objectCount"
-        lock.lock(); defer { lock.unlock() }
-        guard let handle else { return .failure(invalidHandle(operation)) }
-        var count: Int32 = 0
-        if let error = bridgeFailure(operation: operation, call: {
-            orca_plater_object_count(handle, &count)
-        }) {
-            return .failure(error)
-        }
-        return .success(Int(count))
-    }
-
-    public func deleteObject(_ id: Int) -> Result<Void, BridgeError> {
-        let operation = "EnginePlater.deleteObject"
-        guard let objectID = Int32(exactly: id) else {
-            return .failure(invalidID(operation, label: "object", value: id))
-        }
-        lock.lock(); defer { lock.unlock() }
-        guard let handle else { return .failure(invalidHandle(operation)) }
-        if let error = bridgeFailure(operation: operation, call: {
-            orca_plater_object_delete(handle, objectID)
-        }) {
-            return .failure(error)
-        }
-        return .success(())
-    }
-
-    // MARK: - Instances
-
-    public func addInstance(objectID: Int) -> Result<Int, BridgeError> {
-        let operation = "EnginePlater.addInstance"
-        guard let objectID = Int32(exactly: objectID) else {
-            return .failure(invalidID(operation, label: "object", value: objectID))
-        }
-        lock.lock(); defer { lock.unlock() }
-        guard let handle else { return .failure(invalidHandle(operation)) }
-        var instanceID: Int32 = -1
-        if let error = bridgeFailure(operation: operation, call: {
-            orca_plater_instance_add(handle, objectID, &instanceID)
-        }) {
-            return .failure(error)
-        }
-        guard instanceID >= 0 else {
-            return .failure(.local(
-                .internalInvariant,
-                operation: operation,
-                diagnostic: "\(operation): Bridge succeeded with an invalid instance ID"
-            ))
-        }
-        return .success(Int(instanceID))
-    }
-
-    public func deleteInstance(
-        objectID: Int,
-        instanceID: Int
-    ) -> Result<Void, BridgeError> {
-        let operation = "EnginePlater.deleteInstance"
-        guard let objectID = Int32(exactly: objectID) else {
-            return .failure(invalidID(operation, label: "object", value: objectID))
-        }
-        guard let instanceID = Int32(exactly: instanceID) else {
-            return .failure(invalidID(operation, label: "instance", value: instanceID))
-        }
-        lock.lock(); defer { lock.unlock() }
-        guard let handle else { return .failure(invalidHandle(operation)) }
-        if let error = bridgeFailure(operation: operation, call: {
-            orca_plater_instance_delete(handle, objectID, instanceID)
-        }) {
-            return .failure(error)
-        }
-        return .success(())
-    }
-
-    public func instanceCount(objectID: Int) -> Result<Int, BridgeError> {
-        let operation = "EnginePlater.instanceCount"
-        guard let objectID = Int32(exactly: objectID) else {
-            return .failure(invalidID(operation, label: "object", value: objectID))
-        }
-        lock.lock(); defer { lock.unlock() }
-        guard let handle else { return .failure(invalidHandle(operation)) }
-        var count: Int32 = 0
-        if let error = bridgeFailure(operation: operation, call: {
-            orca_plater_instance_count(handle, objectID, &count)
-        }) {
-            return .failure(error)
-        }
-        return .success(Int(count))
-    }
-
-    public func setTransform(
-        objectID: Int,
-        instanceID: Int,
-        _ transform: Transform
-    ) -> Result<Void, BridgeError> {
-        let operation = "EnginePlater.setTransform"
-        guard let objectID = Int32(exactly: objectID) else {
-            return .failure(invalidID(operation, label: "object", value: objectID))
-        }
-        guard let instanceID = Int32(exactly: instanceID) else {
-            return .failure(invalidID(operation, label: "instance", value: instanceID))
-        }
-        lock.lock(); defer { lock.unlock() }
-        guard let handle else { return .failure(invalidHandle(operation)) }
-        var value = orca_instance_transform()
-        value.offset_x = transform.offsetX
-        value.offset_y = transform.offsetY
-        value.offset_z = transform.offsetZ
-        value.rotation_z = transform.rotationZ
-        value.scale = transform.scale
-        value.anchor_x = transform.anchorX
-        value.anchor_y = transform.anchorY
-        value.anchor_z = transform.anchorZ
-        if let error = bridgeFailure(operation: operation, call: {
-            orca_plater_instance_set(handle, objectID, instanceID, &value)
-        }) {
-            return .failure(error)
-        }
-        return .success(())
-    }
-
-    public func getTransform(
-        objectID: Int,
-        instanceID: Int
-    ) -> Result<Transform, BridgeError> {
-        let operation = "EnginePlater.getTransform"
-        guard let objectID = Int32(exactly: objectID) else {
-            return .failure(invalidID(operation, label: "object", value: objectID))
-        }
-        guard let instanceID = Int32(exactly: instanceID) else {
-            return .failure(invalidID(operation, label: "instance", value: instanceID))
-        }
-        lock.lock(); defer { lock.unlock() }
-        guard let handle else { return .failure(invalidHandle(operation)) }
-        var value = orca_instance_transform()
-        if let error = bridgeFailure(operation: operation, call: {
-            orca_plater_instance_get(handle, objectID, instanceID, &value)
-        }) {
-            return .failure(error)
-        }
-        var transform = Transform()
-        transform.offsetX = value.offset_x
-        transform.offsetY = value.offset_y
-        transform.offsetZ = value.offset_z
-        transform.rotationZ = value.rotation_z
-        transform.scale = value.scale
-        transform.anchorX = value.anchor_x
-        transform.anchorY = value.anchor_y
-        transform.anchorZ = value.anchor_z
-        return .success(transform)
-    }
-
-    // MARK: - Mesh views (engine-owned memory: copy synchronously)
-
-    public func withMeshView<R>(
-        objectID: Int,
-        _ body: (orca_mesh_view) throws -> R
-    ) rethrows -> Result<R, BridgeError> {
-        let operation = "EnginePlater.withMeshView"
-        guard let objectID = Int32(exactly: objectID) else {
-            return .failure(invalidID(operation, label: "object", value: objectID))
-        }
-        lock.lock(); defer { lock.unlock() }
-        guard let handle else { return .failure(invalidHandle(operation)) }
-        var view = orca_mesh_view()
-        if let error = bridgeFailure(operation: operation, call: {
-            orca_plater_mesh_view(handle, objectID, &view)
-        }) {
-            return .failure(error)
-        }
-        return .success(try body(view))
-    }
-
-    public func ensureOnBed() -> Result<Void, BridgeError> {
-        let operation = "EnginePlater.ensureOnBed"
-        lock.lock(); defer { lock.unlock() }
-        guard let handle else { return .failure(invalidHandle(operation)) }
-        if let error = bridgeFailure(operation: operation, call: {
-            orca_plater_ensure_on_bed(handle)
-        }) {
-            return .failure(error)
-        }
-        return .success(())
-    }
-
-    // MARK: - Slicing (blocking; call off-main)
-
-    public struct SliceOutcome: Sendable {
-        public let timeEstimateSeconds: Double
-        public let gcodeBytes: Int64
-    }
-
-    public func sliceToGcode(
-        gcodePath: String,
-        progress: @escaping @Sendable (Int, String) -> Void
-    ) -> Result<SliceOutcome, BridgeError> {
-        sliceInternal(gcodePath: gcodePath, presets: nil, progress: progress)
-    }
-
-    public func sliceToGcode(
-        presets: EnginePresets,
-        gcodePath: String,
-        progress: @escaping @Sendable (Int, String) -> Void
-    ) -> Result<SliceOutcome, BridgeError> {
-        sliceInternal(gcodePath: gcodePath, presets: presets, progress: progress)
-    }
-
-    private func sliceInternal(
-        gcodePath: String,
-        presets: EnginePresets?,
-        progress: @escaping @Sendable (Int, String) -> Void
-    ) -> Result<SliceOutcome, BridgeError> {
-        final class ProgressBox: @unchecked Sendable {
-            let callback: @Sendable (Int, String) -> Void
-            init(_ callback: @escaping @Sendable (Int, String) -> Void) {
-                self.callback = callback
-            }
-        }
-
-        let operation = presets == nil
-            ? "EnginePlater.sliceToGcode"
-            : "EnginePlater.sliceToGcodeWithPresets"
-        let box = ProgressBox(progress)
-        let callback: orca_progress_fn? = { percent, message, raw in
-            guard let raw else { return }
-            let box = Unmanaged<ProgressBox>.fromOpaque(raw).takeUnretainedValue()
-            box.callback(Int(percent), message.map { String(cString: $0) } ?? "")
-        }
-
-        lock.lock(); defer { lock.unlock() }
-        guard let handle else { return .failure(invalidHandle(operation)) }
-        var timeEstimate: Double = -1
-        var gcodeBytes: Int64 = -1
-        let context = Unmanaged.passUnretained(box).toOpaque()
-        let error: BridgeError?
-        if let presets {
-            switch presets.withRawHandle(operation: operation, { presetHandle in
-                bridgeFailure(operation: operation) {
-                    gcodePath.withCString { path in
-                        orca_plater_slice_to_gcode_with_presets(
-                            handle,
-                            presetHandle,
-                            path,
-                            callback,
-                            context,
-                            &timeEstimate,
-                            &gcodeBytes
-                        )
-                    }
-                }
-            }) {
-            case .success(let bridgeError): error = bridgeError
-            case .failure(let bridgeError): return .failure(bridgeError)
-            }
-        } else {
-            error = bridgeFailure(operation: operation) {
-                gcodePath.withCString { path in
-                    orca_plater_slice_to_gcode(
+            switch mutation {
+            case .importModel(let path):
+                var rawObjectID: UInt64 = 0
+                let result = path.withCString { pathPointer in
+                    orca_plater_add_stl(
                         handle,
-                        path,
-                        callback,
-                        context,
-                        &timeEstimate,
-                        &gcodeBytes
+                        pathPointer,
+                        &rawObjectID,
+                        &mutationRevision
                     )
                 }
+                try BridgeResult.consume(result, operation: "import model")
+                createdObjectID = try Self.objectID(
+                    rawObjectID,
+                    operation: "import model"
+                )
+
+            case .deleteObject(let objectID):
+                try BridgeResult.consume(
+                    orca_plater_object_delete(
+                        handle,
+                        objectID.rawValue,
+                        &mutationRevision
+                    ),
+                    operation: "delete object \(objectID)"
+                )
+
+            case .addInstance(let objectID):
+                var rawInstanceID: UInt64 = 0
+                try BridgeResult.consume(
+                    orca_plater_instance_add(
+                        handle,
+                        objectID.rawValue,
+                        &rawInstanceID,
+                        &mutationRevision
+                    ),
+                    operation: "add instance to object \(objectID)"
+                )
+                createdInstanceID = try Self.instanceID(
+                    rawInstanceID,
+                    operation: "add instance"
+                )
+
+            case .deleteInstance(let objectID, let instanceID):
+                try BridgeResult.consume(
+                    orca_plater_instance_delete(
+                        handle,
+                        objectID.rawValue,
+                        instanceID.rawValue,
+                        &mutationRevision
+                    ),
+                    operation: "delete instance \(instanceID)"
+                )
+
+            case .setTransform(let objectID, let instanceID, let transform):
+                var rawTransform = orca_instance_transform(
+                    offset_x: transform.offsetX,
+                    offset_y: transform.offsetY,
+                    offset_z: transform.offsetZ,
+                    rotation_z: transform.rotationZ,
+                    scale: transform.scale
+                )
+                try BridgeResult.consume(
+                    orca_plater_instance_set(
+                        handle,
+                        objectID.rawValue,
+                        instanceID.rawValue,
+                        &rawTransform,
+                        &mutationRevision
+                    ),
+                    operation: "set transform for instance \(instanceID)"
+                )
+
+            case .ensureOnBed:
+                try BridgeResult.consume(
+                    orca_plater_ensure_on_bed(handle, &mutationRevision),
+                    operation: "ensure scene on bed"
+                )
+            }
+
+            let scene = try snapshotLocked()
+            guard scene.revision.rawValue == mutationRevision else {
+                throw BridgeError.local(
+                    .internalInvariant,
+                    operation: "apply document mutation",
+                    diagnostic: "Mutation returned revision \(mutationRevision), snapshot returned \(scene.revision.rawValue)"
+                )
+            }
+            return MutationResult(
+                snapshot: scene,
+                createdObjectID: createdObjectID,
+                createdInstanceID: createdInstanceID
+            )
+        }
+    }
+
+    public func slice(
+        to outputPath: String,
+        progress: @escaping @Sendable (Int, String) -> Void
+    ) throws -> SliceResult {
+        try lock.withLock {
+            try Self.withProgressContext(progress) { callback, context in
+                var time = 0.0
+                var bytes: Int64 = 0
+                let result = outputPath.withCString { outputPointer in
+                    orca_plater_slice_to_gcode(
+                        handle,
+                        outputPointer,
+                        callback,
+                        context,
+                        &time,
+                        &bytes
+                    )
+                }
+                try BridgeResult.consume(result, operation: "slice document")
+                return SliceResult(timeEstimateSeconds: time, gcodeBytes: bytes)
             }
         }
-        if let error { return .failure(error) }
-        guard timeEstimate >= 0, gcodeBytes >= 0 else {
-            return .failure(.local(
-                .internalInvariant,
-                operation: operation,
-                diagnostic: "\(operation): Bridge succeeded with invalid slice outputs"
-            ))
+    }
+
+    public func slice(
+        to outputPath: String,
+        presets: EnginePresets,
+        progress: @escaping @Sendable (Int, String) -> Void
+    ) throws -> SliceResult {
+        try Self.withLockedHandles(plater: self, presets: presets) { platerHandle, presetHandle in
+            try Self.withProgressContext(progress) { callback, context in
+                var time = 0.0
+                var bytes: Int64 = 0
+                let result = outputPath.withCString { outputPointer in
+                    orca_plater_slice_to_gcode_with_presets(
+                        platerHandle,
+                        presetHandle,
+                        outputPointer,
+                        callback,
+                        context,
+                        &time,
+                        &bytes
+                    )
+                }
+                try BridgeResult.consume(
+                    result,
+                    operation: "slice document with presets"
+                )
+                return SliceResult(timeEstimateSeconds: time, gcodeBytes: bytes)
+            }
         }
-        return .success(SliceOutcome(
-            timeEstimateSeconds: timeEstimate,
-            gcodeBytes: gcodeBytes
-        ))
     }
 
-    private func invalidHandle(_ operation: String) -> BridgeError {
-        .local(
-            .invalidHandle,
-            operation: operation,
-            diagnostic: "\(operation): plater handle is unavailable"
+    private func snapshotLocked() throws -> SceneSnapshot {
+        var rawSnapshot = orca_scene_snapshot()
+        try BridgeResult.consume(
+            orca_plater_snapshot(handle, &rawSnapshot),
+            operation: "read scene snapshot"
+        )
+        defer { orca_scene_snapshot_dispose(&rawSnapshot) }
+
+        guard rawSnapshot.document_id != 0 else {
+            throw Self.invariant(
+                operation: "read scene snapshot",
+                "Bridge returned an invalid document ID"
+            )
+        }
+        guard rawSnapshot.object_count >= 0 else {
+            throw Self.invariant(
+                operation: "read scene snapshot",
+                "Bridge returned a negative object count"
+            )
+        }
+        let objectCount = Int(rawSnapshot.object_count)
+        if objectCount > 0, rawSnapshot.objects == nil {
+            throw Self.invariant(
+                operation: "read scene snapshot",
+                "Bridge returned objects without storage"
+            )
+        }
+
+        var objects: [SceneObject] = []
+        objects.reserveCapacity(objectCount)
+        if let objectPointer = rawSnapshot.objects {
+            for objectIndex in 0..<objectCount {
+                let rawObject = objectPointer[objectIndex]
+                let objectID = try Self.objectID(
+                    rawObject.id,
+                    operation: "read scene snapshot"
+                )
+                let name = try Self.borrowedString(
+                    rawObject.name,
+                    operation: "read name for object \(objectID)"
+                )
+                guard rawObject.mesh_revision != 0 else {
+                    throw Self.invariant(
+                        operation: "read scene snapshot",
+                        "Object \(objectID) has an invalid mesh revision"
+                    )
+                }
+                guard rawObject.position_count > 0,
+                      let positionPointer = rawObject.positions,
+                      rawObject.index_count > 0,
+                      let indexPointer = rawObject.indices else {
+                    throw Self.invariant(
+                        operation: "read scene snapshot",
+                        "Object \(objectID) has incomplete mesh storage"
+                    )
+                }
+                guard rawObject.instance_count >= 0 else {
+                    throw Self.invariant(
+                        operation: "read scene snapshot",
+                        "Object \(objectID) has a negative instance count"
+                    )
+                }
+
+                let positionCount = Int(rawObject.position_count)
+                var positions: [SIMD3<Float>] = []
+                positions.reserveCapacity(positionCount)
+                for vertexIndex in 0..<positionCount {
+                    let base = vertexIndex * 3
+                    positions.append(SIMD3(
+                        positionPointer[base],
+                        positionPointer[base + 1],
+                        positionPointer[base + 2]
+                    ))
+                }
+                let indices = Array(UnsafeBufferPointer(
+                    start: indexPointer,
+                    count: Int(rawObject.index_count)
+                ))
+
+                let instanceCount = Int(rawObject.instance_count)
+                if instanceCount > 0, rawObject.instances == nil {
+                    throw Self.invariant(
+                        operation: "read scene snapshot",
+                        "Object \(objectID) has instances without storage"
+                    )
+                }
+                var instances: [SceneInstance] = []
+                instances.reserveCapacity(instanceCount)
+                if let instancePointer = rawObject.instances {
+                    for instanceIndex in 0..<instanceCount {
+                        let rawInstance = instancePointer[instanceIndex]
+                        let instanceID = try Self.instanceID(
+                            rawInstance.id,
+                            operation: "read scene snapshot"
+                        )
+                        let rawTransform = rawInstance.transform
+                        guard rawTransform.offset_x.isFinite,
+                              rawTransform.offset_y.isFinite,
+                              rawTransform.offset_z.isFinite,
+                              rawTransform.rotation_z.isFinite,
+                              rawTransform.scale.isFinite,
+                              rawTransform.scale > 0 else {
+                            throw Self.invariant(
+                                operation: "read scene snapshot",
+                                "Instance \(instanceID) has an invalid transform"
+                            )
+                        }
+                        instances.append(SceneInstance(
+                            id: instanceID,
+                            transform: InstanceTransform(
+                                offsetX: rawTransform.offset_x,
+                                offsetY: rawTransform.offset_y,
+                                offsetZ: rawTransform.offset_z,
+                                rotationZ: rawTransform.rotation_z,
+                                scale: rawTransform.scale
+                            )
+                        ))
+                    }
+                }
+
+                objects.append(SceneObject(
+                    id: objectID,
+                    name: name,
+                    mesh: SceneMesh(
+                        revision: rawObject.mesh_revision,
+                        positions: positions,
+                        indices: indices,
+                        bounds: EngineBounds(
+                            minimum: SIMD3(
+                                rawObject.bbox_min.0,
+                                rawObject.bbox_min.1,
+                                rawObject.bbox_min.2
+                            ),
+                            maximum: SIMD3(
+                                rawObject.bbox_max.0,
+                                rawObject.bbox_max.1,
+                                rawObject.bbox_max.2
+                            )
+                        ),
+                        pivot: SIMD3(
+                            rawObject.pivot.0,
+                            rawObject.pivot.1,
+                            rawObject.pivot.2
+                        )
+                    ),
+                    instances: instances
+                ))
+            }
+        }
+
+        let uniqueObjectIDs = Set(objects.map(\.id))
+        guard uniqueObjectIDs.count == objects.count else {
+            throw Self.invariant(
+                operation: "read scene snapshot",
+                "Bridge returned duplicate object IDs"
+            )
+        }
+        for object in objects {
+            guard Set(object.instances.map(\.id)).count == object.instances.count else {
+                throw Self.invariant(
+                    operation: "read scene snapshot",
+                    "Object \(object.id) contains duplicate instance IDs"
+                )
+            }
+        }
+
+        return SceneSnapshot(
+            documentID: DocumentID(rawValue: rawSnapshot.document_id),
+            revision: DocumentRevision(rawValue: rawSnapshot.revision),
+            objects: objects
         )
     }
 
-    private func invalidID(
-        _ operation: String,
-        label: String,
-        value: Int
-    ) -> BridgeError {
-        .local(
-            .invalidArgument,
+    private static func borrowedString(
+        _ raw: orca_owned_string,
+        operation: String
+    ) throws -> String {
+        guard raw.length <= UInt64(Int.max) else {
+            throw invariant(operation: operation, "String exceeds Swift count range")
+        }
+        if raw.length == 0 { return "" }
+        guard let data = raw.data else {
+            throw invariant(operation: operation, "String storage is null")
+        }
+        let bytes = UnsafeRawBufferPointer(
+            start: data,
+            count: Int(raw.length)
+        )
+        guard let value = String(bytes: bytes, encoding: .utf8) else {
+            throw invariant(operation: operation, "String is not valid UTF-8")
+        }
+        return value
+    }
+
+    private static func objectID(
+        _ rawValue: UInt64,
+        operation: String
+    ) throws -> ObjectID {
+        guard rawValue != 0 else {
+            throw invariant(operation: operation, "Bridge returned an invalid object ID")
+        }
+        return ObjectID(rawValue: rawValue)
+    }
+
+    private static func instanceID(
+        _ rawValue: UInt64,
+        operation: String
+    ) throws -> InstanceID {
+        guard rawValue != 0 else {
+            throw invariant(operation: operation, "Bridge returned an invalid instance ID")
+        }
+        return InstanceID(rawValue: rawValue)
+    }
+
+    private static func invariant(operation: String, _ diagnostic: String) -> BridgeError {
+        BridgeError.local(
+            .internalInvariant,
             operation: operation,
-            diagnostic: "\(operation): \(label) ID \(value) is outside the Bridge range"
+            diagnostic: diagnostic
         )
     }
+
+    private static func withLockedHandles<Result>(
+        plater: EnginePlater,
+        presets: EnginePresets,
+        _ body: (OpaquePointer, OpaquePointer) throws -> Result
+    ) rethrows -> Result {
+        // Fixed global order for cross-session calls: plater, then presets.
+        try plater.lock.withLock {
+            try presets.withLockedHandle { presetHandle in
+                try body(plater.handle, presetHandle)
+            }
+        }
+    }
+
+    private static func withProgressContext<Result>(
+        _ progress: @escaping @Sendable (Int, String) -> Void,
+        _ body: (orca_progress_fn, UnsafeMutableRawPointer) throws -> Result
+    ) throws -> Result {
+        let box = ProgressBox(progress)
+        let context = Unmanaged.passRetained(box).toOpaque()
+        defer { Unmanaged<ProgressBox>.fromOpaque(context).release() }
+        return try body(progressTrampoline, context)
+    }
+}
+
+public struct SliceResult: Sendable {
+    public let timeEstimateSeconds: Double
+    public let gcodeBytes: Int64
+}
+
+private final class ProgressBox: @unchecked Sendable {
+    let callback: @Sendable (Int, String) -> Void
+
+    init(_ callback: @escaping @Sendable (Int, String) -> Void) {
+        self.callback = callback
+    }
+}
+
+private let progressTrampoline: orca_progress_fn = { percent, message, context in
+    guard let context else { return }
+    let box = Unmanaged<ProgressBox>.fromOpaque(context).takeUnretainedValue()
+    box.callback(Int(percent), message.map(String.init(cString:)) ?? "")
 }
