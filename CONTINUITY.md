@@ -8,10 +8,9 @@
   while eliminating stringly results, unstable index identity, competing
   mutable scene state, and `PlaterView` orchestration.
 - Next steps:
-  1. Introduce one typed C result/error contract and migrate Swift wrappers.
-  2. Add stable engine IDs, document revisions, and authoritative snapshots.
-  3. Extract document/preset/slice orchestration from `PlaterView`.
-  4. Add contract tests, then resume feature-parity work.
+  1. Add stable engine IDs, document revisions, and authoritative snapshots.
+  2. Extract document/preset/slice orchestration from `PlaterView`.
+  3. Add contract tests, then resume feature-parity work.
 - Build reproducibility is explicitly deferred; the machine-local build stays
   green but is not the current architecture milestone. [USER]
 
@@ -57,6 +56,15 @@
 
 ## PROGRESS
 
+- [2026-10-06] TYPED BRIDGE RESULTS LANDED: every fallible C operation now
+  returns the versioned `orca_result` status taxonomy; diagnostics and returned
+  strings are caller-owned, C++ exceptions stay inside the Bridge, outputs are
+  defensive, and Swift branches only on `BridgeStatus`. Shared static result
+  buffers and prose success checks are gone. Preset selection is transactional,
+  preset-backed slices preserve selected values, the process data directory is
+  initialize-once, and slice calls hold both handle locks. C/C++ syntax census,
+  host Swift facade typecheck, 259/259 archive audit, and warning-free xtool
+  build green. [CODE][TOOL]
 - [2026-10-06] MODULE BOUNDARIES ALIGNED: proof-only `Engine`/`OrcaCore`
   naming is now `Bridge`/`OrcaBridge`; Package.swift enforces Client → Bridge
   → binary C ABI, raw ABI use is confined to `Sources/OrcaBridge`, obsolete
@@ -141,6 +149,10 @@
 
 ## DISCOVERIES
 
+- [2026-10-06 CODE] The old 262-member archive's three duplicate entries were
+  duplicate compile-list jobs (Triangulation, SVG, FuzzySkin) racing on the
+  same object paths; the build now rejects duplicates and emits 259/259 unique
+  members. This supersedes the earlier unexplained duplicate-member finding.
 - [2026-10-06 CODE] Architecture audit: Swift reaches a custom C ABI
   (now `orca_bridge.h`), not direct C++ interop; the clean v2.4.2 submodule supplies
   153/215 libslic3r implementation TUs. The device-only archive is built from

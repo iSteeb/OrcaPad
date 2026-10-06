@@ -1,0 +1,3 @@
+# Static archives begin with a large ASCII symbol table and may not contain a
+# NUL in Git's detection window. Always treat them as binary artifacts.
+*.a binary

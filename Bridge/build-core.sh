@@ -116,10 +116,16 @@ PENDING_OBJS="$BUILD/pending-objs.txt"
 : > "$JOBS"
 : > "$PENDING_OBJS"
 PENDING=0
+declare -A SEEN_OBJS=()
 
 compile_one() { # compile_one <src> <obj> <compiler+flags...>
     # Phase 1: record the command; execution is parallel (phase 2, below).
     local src="$1" o="$2"; shift 2
+    if [[ -n "${SEEN_OBJS[$o]+present}" ]]; then
+        echo "FATAL: duplicate compile source maps to $o" >&2
+        exit 1
+    fi
+    SEEN_OBJS[$o]=1
     if needs_build "$src" "$o"; then
         {
             printf '%q ' "$@" -MD -MF "$o.d" -c "$src" -o "$o"
@@ -139,13 +145,19 @@ run_jobs_parallel() { # phase 2: bounded-parallel compile + hard verification
     # override for unattended runs with ORCAPAD_JOBS=N.
     local maxjobs="${ORCAPAD_JOBS:-6}"
     echo "==> compiling $PENDING files, $maxjobs parallel (niced)" >&2
-    local p=0
+    local p=0 job_failed=0
     while IFS= read -r cmd; do
         nice -n 15 bash -c "$cmd" &
         p=$((p + 1))
-        if (( p >= maxjobs )); then wait -n; p=$((p - 1)); fi
+        if (( p >= maxjobs )); then
+            if ! wait -n; then job_failed=1; fi
+            p=$((p - 1))
+        fi
     done < "$JOBS"
-    wait
+    while (( p > 0 )); do
+        if ! wait -n; then job_failed=1; fi
+        p=$((p - 1))
+    done
     # hard verification: every pending .o must exist; every .err must be empty
     # 2026-10-03: parsing "-o <path>" back out of the %q-quoted job line left a
     # trailing space ("path.o  2>…"), so [ -f "$o" ] failed on GOOD builds —
@@ -162,7 +174,7 @@ run_jobs_parallel() { # phase 2: bounded-parallel compile + hard verification
             rm -f "${o}.err"
         fi
     done < "$PENDING_OBJS"
-    [ "$failed" -eq 0 ] || exit 1
+    [ "$failed" -eq 0 ] && [ "$job_failed" -eq 0 ] || exit 1
 }
 
 compile() { # compile <srcfile> (C++, extra flags after src)
@@ -240,7 +252,7 @@ for f in Model.cpp PrintConfig.cpp PrintBase.cpp Print.cpp PrintApply.cpp \
          Algorithm/LineSplit.cpp Algorithm/RegionExpansion.cpp \
          SLA/IndexedMesh.cpp SVG.cpp \
          FilamentGroupUtils.cpp ParameterUtils.cpp ShortEdgeCollapse.cpp \
-         IntersectionPoints.cpp FlushVolPredictor.cpp Geometry/Circle.cpp Clipper2Utils.cpp Triangulation.cpp TriangleSetSampling.cpp          FaceDetector.cpp TriangleSelector.cpp BuildVolume.cpp Extruder.cpp SVG.cpp PrincipalComponents2D.cpp MultiMaterialSegmentation.cpp FilamentGroup.cpp ContourZ.cpp Feature/Interlocking/InterlockingGenerator.cpp Feature/Interlocking/VoxelUtils.cpp Feature/FuzzySkin/FuzzySkin.cpp calib.cpp MaterialType.cpp FlushVolCalc.cpp NormalUtils.cpp \
+         IntersectionPoints.cpp FlushVolPredictor.cpp Geometry/Circle.cpp Clipper2Utils.cpp TriangleSetSampling.cpp FaceDetector.cpp TriangleSelector.cpp BuildVolume.cpp Extruder.cpp PrincipalComponents2D.cpp MultiMaterialSegmentation.cpp FilamentGroup.cpp ContourZ.cpp Feature/Interlocking/InterlockingGenerator.cpp Feature/Interlocking/VoxelUtils.cpp calib.cpp MaterialType.cpp FlushVolCalc.cpp NormalUtils.cpp \
          Preset.cpp PresetBundle.cpp AppConfig.cpp; do
     compile "$SRC/libslic3r/$f"
 done

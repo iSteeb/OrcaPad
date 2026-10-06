@@ -17,8 +17,8 @@ Engine before feature breadth makes the current coupling permanent.
 - [x] Document module responsibilities, dependency rules, failure semantics,
   state ownership, capabilities, and migration order
 - [x] Align repository and Swift target names with explicit Bridge ownership
-- [ ] Replace diagnostic-string success checks with one typed bridge result
-- [ ] Remove shared static bridge result strings and define data ownership
+- [x] Replace diagnostic-string success checks with one typed bridge result
+- [x] Remove shared static bridge result strings and define data ownership
 - [ ] Introduce stable engine IDs and document revisions
 - [ ] Replace mutable index-coupled Swift scene mirroring with snapshots
 - [ ] Move orchestration/filesystem/slicing state out of `PlaterView`
@@ -51,7 +51,7 @@ typed and loud; current physical-device slice behavior remains green.
 **Goal:** libslic3r running on iOS, called from Swift.
 
 - [x] Cross-compile the real FFF libslic3r pipeline and dependencies from Linux
-  (current archive: 262 members / 259 unique sources)
+  (current archive: 259 members / 259 unique sources)
 - [x] Initial extern-C bridge proving Swift can drive the C++ engine
 - [ ] Harden that proof into the typed Bridge contract in Architecture Gate A
 - [x] On-device proof: STL load + admesh repair verified on iPhone

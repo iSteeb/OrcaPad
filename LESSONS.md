@@ -12,6 +12,11 @@ in ~/xtool-cheatsheet.md — link, don't duplicate.)
   are derived, revisioned representations — never competing mutable models.
 - Solve recurring classes of problems through one typed contract; do not grow
   status-string checks, per-feature shims, index identity, or silent patches.
+- Generic safety overlays belong only to the preset-free slice path. Applying
+  them after `PresetBundle.full_config()` silently corrupts selected material
+  and hardware values.
+- Cross-handle calls hold both session locks for the full C operation, always
+  in plater → presets order; borrowing an unlocked raw handle is a data race.
 - Build output always redirected to a file: `xtool dev build > /tmp/orcapad-build.log 2>&1`
 - All app logging via `os_log` (`Logger(subsystem: "ie.duz.OrcaPad", …)`);
   `print()` is invisible for home-screen-launched apps.
@@ -46,6 +51,9 @@ in ~/xtool-cheatsheet.md — link, don't duplicate.)
   artifacts interleave, single-run logs mislead (a FAILED(no object) line
   for an .o that exists seconds later). Ground truth: rerun the script —
   mtime incremental + archive member guard + strings on the artifact.
+- **Each source appears once in the archive manifest.** Duplicate compile jobs
+  race on the same `.o`/depfile and may use conflicting force-includes. The
+  build now rejects duplicate object paths before launching any compiler.
 
 ### Process discipline — the expensive ones
 

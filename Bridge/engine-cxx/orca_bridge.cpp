@@ -7,11 +7,20 @@
 
 #include <algorithm>
 #include <cerrno>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <limits>
+#include <memory>
+#include <mutex>
+#include <new>
+#include <stdexcept>
 #include <string>
 #include <vector>
+
+#include <sys/stat.h>
 
 // --- adapter: translation hook --------------------------------------
 // Desktop OrcaSlicer defines I18N::translate_fn in utils.cpp (which needs
@@ -21,6 +30,87 @@ namespace Slic3r { namespace I18N {
 static std::string identity_translate(const char *s) { return s; }
 translate_fn_type translate_fn = &identity_translate;
 }}
+
+// --- C ABI result ownership ---------------------------------------------
+
+static orca_owned_string orcapad_empty_string() noexcept {
+    return { nullptr, 0 };
+}
+
+static bool orcapad_copy_string(const char *source, orca_owned_string *out) noexcept {
+    if (!out) return false;
+    *out = orcapad_empty_string();
+    if (!source) source = "";
+    const size_t length = std::strlen(source);
+    if (length == std::numeric_limits<size_t>::max() ||
+        length > static_cast<size_t>(std::numeric_limits<uint64_t>::max()))
+        return false;
+    char *copy = static_cast<char *>(std::malloc(length + 1));
+    if (!copy) return false;
+    std::memcpy(copy, source, length + 1);
+    out->data = copy;
+    out->length = static_cast<uint64_t>(length);
+    return true;
+}
+
+static orca_result orcapad_ok() noexcept {
+    return { ORCA_STATUS_OK, orcapad_empty_string() };
+}
+
+static orca_result orcapad_fail(orca_status_code code, const char *operation,
+                                const char *detail) noexcept {
+    orca_result result { code, orcapad_empty_string() };
+    if (!operation) operation = "Bridge";
+    if (!detail) detail = "failure";
+    const size_t operation_length = std::strlen(operation);
+    const size_t detail_length = std::strlen(detail);
+    if (detail_length > std::numeric_limits<size_t>::max() - 3 ||
+        operation_length >
+            std::numeric_limits<size_t>::max() - detail_length - 3) {
+        result.code = ORCA_STATUS_OUT_OF_MEMORY;
+        return result;
+    }
+    const size_t length = operation_length + 2 + detail_length;
+    char *diagnostic = static_cast<char *>(std::malloc(length + 1));
+    if (!diagnostic) {
+        result.code = ORCA_STATUS_OUT_OF_MEMORY;
+        return result;
+    }
+    std::memcpy(diagnostic, operation, operation_length);
+    diagnostic[operation_length] = ':';
+    diagnostic[operation_length + 1] = ' ';
+    std::memcpy(diagnostic + operation_length + 2, detail, detail_length + 1);
+    result.diagnostic = { diagnostic, static_cast<uint64_t>(length) };
+    return result;
+}
+
+template <class Function>
+static orca_result orcapad_guard(const char *operation, Function &&function) noexcept {
+    try {
+        return function();
+    } catch (const std::bad_alloc &) {
+        return orcapad_fail(ORCA_STATUS_OUT_OF_MEMORY, operation, "allocation failed");
+    } catch (const std::exception &error) {
+        return orcapad_fail(ORCA_STATUS_ENGINE_FAILURE, operation, error.what());
+    } catch (...) {
+        return orcapad_fail(ORCA_STATUS_ENGINE_FAILURE, operation,
+                            "unknown C++ exception");
+    }
+}
+
+uint32_t orca_bridge_abi_version(void) { return ORCA_BRIDGE_ABI_VERSION; }
+
+void orca_owned_string_dispose(orca_owned_string *string) {
+    if (!string) return;
+    std::free(string->data);
+    *string = orcapad_empty_string();
+}
+
+void orca_result_dispose(orca_result *result) {
+    if (!result) return;
+    orca_owned_string_dispose(&result->diagnostic);
+    result->code = ORCA_STATUS_OK;
+}
 
 // --- mesh handle ------------------------------------------------------
 
@@ -62,18 +152,23 @@ static void orcapad_pack(const Slic3r::TriangleMesh &mesh, orcapad_packed *out) 
     out->valid = true;
 }
 
-static void orcapad_fill_view(const orcapad_packed &p, orca_mesh_view *v) {
+static bool orcapad_fill_view(const orcapad_packed &p, orca_mesh_view *v) {
     memset(v, 0, sizeof(*v));
+    const size_t position_count = p.positions.size() / 3;
+    if (position_count > static_cast<size_t>(std::numeric_limits<int32_t>::max()) ||
+        p.indices.size() > static_cast<size_t>(std::numeric_limits<int32_t>::max()))
+        return false;
     v->positions = p.positions.data();
-    v->position_count = (int)(p.positions.size() / 3);
+    v->position_count = static_cast<int32_t>(position_count);
     v->indices = p.indices.data();
-    v->index_count = (int)p.indices.size();
+    v->index_count = static_cast<int32_t>(p.indices.size());
     v->bbox_min[0] = p.emin[0] - p.center[0];
     v->bbox_max[0] = p.emax[0] - p.center[0];
     v->bbox_min[1] = p.emin[2];
     v->bbox_max[1] = p.emax[2];
     v->bbox_min[2] = -(p.emax[1] - p.center[1]);
     v->bbox_max[2] = -(p.emin[1] - p.center[1]);
+    return true;
 }
 
 struct orca_mesh {
@@ -81,78 +176,101 @@ struct orca_mesh {
     orcapad_packed       packed;     // viewer-space buffers + pivot
 };
 
-const char *orca_stl_load(const char *path, orca_mesh **out_mesh, orca_mesh_view *out_view) {
-    static std::string result;
-    *out_mesh = nullptr;
-    memset(out_view, 0, sizeof(*out_view));
-    if (!path || !path[0]) return "OrcaCore: no path passed";
+orca_result orca_stl_load(const char *path, orca_mesh **out_mesh,
+                          orca_mesh_view *out_view) {
+    constexpr const char *operation = "orca_stl_load";
+    if (out_mesh) *out_mesh = nullptr;
+    if (out_view) std::memset(out_view, 0, sizeof(*out_view));
+    if (!out_mesh || !out_view)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "output pointer is null");
+    if (!path || !path[0])
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "path is empty");
+    struct stat path_status;
+    if (stat(path, &path_status) != 0)
+        return orcapad_fail(ORCA_STATUS_IO_FAILURE, operation,
+                            "input file is not accessible");
 
-    try {
-        orca_mesh *m = new orca_mesh();
-        if (!m->mesh.ReadSTLFile(path)) {
-            delete m;
-            return "OrcaCore: STL read FAILED (bad format?)";
-        }
-        const auto &its = m->mesh.its;
-        if (its.indices.empty() || its.vertices.empty()) {
-            delete m;
-            return "OrcaCore: mesh empty";
-        }
+    return orcapad_guard(operation, [&]() -> orca_result {
+        auto mesh = std::make_unique<orca_mesh>();
+        if (!mesh->mesh.ReadSTLFile(path))
+            return orcapad_fail(ORCA_STATUS_INVALID_MODEL, operation,
+                                "STL could not be read");
+        const auto &indexed = mesh->mesh.its;
+        if (indexed.indices.empty() || indexed.vertices.empty())
+            return orcapad_fail(ORCA_STATUS_INVALID_MODEL, operation,
+                                "mesh is empty");
 
-        orcapad_pack(m->mesh, &m->packed);
-        orcapad_fill_view(m->packed, out_view);
-
-        *out_mesh = m;
-        result = "OrcaCore: ok";
-        return result.c_str();
-    } catch (const std::exception &e) {
-        return (result = std::string("OrcaCore: C++ exception: ") + e.what()).c_str();
-    } catch (...) {
-        return "OrcaCore: unknown C++ exception";
-    }
+        orcapad_pack(mesh->mesh, &mesh->packed);
+        if (!orcapad_fill_view(mesh->packed, out_view))
+            return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
+                                "mesh exceeds ABI count range");
+        *out_mesh = mesh.release();
+        return orcapad_ok();
+    });
 }
 
 void orca_mesh_free(orca_mesh *mesh) { delete mesh; }
 
-const char *orca_slice_report(orca_mesh *m, int levels,
-                              int *out_levels, int *out_mid_islands, double *out_mid_area_mm2) {
-    static std::string result;
-    *out_levels = *out_mid_islands = 0;
-    *out_mid_area_mm2 = 0.0;
-    if (!m) return "OrcaCore: null mesh handle";
-    if (levels < 1) levels = 1;
+orca_result orca_slice_report(orca_mesh *mesh, int32_t levels,
+                              int32_t *out_levels, int32_t *out_mid_islands,
+                              double *out_mid_area_mm2) {
+    constexpr const char *operation = "orca_slice_report";
+    if (out_levels) *out_levels = 0;
+    if (out_mid_islands) *out_mid_islands = 0;
+    if (out_mid_area_mm2) *out_mid_area_mm2 = 0.0;
+    if (!out_levels || !out_mid_islands || !out_mid_area_mm2)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "output pointer is null");
+    if (!mesh)
+        return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation,
+                            "mesh handle is null");
+    if (levels < 1)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "levels must be positive");
 
-    try {
-        const auto &its = m->mesh.its;
+    return orcapad_guard(operation, [&]() -> orca_result {
+        const auto &indexed = mesh->mesh.its;
         float zmin = 1e30f, zmax = -1e30f;
-        for (const auto &v : its.vertices) {
-            zmin = std::min(zmin, v.z());
-            zmax = std::max(zmax, v.z());
+        for (const auto &vertex : indexed.vertices) {
+            zmin = std::min(zmin, vertex.z());
+            zmax = std::max(zmax, vertex.z());
         }
         const float first_layer = 0.2f;
         std::vector<float> zs;
-        zs.reserve((size_t)levels);
-        for (int i = 0; i < levels; ++i) {
-            float t = (float)(i + 1) / (float)(levels + 1); // strictly interior
-            zs.push_back(zmin + first_layer + t * ((zmax - first_layer) - zmin));
+        zs.reserve(static_cast<size_t>(levels));
+        for (int32_t index = 0; index < levels; ++index) {
+            const float fraction = static_cast<float>(index + 1) /
+                                   static_cast<float>(levels + 1);
+            zs.push_back(zmin + first_layer +
+                         fraction * ((zmax - first_layer) - zmin));
         }
 
-        Slic3r::MeshSlicingParamsEx params; // defaults
+        Slic3r::MeshSlicingParamsEx params;
         std::vector<Slic3r::ExPolygons> slices =
-            Slic3r::slice_mesh_ex(its, zs, params);
+            Slic3r::slice_mesh_ex(indexed, zs, params);
+        if (slices.empty())
+            return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
+                                "engine returned no slice levels");
+        if (slices.size() > static_cast<size_t>(std::numeric_limits<int32_t>::max()))
+            return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
+                                "slice level count exceeds ABI range");
 
-        *out_levels = (int)slices.size();
-        const size_t mid = slices.size() / 2;
-        *out_mid_islands = (int)slices[mid].size();
-        *out_mid_area_mm2 = Slic3r::area(slices[mid]);
-
-        result = "OrcaCore: slice ok";
-        return result.c_str();
-    } catch (const std::exception &e) {
-        return (result = std::string("OrcaCore: C++ exception: ") + e.what()).c_str();
-    } catch (...) {
-        return "OrcaCore: unknown C++ exception";
-    }
+        const size_t middle = slices.size() / 2;
+        if (slices[middle].size() >
+            static_cast<size_t>(std::numeric_limits<int32_t>::max()))
+            return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
+                                "island count exceeds ABI range");
+        const int32_t level_count = static_cast<int32_t>(slices.size());
+        const int32_t island_count =
+            static_cast<int32_t>(slices[middle].size());
+        const double area_mm2 = Slic3r::area(slices[middle]);
+        *out_levels = level_count;
+        *out_mid_islands = island_count;
+        *out_mid_area_mm2 = area_mm2;
+        return orcapad_ok();
+    });
 }
 
 // --- full slice pipeline ------------------------------------------------
@@ -165,8 +283,6 @@ const char *orca_slice_report(orca_mesh *m, int levels,
 #include "libslic3r/PresetBundle.hpp"
 #include "libslic3r/Utils.hpp"
 
-#include <sys/stat.h>
-
 #include <fstream>
 #include <sstream>
 
@@ -175,8 +291,25 @@ const char *orca_slice_report(orca_mesh *m, int levels,
 // libproc.h). Swift owns the path: the app bundle's read-only resource dir
 // with the shipped profile tree (<bundle>/system/…).
 namespace Slic3r {
+static std::mutex  orcapad_data_dir_mutex;
 static std::string orcapad_data_dir;
-void set_data_dir(const std::string &path) { orcapad_data_dir = path; }
+
+static bool orcapad_initialize_data_dir(const std::string &path) {
+    std::lock_guard<std::mutex> lock(orcapad_data_dir_mutex);
+    if (orcapad_data_dir.empty()) {
+        orcapad_data_dir = path;
+        return true;
+    }
+    return orcapad_data_dir == path;
+}
+
+void set_data_dir(const std::string &path) {
+    if (!orcapad_initialize_data_dir(path))
+        throw std::logic_error("OrcaBridge data directory is already initialized");
+}
+
+// Safe without locking: initialization occurs once and the string is never
+// mutated afterward.
 const std::string &data_dir() { return orcapad_data_dir; }
 
 // --- utils.cpp adapters (same reason: macOS-only bits in the real TU) ----
@@ -197,31 +330,31 @@ CopyFileResult copy_file(const std::string &from, const std::string &to,
                          std::string &error_message, const bool with_check) {
     std::ifstream src(from, std::ios::in | std::ios::binary);
     if (!src) {
-        error_message = "OrcaCore copy_file: cannot open " + from;
+        error_message = "OrcaBridge copy_file: cannot open " + from;
         return CopyFileResult::FAIL_CHECK_ORIGIN_NOT_OPENED;
     }
     const std::string tmp = to + ".orcapad-tmp";
     {
         std::ofstream dst(tmp, std::ios::out | std::ios::binary);
         if (!dst) {
-            error_message = "OrcaCore copy_file: cannot create " + tmp;
+            error_message = "OrcaBridge copy_file: cannot create " + tmp;
             return CopyFileResult::FAIL_COPY_FILE;
         }
         dst << src.rdbuf();
         if (!dst.good()) {
-            error_message = "OrcaCore copy_file: write failed " + tmp;
+            error_message = "OrcaBridge copy_file: write failed " + tmp;
             return CopyFileResult::FAIL_COPY_FILE;
         }
     }
     if (with_check) {
         struct stat a, b;
         if (stat(from.c_str(), &a) != 0 || stat(tmp.c_str(), &b) != 0 || a.st_size != b.st_size) {
-            error_message = "OrcaCore copy_file: size check failed " + tmp;
+            error_message = "OrcaBridge copy_file: size check failed " + tmp;
             return CopyFileResult::FAIL_FILES_DIFFERENT;
         }
     }
     if (std::rename(tmp.c_str(), to.c_str()) != 0) {
-        error_message = "OrcaCore copy_file: rename failed → " + to;
+        error_message = "OrcaBridge copy_file: rename failed → " + to;
         return CopyFileResult::FAIL_RENAMING;
     }
     return CopyFileResult::SUCCESS;
@@ -250,114 +383,192 @@ bool install_vendor_bundles_from_resources(const std::vector<std::string> &bundl
 // --- system preset bundle ------------------------------------------------
 
 struct orca_presets {
-    Slic3r::AppConfig    app_config;
-    Slic3r::PresetBundle bundle;
-    std::string          load_errors;   // per-vendor load warnings (non-fatal)
-    std::string          name_scratch;  // stable storage for list_name
+    Slic3r::AppConfig app_config;
+    std::unique_ptr<Slic3r::PresetBundle> bundle;
 
-    Slic3r::PresetCollection &collection(int kind) {
+    orca_presets() : bundle(std::make_unique<Slic3r::PresetBundle>()) {}
+
+    Slic3r::PresetCollection &collection(int32_t kind) {
         switch (kind) {
-        case 0: return bundle.printers;
-        case 1: return bundle.filaments;
-        default: return bundle.prints;
+        case 0: return bundle->printers;
+        case 1: return bundle->filaments;
+        default: return bundle->prints;
         }
     }
 };
 
-const char *orca_presets_new(const char *data_dir_path, orca_presets **out) {
-    static std::string result;
-    if (!out) return "OrcaCore: null out";
-    *out = nullptr;
-    if (!data_dir_path || !data_dir_path[0]) return "OrcaCore: null data dir";
-    try {
-        Slic3r::set_data_dir(data_dir_path);
-        std::unique_ptr<orca_presets> p(new orca_presets());
-        auto subs = p->bundle.load_presets(
-            p->app_config,
+static bool orcapad_valid_preset_kind(int32_t kind) {
+    return kind >= 0 && kind <= 2;
+}
+
+static std::vector<std::string> orcapad_system_preset_names(
+    const Slic3r::PresetCollection &collection) {
+    std::vector<std::string> names;
+    for (const Slic3r::Preset &preset : collection)
+        if (preset.is_system) names.push_back(preset.name);
+    std::sort(names.begin(), names.end());
+    return names;
+}
+
+static bool orcapad_has_exact_system_preset(
+    Slic3r::PresetCollection &collection, const char *name) {
+    const Slic3r::Preset *preset = collection.find_preset(name, false, true);
+    return preset && preset->is_system && preset->name == name;
+}
+
+orca_result orca_presets_new(const char *data_dir_path, orca_presets **out) {
+    constexpr const char *operation = "orca_presets_new";
+    if (out) *out = nullptr;
+    if (!out)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "output pointer is null");
+    if (!data_dir_path || !data_dir_path[0])
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "data directory is empty");
+
+    return orcapad_guard(operation, [&]() -> orca_result {
+        if (!Slic3r::orcapad_initialize_data_dir(data_dir_path))
+            return orcapad_fail(ORCA_STATUS_INVALID_CONFIGURATION, operation,
+                                "data directory differs from the initialized runtime");
+        auto presets = std::make_unique<orca_presets>();
+        auto substitutions = presets->bundle->load_presets(
+            presets->app_config,
             Slic3r::ForwardCompatibilitySubstitutionRule::EnableSilent,
             Slic3r::PresetBundle::PresetPreferences());
-        (void)subs; // substitutions resolved silently (system presets)
+        (void)substitutions;
         // OrcaPad = desktop "show all presets": vendor machines without
-        // declared nozzle variants in their vendor json (Prusa-style, e.g.
-        // Positron3D) stay invisible after a headless load and
-        // select_preset_by_name rejects invisible presets (293 loaded, only
-        // 29 selectable — probe-verified 2026-10-05). Flip visibility on all
-        // system printers; filaments/processes are gated by compatibility,
-        // re-evaluated below.
-        for (auto &preset : p->bundle.printers)
+        // declared nozzle variants stay invisible after a headless load.
+        for (auto &preset : presets->bundle->printers)
             if (preset.is_system) preset.is_visible = true;
-        p->bundle.update_compatible(Slic3r::PresetSelectCompatibleType::Always);
-        const int machines = (int)p->bundle.printers.system_preset_names().size();
-        const int filaments = (int)p->bundle.filaments.system_preset_names().size();
-        const int processes = (int)p->bundle.prints.system_preset_names().size();
-        result = "OrcaCore: presets ok · " + std::to_string(machines) +
-                 " machines · " + std::to_string(filaments) + " filaments · " +
-                 std::to_string(processes) + " processes";
-        *out = p.release();
-        return result.c_str();
-    } catch (const std::exception &e) {
-        return (result = std::string("OrcaCore: C++ exception: ") + e.what()).c_str();
-    } catch (...) {
-        return (result = "OrcaCore: unknown C++ exception").c_str();
-    }
+        presets->bundle->update_compatible(
+            Slic3r::PresetSelectCompatibleType::Always);
+        *out = presets.release();
+        return orcapad_ok();
+    });
 }
 
-void orca_presets_free(orca_presets *p) { delete p; }
+void orca_presets_free(orca_presets *presets) { delete presets; }
 
-const char *orca_presets_list_count(orca_presets *p, int kind, int *out_count) {
-    if (!p || !out_count) return "OrcaCore: null presets/out";
-    *out_count = (int)p->collection(kind).system_preset_names().size();
-    return "OrcaCore: ok";
+orca_result orca_presets_list_count(orca_presets *presets, int32_t kind,
+                                    int32_t *out_count) {
+    constexpr const char *operation = "orca_presets_list_count";
+    if (out_count) *out_count = 0;
+    if (!presets)
+        return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation,
+                            "presets handle is null");
+    if (!out_count)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "output pointer is null");
+    if (!orcapad_valid_preset_kind(kind))
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "preset kind is invalid");
+
+    return orcapad_guard(operation, [&]() -> orca_result {
+        const size_t count =
+            orcapad_system_preset_names(presets->collection(kind)).size();
+        if (count > static_cast<size_t>(std::numeric_limits<int32_t>::max()))
+            return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
+                                "preset count exceeds ABI range");
+        *out_count = static_cast<int32_t>(count);
+        return orcapad_ok();
+    });
 }
 
-const char *orca_presets_list_name(orca_presets *p, int kind, int idx,
-                                   const char **out_name) {
-    if (!p || !out_name) return "OrcaCore: null presets/out";
-    *out_name = nullptr;
-    // system_preset_names() returns BY VALUE — c_str() into the temporary
-    // dangles after return (garbled names in the UI). Copy into the
-    // session's stable storage; the caller (under the same lock) reads it
-    // before any further preset call.
-    const auto names = p->collection(kind).system_preset_names();
-    if (idx < 0 || idx >= (int)names.size()) return "OrcaCore: bad index";
-    p->name_scratch = names[idx];
-    *out_name = p->name_scratch.c_str();
-    return "OrcaCore: ok";
+orca_result orca_presets_list_name(orca_presets *presets, int32_t kind,
+                                   int32_t index, orca_owned_string *out_name) {
+    constexpr const char *operation = "orca_presets_list_name";
+    if (out_name) *out_name = orcapad_empty_string();
+    if (!presets)
+        return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation,
+                            "presets handle is null");
+    if (!out_name)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "output pointer is null");
+    if (!orcapad_valid_preset_kind(kind))
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "preset kind is invalid");
+
+    return orcapad_guard(operation, [&]() -> orca_result {
+        const auto names =
+            orcapad_system_preset_names(presets->collection(kind));
+        if (index < 0 || static_cast<size_t>(index) >= names.size())
+            return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation,
+                                "preset index was not found");
+        if (!orcapad_copy_string(names[static_cast<size_t>(index)].c_str(), out_name))
+            return orcapad_fail(ORCA_STATUS_OUT_OF_MEMORY, operation,
+                                "could not allocate preset name");
+        return orcapad_ok();
+    });
 }
 
-const char *orca_presets_select(orca_presets *p, const char *machine,
+orca_result orca_presets_select(orca_presets *presets, const char *machine,
                                 const char *filament, const char *process) {
-    static std::string result;
-    if (!p || !machine || !filament || !process) return "OrcaCore: null args";
-    try {
-        // Machine first, then a compatibility pass — Positron-style processes
-        // only become visible/selectable once their machine is active
-        // (mirrors the desktop preset flow).
-        p->bundle.printers.select_preset_by_name(machine, false);
-        p->bundle.update_compatible(Slic3r::PresetSelectCompatibleType::Always);
-        p->bundle.filaments.select_preset_by_name(filament, false);
-        p->bundle.prints.select_preset_by_name(process, false);
-        std::string miss;
-        if (p->bundle.printers.get_selected_preset().name != machine) miss = machine;
-        else if (p->bundle.filaments.get_selected_preset().name != filament) miss = filament;
-        else if (p->bundle.prints.get_selected_preset().name != process) miss = process;
-        if (!miss.empty()) {
-            result = "OrcaCore: preset not found — " + miss;
-            return result.c_str();
-        }
-        return (result = "OrcaCore: selected").c_str();
-    } catch (const std::exception &e) {
-        return (result = std::string("OrcaCore: C++ exception: ") + e.what()).c_str();
-    } catch (...) {
-        return (result = "OrcaCore: unknown C++ exception").c_str();
-    }
+    constexpr const char *operation = "orca_presets_select";
+    if (!presets)
+        return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation,
+                            "presets handle is null");
+    if (!machine || !machine[0] || !filament || !filament[0] ||
+        !process || !process[0])
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "preset name is empty");
+
+    return orcapad_guard(operation, [&]() -> orca_result {
+        if (!orcapad_has_exact_system_preset(
+                presets->bundle->printers, machine))
+            return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation,
+                                "machine preset was not found");
+        if (!orcapad_has_exact_system_preset(
+                presets->bundle->filaments, filament))
+            return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation,
+                                "filament preset was not found");
+        if (!orcapad_has_exact_system_preset(
+                presets->bundle->prints, process))
+            return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation,
+                                "process preset was not found");
+
+        auto candidate =
+            std::make_unique<Slic3r::PresetBundle>(*presets->bundle);
+        candidate->printers.select_preset_by_name(machine, false);
+        candidate->update_compatible(
+            Slic3r::PresetSelectCompatibleType::Always);
+        candidate->filaments.select_preset_by_name(filament, false);
+        candidate->prints.select_preset_by_name(process, false);
+        if (candidate->printers.get_selected_preset().name != machine ||
+            candidate->filaments.get_selected_preset().name != filament ||
+            candidate->prints.get_selected_preset().name != process)
+            return orcapad_fail(ORCA_STATUS_INVALID_CONFIGURATION, operation,
+                                "preset combination is not selectable");
+
+        presets->bundle.swap(candidate);
+        return orcapad_ok();
+    });
 }
 
-const char *orca_presets_current(orca_presets *p, int kind, const char **out_name) {
-    if (!p || !out_name) return "OrcaCore: null presets/out";
-    const Slic3r::Preset &preset = p->collection(kind).get_selected_preset();
-    *out_name = preset.name.c_str();
-    return "OrcaCore: ok";
+orca_result orca_presets_current(orca_presets *presets, int32_t kind,
+                                 orca_owned_string *out_name) {
+    constexpr const char *operation = "orca_presets_current";
+    if (out_name) *out_name = orcapad_empty_string();
+    if (!presets)
+        return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation,
+                            "presets handle is null");
+    if (!out_name)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "output pointer is null");
+    if (!orcapad_valid_preset_kind(kind))
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "preset kind is invalid");
+
+    return orcapad_guard(operation, [&]() -> orca_result {
+        const std::string &name =
+            presets->collection(kind).get_selected_preset().name;
+        if (name.empty())
+            return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation,
+                                "no preset is selected");
+        if (!orcapad_copy_string(name.c_str(), out_name))
+            return orcapad_fail(ORCA_STATUS_OUT_OF_MEMORY, operation,
+                                "could not allocate preset name");
+        return orcapad_ok();
+    });
 }
 
 // --- plater session ------------------------------------------------------
@@ -366,208 +577,328 @@ struct orca_plater {
     Slic3r::Model               model;
     std::vector<orcapad_packed> cache;   // per object; only add/delete invalidates
 
-    orcapad_packed *packed_for(int object_id) {
-        if (object_id < 0 || object_id >= (int)model.objects.size()) return nullptr;
-        orcapad_packed *p = &cache[object_id];
-        if (!p->valid) orcapad_pack(model.objects[object_id]->raw_mesh(), p);
-        return p;
+    orcapad_packed *packed_for(int32_t object_id) {
+        if (object_id < 0 || static_cast<size_t>(object_id) >= model.objects.size())
+            return nullptr;
+        orcapad_packed *packed = &cache[static_cast<size_t>(object_id)];
+        if (!packed->valid)
+            orcapad_pack(model.objects[static_cast<size_t>(object_id)]->raw_mesh(),
+                         packed);
+        return packed;
     }
 };
 
-static Slic3r::ModelObject *plater_obj(orca_plater *p, int id) {
-    if (!p || id < 0 || id >= (int)p->model.objects.size()) return nullptr;
-    return p->model.objects[id];
+static Slic3r::ModelObject *plater_obj(orca_plater *plater, int32_t id) {
+    if (!plater || id < 0 || static_cast<size_t>(id) >= plater->model.objects.size())
+        return nullptr;
+    return plater->model.objects[static_cast<size_t>(id)];
 }
 
-const char *orca_plater_new(orca_plater **out) {
-    if (!out) return "OrcaCore: null out";
-    *out = new orca_plater();
-    return "OrcaCore: plater ok";
+static bool orcapad_valid_transform(const orca_instance_transform &transform) {
+    return std::isfinite(transform.offset_x) &&
+           std::isfinite(transform.offset_y) &&
+           std::isfinite(transform.offset_z) &&
+           std::isfinite(transform.rotation_z) &&
+           std::isfinite(transform.scale) && transform.scale > 0.0;
 }
 
-void orca_plater_free(orca_plater *p) { delete p; }
+orca_result orca_plater_new(orca_plater **out) {
+    constexpr const char *operation = "orca_plater_new";
+    if (out) *out = nullptr;
+    if (!out)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "output pointer is null");
+    return orcapad_guard(operation, [&]() -> orca_result {
+        *out = new orca_plater();
+        return orcapad_ok();
+    });
+}
 
-const char *orca_plater_add_stl(orca_plater *p, const char *path, int *out_object_id) {
-    static std::string result;
+void orca_plater_free(orca_plater *plater) { delete plater; }
+
+orca_result orca_plater_add_stl(orca_plater *plater, const char *path,
+                                int32_t *out_object_id) {
+    constexpr const char *operation = "orca_plater_add_stl";
     if (out_object_id) *out_object_id = -1;
-    if (!p || !path || !path[0]) return "OrcaCore: null plater/path";
-    try {
-        Slic3r::Model tmp = Slic3r::Model::read_from_file(path);
-        if (tmp.objects.empty()) return "OrcaCore: no object in file";
-        p->model.objects.push_back(std::move(tmp.objects[0]));
-        tmp.objects.clear();
-        p->cache.emplace_back();
-        const int id = (int)p->model.objects.size() - 1;
-        p->model.objects[id]->ensure_on_bed(false);
-        if (out_object_id) *out_object_id = id;
-        return (result = "OrcaCore: object added").c_str();
-    } catch (const std::exception &e) {
-        return (result = std::string("OrcaCore: C++ exception: ") + e.what()).c_str();
-    } catch (...) {
-        return (result = "OrcaCore: unknown C++ exception").c_str();
-    }
+    if (!plater)
+        return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation,
+                            "plater handle is null");
+    if (!path || !path[0] || !out_object_id)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "path is empty or output pointer is null");
+    struct stat path_status;
+    if (stat(path, &path_status) != 0)
+        return orcapad_fail(ORCA_STATUS_IO_FAILURE, operation,
+                            "input file is not accessible");
+
+    return orcapad_guard(operation, [&]() -> orca_result {
+        Slic3r::Model temporary = Slic3r::Model::read_from_file(path);
+        if (temporary.objects.empty())
+            return orcapad_fail(ORCA_STATUS_INVALID_MODEL, operation,
+                                "input contains no model object");
+        if (plater->model.objects.size() >=
+            static_cast<size_t>(std::numeric_limits<int32_t>::max()))
+            return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
+                                "object count exceeds ABI range");
+        temporary.objects[0]->ensure_on_bed(false);
+        plater->cache.emplace_back();
+        try {
+            plater->model.objects.push_back(std::move(temporary.objects[0]));
+        } catch (...) {
+            plater->cache.pop_back();
+            throw;
+        }
+        temporary.objects.clear();
+        *out_object_id = static_cast<int32_t>(plater->model.objects.size() - 1);
+        return orcapad_ok();
+    });
 }
 
-const char *orca_plater_object_count(orca_plater *p, int *out_count) {
-    if (!p || !out_count) return "OrcaCore: null plater/out";
-    *out_count = (int)p->model.objects.size();
-    return "OrcaCore: ok";
+orca_result orca_plater_object_count(orca_plater *plater, int32_t *out_count) {
+    constexpr const char *operation = "orca_plater_object_count";
+    if (out_count) *out_count = 0;
+    if (!plater)
+        return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation,
+                            "plater handle is null");
+    if (!out_count)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "output pointer is null");
+    const size_t count = plater->model.objects.size();
+    if (count > static_cast<size_t>(std::numeric_limits<int32_t>::max()))
+        return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
+                            "object count exceeds ABI range");
+    *out_count = static_cast<int32_t>(count);
+    return orcapad_ok();
 }
 
-const char *orca_plater_object_delete(orca_plater *p, int object_id) {
-    static std::string result;
-    if (!plater_obj(p, object_id)) return "OrcaCore: bad object id";
-    try {
-        p->model.delete_object((size_t)object_id);
-        p->cache.erase(p->cache.begin() + object_id);
-        return (result = "OrcaCore: object deleted").c_str();
-    } catch (const std::exception &e) {
-        return (result = std::string("OrcaCore: C++ exception: ") + e.what()).c_str();
-    } catch (...) {
-        return (result = "OrcaCore: unknown C++ exception").c_str();
-    }
+orca_result orca_plater_object_delete(orca_plater *plater, int32_t object_id) {
+    constexpr const char *operation = "orca_plater_object_delete";
+    if (!plater)
+        return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation,
+                            "plater handle is null");
+    if (!plater_obj(plater, object_id))
+        return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation,
+                            "object was not found");
+    return orcapad_guard(operation, [&]() -> orca_result {
+        plater->model.delete_object(static_cast<size_t>(object_id));
+        plater->cache.erase(plater->cache.begin() + object_id);
+        return orcapad_ok();
+    });
 }
 
-const char *orca_plater_instance_add(orca_plater *p, int object_id, int *out_instance_id) {
-    static std::string result;
+orca_result orca_plater_instance_add(orca_plater *plater, int32_t object_id,
+                                     int32_t *out_instance_id) {
+    constexpr const char *operation = "orca_plater_instance_add";
     if (out_instance_id) *out_instance_id = -1;
-    Slic3r::ModelObject *obj = plater_obj(p, object_id);
-    if (!obj) return "OrcaCore: bad object id";
-    try {
-        // Copy the last instance (desktop "add instance" semantics) and
-        // nudge it so both copies remain visible/selectable.
-        Slic3r::ModelInstance *mi = obj->instances.empty()
-            ? obj->add_instance()
-            : obj->add_instance(*obj->instances.back());
-        if (!mi) return (result = "OrcaCore: add_instance failed").c_str();
-        mi->set_offset(mi->get_offset() + Slic3r::Vec3d(10.0, 10.0, 0.0));
-        obj->invalidate_bounding_box();
-        if (out_instance_id) *out_instance_id = (int)obj->instances.size() - 1;
-        return (result = "OrcaCore: instance added").c_str();
-    } catch (const std::exception &e) {
-        return (result = std::string("OrcaCore: C++ exception: ") + e.what()).c_str();
-    } catch (...) {
-        return (result = "OrcaCore: unknown C++ exception").c_str();
-    }
+    if (!plater)
+        return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation,
+                            "plater handle is null");
+    if (!out_instance_id)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "output pointer is null");
+    Slic3r::ModelObject *object = plater_obj(plater, object_id);
+    if (!object)
+        return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation,
+                            "object was not found");
+    if (object->instances.size() >=
+        static_cast<size_t>(std::numeric_limits<int32_t>::max()))
+        return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
+                            "instance count exceeds ABI range");
+
+    return orcapad_guard(operation, [&]() -> orca_result {
+        const size_t original_count = object->instances.size();
+        Slic3r::ModelInstance *instance = object->instances.empty()
+            ? object->add_instance()
+            : object->add_instance(*object->instances.back());
+        if (!instance)
+            return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
+                                "engine did not create an instance");
+        try {
+            instance->set_offset(instance->get_offset() +
+                                 Slic3r::Vec3d(10.0, 10.0, 0.0));
+            object->invalidate_bounding_box();
+        } catch (...) {
+            if (object->instances.size() > original_count)
+                object->delete_instance(object->instances.size() - 1);
+            throw;
+        }
+        *out_instance_id = static_cast<int32_t>(object->instances.size() - 1);
+        return orcapad_ok();
+    });
 }
 
-const char *orca_plater_instance_delete(orca_plater *p, int object_id, int instance_id) {
-    static std::string result;
-    Slic3r::ModelObject *obj = plater_obj(p, object_id);
-    if (!obj) return "OrcaCore: bad object id";
-    if (instance_id < 0 || instance_id >= (int)obj->instances.size())
-        return "OrcaCore: bad instance id";
-    if (obj->instances.size() == 1)
-        return "OrcaCore: last instance — delete the object instead";
-    try {
-        obj->delete_instance((size_t)instance_id);
-        return (result = "OrcaCore: instance deleted").c_str();
-    } catch (const std::exception &e) {
-        return (result = std::string("OrcaCore: C++ exception: ") + e.what()).c_str();
-    } catch (...) {
-        return (result = "OrcaCore: unknown C++ exception").c_str();
-    }
+orca_result orca_plater_instance_delete(orca_plater *plater, int32_t object_id,
+                                        int32_t instance_id) {
+    constexpr const char *operation = "orca_plater_instance_delete";
+    if (!plater)
+        return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation,
+                            "plater handle is null");
+    Slic3r::ModelObject *object = plater_obj(plater, object_id);
+    if (!object)
+        return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation,
+                            "object was not found");
+    if (instance_id < 0 ||
+        static_cast<size_t>(instance_id) >= object->instances.size())
+        return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation,
+                            "instance was not found");
+    if (object->instances.size() == 1)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "last instance requires deleting the object");
+
+    return orcapad_guard(operation, [&]() -> orca_result {
+        object->delete_instance(static_cast<size_t>(instance_id));
+        return orcapad_ok();
+    });
 }
 
-const char *orca_plater_instance_count(orca_plater *p, int object_id, int *out_count) {
-    Slic3r::ModelObject *obj = plater_obj(p, object_id);
-    if (!obj || !out_count) return "OrcaCore: bad object id / null out";
-    *out_count = (int)obj->instances.size();
-    return "OrcaCore: ok";
+orca_result orca_plater_instance_count(orca_plater *plater, int32_t object_id,
+                                       int32_t *out_count) {
+    constexpr const char *operation = "orca_plater_instance_count";
+    if (out_count) *out_count = 0;
+    if (!plater)
+        return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation,
+                            "plater handle is null");
+    if (!out_count)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "output pointer is null");
+    Slic3r::ModelObject *object = plater_obj(plater, object_id);
+    if (!object)
+        return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation,
+                            "object was not found");
+    const size_t count = object->instances.size();
+    if (count > static_cast<size_t>(std::numeric_limits<int32_t>::max()))
+        return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
+                            "instance count exceeds ABI range");
+    *out_count = static_cast<int32_t>(count);
+    return orcapad_ok();
 }
 
-const char *orca_plater_instance_set(orca_plater *p, int object_id, int instance_id,
-                                     const orca_instance_transform *t) {
-    static std::string result;
-    Slic3r::ModelObject *obj = plater_obj(p, object_id);
-    if (!obj) return "OrcaCore: bad object id";
-    if (!t) return "OrcaCore: null transform";
-    if (instance_id < 0 || instance_id >= (int)obj->instances.size())
-        return "OrcaCore: bad instance id";
-    try {
-        Slic3r::ModelInstance *mi = obj->instances[instance_id];
-        mi->set_offset(Slic3r::Vec3d(t->offset_x, t->offset_y, t->offset_z));
-        mi->set_rotation(Slic3r::Vec3d(0.0, 0.0, t->rotation_z));
-        mi->set_scaling_factor(Slic3r::Vec3d(t->scale, t->scale, t->scale));
-        obj->invalidate_bounding_box();
-        return (result = "OrcaCore: transform set").c_str();
-    } catch (const std::exception &e) {
-        return (result = std::string("OrcaCore: C++ exception: ") + e.what()).c_str();
-    } catch (...) {
-        return (result = "OrcaCore: unknown C++ exception").c_str();
-    }
+orca_result orca_plater_instance_set(orca_plater *plater, int32_t object_id,
+                                     int32_t instance_id,
+                                     const orca_instance_transform *transform) {
+    constexpr const char *operation = "orca_plater_instance_set";
+    if (!plater)
+        return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation,
+                            "plater handle is null");
+    if (!transform)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "transform pointer is null");
+    if (!orcapad_valid_transform(*transform))
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "transform contains a non-finite value or invalid scale");
+    Slic3r::ModelObject *object = plater_obj(plater, object_id);
+    if (!object)
+        return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation,
+                            "object was not found");
+    if (instance_id < 0 ||
+        static_cast<size_t>(instance_id) >= object->instances.size())
+        return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation,
+                            "instance was not found");
+
+    return orcapad_guard(operation, [&]() -> orca_result {
+        Slic3r::ModelInstance *instance =
+            object->instances[static_cast<size_t>(instance_id)];
+        instance->set_offset(Slic3r::Vec3d(
+            transform->offset_x, transform->offset_y, transform->offset_z));
+        instance->set_rotation(
+            Slic3r::Vec3d(0.0, 0.0, transform->rotation_z));
+        instance->set_scaling_factor(Slic3r::Vec3d(
+            transform->scale, transform->scale, transform->scale));
+        object->invalidate_bounding_box();
+        return orcapad_ok();
+    });
 }
 
-const char *orca_plater_instance_get(orca_plater *p, int object_id, int instance_id,
-                                     orca_instance_transform *out_t) {
-    static std::string result;
-    if (out_t) memset(out_t, 0, sizeof(*out_t));
-    Slic3r::ModelObject *obj = plater_obj(p, object_id);
-    if (!obj || !out_t) return "OrcaCore: bad object id / null out";
-    if (instance_id < 0 || instance_id >= (int)obj->instances.size())
-        return "OrcaCore: bad instance id";
-    try {
-        const Slic3r::ModelInstance *mi = obj->instances[instance_id];
-        out_t->offset_x = mi->get_offset().x();
-        out_t->offset_y = mi->get_offset().y();
-        out_t->offset_z = mi->get_offset().z();
-        out_t->rotation_z = mi->get_rotation().z();
-        out_t->scale = mi->get_scaling_factor().x();
-        // anchor = full instance matrix applied to the packed pivot —
-        // Swift renders T(anchor_x, anchor_z, -anchor_y) * Ry(rot_z) * S.
-        orcapad_packed *pk = p->packed_for(object_id);
-        if (!pk) return (result = "OrcaCore: packing failed").c_str();
-        const Slic3r::Transform3d m = mi->get_matrix();
-        const Slic3r::Vec3d a =
-            (m * Slic3r::Vec4d(pk->center[0], pk->center[1], 0.0, 1.0)).head<3>();
-        out_t->anchor_x = a.x();
-        out_t->anchor_y = a.y();
-        out_t->anchor_z = a.z();
-        return (result = "OrcaCore: transform ok").c_str();
-    } catch (const std::exception &e) {
-        return (result = std::string("OrcaCore: C++ exception: ") + e.what()).c_str();
-    } catch (...) {
-        return (result = "OrcaCore: unknown C++ exception").c_str();
-    }
+orca_result orca_plater_instance_get(orca_plater *plater, int32_t object_id,
+                                     int32_t instance_id,
+                                     orca_instance_transform *out_transform) {
+    constexpr const char *operation = "orca_plater_instance_get";
+    if (out_transform) std::memset(out_transform, 0, sizeof(*out_transform));
+    if (!plater)
+        return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation,
+                            "plater handle is null");
+    if (!out_transform)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "output pointer is null");
+    Slic3r::ModelObject *object = plater_obj(plater, object_id);
+    if (!object)
+        return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation,
+                            "object was not found");
+    if (instance_id < 0 ||
+        static_cast<size_t>(instance_id) >= object->instances.size())
+        return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation,
+                            "instance was not found");
+
+    return orcapad_guard(operation, [&]() -> orca_result {
+        const Slic3r::ModelInstance *instance =
+            object->instances[static_cast<size_t>(instance_id)];
+        orca_instance_transform value {};
+        value.offset_x = instance->get_offset().x();
+        value.offset_y = instance->get_offset().y();
+        value.offset_z = instance->get_offset().z();
+        value.rotation_z = instance->get_rotation().z();
+        value.scale = instance->get_scaling_factor().x();
+        orcapad_packed *packed = plater->packed_for(object_id);
+        if (!packed)
+            return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
+                                "packing cache is unavailable");
+        const Slic3r::Transform3d matrix = instance->get_matrix();
+        const Slic3r::Vec3d anchor =
+            (matrix * Slic3r::Vec4d(
+                packed->center[0], packed->center[1], 0.0, 1.0)).head<3>();
+        value.anchor_x = anchor.x();
+        value.anchor_y = anchor.y();
+        value.anchor_z = anchor.z();
+        *out_transform = value;
+        return orcapad_ok();
+    });
 }
 
-const char *orca_plater_mesh_view(orca_plater *p, int object_id, orca_mesh_view *out_view) {
-    static std::string result;
-    if (!out_view) return "OrcaCore: null out";
-    memset(out_view, 0, sizeof(*out_view));
-    if (!p) return "OrcaCore: null plater";
-    try {
-        orcapad_packed *pk = p->packed_for(object_id);
-        if (!pk) return (result = "OrcaCore: bad object id").c_str();
-        orcapad_fill_view(*pk, out_view);
-        return (result = "OrcaCore: mesh ok").c_str();
-    } catch (const std::exception &e) {
-        return (result = std::string("OrcaCore: C++ exception: ") + e.what()).c_str();
-    } catch (...) {
-        return (result = "OrcaCore: unknown C++ exception").c_str();
-    }
+orca_result orca_plater_mesh_view(orca_plater *plater, int32_t object_id,
+                                  orca_mesh_view *out_view) {
+    constexpr const char *operation = "orca_plater_mesh_view";
+    if (out_view) std::memset(out_view, 0, sizeof(*out_view));
+    if (!plater)
+        return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation,
+                            "plater handle is null");
+    if (!out_view)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "output pointer is null");
+    if (!plater_obj(plater, object_id))
+        return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation,
+                            "object was not found");
+
+    return orcapad_guard(operation, [&]() -> orca_result {
+        orcapad_packed *packed = plater->packed_for(object_id);
+        if (!packed)
+            return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
+                                "packing cache is unavailable");
+        if (!orcapad_fill_view(*packed, out_view))
+            return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
+                                "mesh exceeds ABI count range");
+        return orcapad_ok();
+    });
 }
 
-const char *orca_plater_ensure_on_bed(orca_plater *p) {
-    static std::string result;
-    if (!p) return "OrcaCore: null plater";
-    try {
-        for (Slic3r::ModelObject *obj : p->model.objects)
-            obj->ensure_on_bed(false);
-        return (result = "OrcaCore: on bed").c_str();
-    } catch (const std::exception &e) {
-        return (result = std::string("OrcaCore: C++ exception: ") + e.what()).c_str();
-    } catch (...) {
-        return (result = "OrcaCore: unknown C++ exception").c_str();
-    }
+orca_result orca_plater_ensure_on_bed(orca_plater *plater) {
+    constexpr const char *operation = "orca_plater_ensure_on_bed";
+    if (!plater)
+        return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation,
+                            "plater handle is null");
+    return orcapad_guard(operation, [&]() -> orca_result {
+        for (Slic3r::ModelObject *object : plater->model.objects)
+            object->ensure_on_bed(false);
+        return orcapad_ok();
+    });
 }
 
 // --- config overlays + shared slice-pipeline tail -------------------------
 
 static void orcapad_config_overlays(Slic3r::DynamicPrintConfig &config) {
-    // OrcaPad has no preset bundles yet (Phase 3); raw defaults carry
-    // physical values the desktop never emits because presets always
-    // override them. filament_density = 0 in the exported gcode
+    // The preset-free compatibility path starts from raw defaults, which
+    // carry physical values the desktop never emits because presets normally
+    // override them. Never apply these values to a preset-backed slice.
+    // filament_density = 0 in the exported gcode
     // SEGFAULTS desktop OrcaSlicer's gcode viewer (division by zero in
     // filament stats — proven by mutation test on a desktop-sliced
     // file, 2026-10-03). Generic-PLA overlay until presets land.
@@ -585,122 +916,147 @@ static void orcapad_config_overlays(Slic3r::DynamicPrintConfig &config) {
         nt->values = { "brass" };
 }
 
-static const char *orcapad_run_print(Slic3r::Print &print, const char *gcode_path,
+static orca_result orcapad_run_print(const char *operation,
+                                     Slic3r::Print &print,
+                                     const char *gcode_path,
                                      orca_progress_fn progress, void *ctx,
-                                     double *out_time_estimate_s, long *out_gcode_bytes) {
-    static std::string result;
-    try {
-        print.set_status_callback([progress, ctx](const Slic3r::PrintBase::SlicingStatus &s) {
-            if (progress) progress(s.percent, s.text.c_str(), ctx);
-        });
+                                     double *out_time_estimate_s,
+                                     int64_t *out_gcode_bytes) {
+    return orcapad_guard(operation, [&]() -> orca_result {
+        print.set_status_callback(
+            [progress, ctx](const Slic3r::PrintBase::SlicingStatus &status) {
+                if (progress)
+                    progress(static_cast<int32_t>(status.percent),
+                             status.text.c_str(), ctx);
+            });
 
         if (progress) progress(3, "slicing", ctx);
-        print.process(); // status callback drives 0-100 through the pipeline
+        print.process();
 
         if (progress) progress(98, "exporting gcode", ctx);
         Slic3r::GCodeProcessorResult processor_result;
-        std::string final_path = print.export_gcode(gcode_path, &processor_result, nullptr);
+        const std::string final_path =
+            print.export_gcode(gcode_path, &processor_result, nullptr);
+        if (final_path.empty())
+            return orcapad_fail(ORCA_STATUS_ENGINE_FAILURE, operation,
+                                "engine returned an empty G-code path");
 
-        struct stat st;
-        if (out_gcode_bytes) {
-            *out_gcode_bytes = (stat(final_path.c_str(), &st) == 0) ? (long)st.st_size : -1;
-        }
-        if (out_time_estimate_s && !processor_result.print_statistics.modes.empty()) {
-            *out_time_estimate_s = processor_result.print_statistics.modes.front().time;
-        }
+        struct stat file_status;
+        if (stat(final_path.c_str(), &file_status) != 0)
+            return orcapad_fail(ORCA_STATUS_IO_FAILURE, operation,
+                                "exported G-code could not be inspected");
+        if (file_status.st_size < 0)
+            return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
+                                "exported G-code has a negative size");
+        if (processor_result.print_statistics.modes.empty())
+            return orcapad_fail(ORCA_STATUS_ENGINE_FAILURE, operation,
+                                "engine returned no print-time estimate");
 
+        *out_gcode_bytes = static_cast<int64_t>(file_status.st_size);
+        *out_time_estimate_s =
+            processor_result.print_statistics.modes.front().time;
         if (progress) progress(100, "done", ctx);
-        return (result = "OrcaCore: slice ok").c_str();
-    } catch (const std::exception &e) {
-        return (result = std::string("OrcaCore: C++ exception: ") + e.what()).c_str();
-    } catch (...) {
-        return (result = "OrcaCore: unknown C++ exception").c_str();
-    }
+        return orcapad_ok();
+    });
 }
 
-const char *orca_slice_to_gcode(const char *stl_path, const char *gcode_path,
+orca_result orca_slice_to_gcode(const char *stl_path, const char *gcode_path,
                                 orca_progress_fn progress, void *ctx,
-                                double *out_time_estimate_s, long *out_gcode_bytes) {
-    static std::string result;
+                                double *out_time_estimate_s,
+                                int64_t *out_gcode_bytes) {
+    constexpr const char *operation = "orca_slice_to_gcode";
     if (out_time_estimate_s) *out_time_estimate_s = -1.0;
     if (out_gcode_bytes) *out_gcode_bytes = -1;
-    if (!stl_path || !gcode_path) return "OrcaCore: null path";
+    if (!stl_path || !stl_path[0] || !gcode_path || !gcode_path[0] ||
+        !out_time_estimate_s || !out_gcode_bytes)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "path is empty or output pointer is null");
+    struct stat path_status;
+    if (stat(stl_path, &path_status) != 0)
+        return orcapad_fail(ORCA_STATUS_IO_FAILURE, operation,
+                            "input file is not accessible");
 
-    try {
+    return orcapad_guard(operation, [&]() -> orca_result {
         if (progress) progress(1, "loading model", ctx);
         Slic3r::Model model = Slic3r::Model::read_from_file(stl_path);
+        if (model.objects.empty())
+            return orcapad_fail(ORCA_STATUS_INVALID_MODEL, operation,
+                                "input contains no model object");
 
-        Slic3r::DynamicPrintConfig config = Slic3r::DynamicPrintConfig::full_print_config();
+        Slic3r::DynamicPrintConfig config =
+            Slic3r::DynamicPrintConfig::full_print_config();
         orcapad_config_overlays(config);
 
         if (progress) progress(2, "applying config", ctx);
         Slic3r::Print print;
         print.apply(model, std::move(config));
-        // Desktop GUI derives this from the preset vendor
-        // (BackgroundSlicingProcess.cpp:199); the upstream member ships
-        // uninitialized and libslic3r never assigns it. OrcaPad slices
-        // with generic-printer settings — never BBL. An accidentally-true
-        // value emits a Bambu-flavored gcode with empty printer identity.
         print.is_BBL_printer() = false;
-        return orcapad_run_print(print, gcode_path, progress, ctx,
+        return orcapad_run_print(operation, print, gcode_path, progress, ctx,
                                  out_time_estimate_s, out_gcode_bytes);
-    } catch (const std::exception &e) {
-        return (result = std::string("OrcaCore: C++ exception: ") + e.what()).c_str();
-    } catch (...) {
-        return "OrcaCore: unknown C++ exception";
-    }
+    });
 }
 
-const char *orca_plater_slice_to_gcode(orca_plater *p, const char *gcode_path,
-                                        orca_progress_fn progress, void *ctx,
-                                        double *out_time_estimate_s, long *out_gcode_bytes) {
-    static std::string result;
+orca_result orca_plater_slice_to_gcode(orca_plater *plater,
+                                       const char *gcode_path,
+                                       orca_progress_fn progress, void *ctx,
+                                       double *out_time_estimate_s,
+                                       int64_t *out_gcode_bytes) {
+    constexpr const char *operation = "orca_plater_slice_to_gcode";
     if (out_time_estimate_s) *out_time_estimate_s = -1.0;
     if (out_gcode_bytes) *out_gcode_bytes = -1;
-    if (!p || !gcode_path) return "OrcaCore: null plater/path";
-    try {
-        if (p->model.objects.empty()) return "OrcaCore: plater empty — nothing to slice";
-        Slic3r::DynamicPrintConfig config = Slic3r::DynamicPrintConfig::full_print_config();
+    if (!plater)
+        return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation,
+                            "plater handle is null");
+    if (!gcode_path || !gcode_path[0] || !out_time_estimate_s ||
+        !out_gcode_bytes)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "path is empty or output pointer is null");
+    if (plater->model.objects.empty())
+        return orcapad_fail(ORCA_STATUS_INVALID_MODEL, operation,
+                            "document contains no model object");
+
+    return orcapad_guard(operation, [&]() -> orca_result {
+        Slic3r::DynamicPrintConfig config =
+            Slic3r::DynamicPrintConfig::full_print_config();
         orcapad_config_overlays(config);
         if (progress) progress(1, "applying plater", ctx);
         Slic3r::Print print;
-        print.apply(p->model, std::move(config));
-        print.is_BBL_printer() = false; // see note in orca_slice_to_gcode
-        return orcapad_run_print(print, gcode_path, progress, ctx,
+        print.apply(plater->model, std::move(config));
+        print.is_BBL_printer() = false;
+        return orcapad_run_print(operation, print, gcode_path, progress, ctx,
                                  out_time_estimate_s, out_gcode_bytes);
-    } catch (const std::exception &e) {
-        return (result = std::string("OrcaCore: C++ exception: ") + e.what()).c_str();
-    } catch (...) {
-        return (result = "OrcaCore: unknown C++ exception").c_str();
-    }
+    });
 }
 
-const char *orca_plater_slice_to_gcode_with_presets(orca_plater *p,
-                                                    orca_presets *presets,
-                                                    const char *gcode_path,
-                                                    orca_progress_fn progress, void *ctx,
-                                                    double *out_time_estimate_s,
-                                                    long *out_gcode_bytes) {
-    static std::string result;
+orca_result orca_plater_slice_to_gcode_with_presets(
+    orca_plater *plater, orca_presets *presets, const char *gcode_path,
+    orca_progress_fn progress, void *ctx, double *out_time_estimate_s,
+    int64_t *out_gcode_bytes) {
+    constexpr const char *operation =
+        "orca_plater_slice_to_gcode_with_presets";
     if (out_time_estimate_s) *out_time_estimate_s = -1.0;
     if (out_gcode_bytes) *out_gcode_bytes = -1;
-    if (!p || !presets || !gcode_path) return "OrcaCore: null plater/presets/path";
-    try {
-        if (p->model.objects.empty()) return "OrcaCore: plater empty — nothing to slice";
-        // Merged machine+filament+process config (inheritance resolved by
-        // upstream PresetBundle), then only fill keys the presets left empty.
-        Slic3r::DynamicPrintConfig config = presets->bundle.full_config();
-        orcapad_config_overlays(config);
+    if (!plater)
+        return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation,
+                            "plater handle is null");
+    if (!presets)
+        return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation,
+                            "presets handle is null");
+    if (!gcode_path || !gcode_path[0] || !out_time_estimate_s ||
+        !out_gcode_bytes)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "path is empty or output pointer is null");
+    if (plater->model.objects.empty())
+        return orcapad_fail(ORCA_STATUS_INVALID_MODEL, operation,
+                            "document contains no model object");
+
+    return orcapad_guard(operation, [&]() -> orca_result {
+        Slic3r::DynamicPrintConfig config = presets->bundle->full_config();
         if (progress) progress(1, "applying presets", ctx);
         Slic3r::Print print;
-        print.apply(p->model, std::move(config));
-        // Proper vendor detection at last — the desktop GUI's own rule.
-        print.is_BBL_printer() = presets->bundle.is_bbl_vendor();
-        return orcapad_run_print(print, gcode_path, progress, ctx,
+        print.apply(plater->model, std::move(config));
+        print.is_BBL_printer() = presets->bundle->is_bbl_vendor();
+        return orcapad_run_print(operation, print, gcode_path, progress, ctx,
                                  out_time_estimate_s, out_gcode_bytes);
-    } catch (const std::exception &e) {
-        return (result = std::string("OrcaCore: C++ exception: ") + e.what()).c_str();
-    } catch (...) {
-        return (result = "OrcaCore: unknown C++ exception").c_str();
-    }
+    });
 }
