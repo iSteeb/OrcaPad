@@ -71,7 +71,7 @@ final class DocumentStore {
         }
     }
 
-    func importModel(from source: URL) async {
+    func importModel(from source: URL, bedCenter: SIMD2<Double>) async {
         guard let plater, !isBusy else {
             status.report(.document, "import blocked: document is busy")
             return
@@ -82,7 +82,7 @@ final class DocumentStore {
         let result = await BackgroundWork.run(operation: "import model") {
             let sandboxURL = try EnginePaths.copyImportIntoSandbox(source)
             let mutation = try plater.apply(
-                .importModel(path: sandboxURL.path)
+                .importModel(path: sandboxURL.path, bedCenter: bedCenter)
             )
             guard let objectID = mutation.createdObjectID,
                   let object = mutation.snapshot.object(id: objectID) else {

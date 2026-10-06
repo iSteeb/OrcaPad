@@ -6,7 +6,7 @@ import simd
 /// this type; callers receive owned, revisioned snapshots.
 public final class EnginePlater: @unchecked Sendable {
     public enum Mutation: Sendable {
-        case importModel(path: String)
+        case importModel(path: String, bedCenter: SIMD2<Double>)
         case deleteObject(ObjectID)
         case addInstance(objectID: ObjectID)
         case deleteInstance(objectID: ObjectID, instanceID: InstanceID)
@@ -70,12 +70,14 @@ public final class EnginePlater: @unchecked Sendable {
             var createdInstanceID: InstanceID?
 
             switch mutation {
-            case .importModel(let path):
+            case .importModel(let path, let bedCenter):
                 var rawObjectID: UInt64 = 0
                 let result = path.withCString { pathPointer in
                     orca_plater_add_stl(
                         handle,
                         pathPointer,
+                        bedCenter.x,
+                        bedCenter.y,
                         &rawObjectID,
                         &mutationRevision
                     )

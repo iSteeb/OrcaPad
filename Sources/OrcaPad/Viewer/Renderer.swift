@@ -53,6 +53,7 @@ final class Renderer: NSObject, MTKViewDelegate {
     private var objects: [RenderObject] = []
     private var documentID: DocumentID?
     private var appliedRevision = DocumentRevision(rawValue: 0)
+    private var bed: EngineBed = .fallback
 
     private static let objectColor = SIMD4<Float>(0.96, 0.52, 0.11, 1)
     private static let selectedColor = SIMD4<Float>(0.16, 0.80, 0.95, 1)
@@ -92,7 +93,7 @@ final class Renderer: NSObject, MTKViewDelegate {
             fail(String(describing: error))
             return nil
         }
-        buildScene()
+        buildScene(for: bed)
         view.delegate = self
         publishStatus()
         logger.notice("renderer online")
@@ -184,12 +185,16 @@ final class Renderer: NSObject, MTKViewDelegate {
 
     // MARK: Scene setup
 
-    private func buildScene() {
-        let grid = Geometry.bedGrid()
+    private func buildScene(for bed: EngineBed) {
+        let grid = Geometry.bedGrid(for: bed)
         gridVertexCount = grid.count
         gridVB = device.makeBuffer(
             bytes: grid, length: MemoryLayout<VertexPC>.stride * grid.count,
             options: .storageModeShared)
+        guard gridVB != nil else {
+            fail("bed grid buffer allocation failed")
+            return
+        }
     }
 
     // MARK: Scene sync (called from the SwiftUI layer on the main actor)
@@ -199,10 +204,15 @@ final class Renderer: NSObject, MTKViewDelegate {
     /// revision; transforms and selection remain cheap derived state.
     func applyScene(
         _ scene: SceneSnapshot,
+        bed: EngineBed,
         selectedObjectID: ObjectID?,
         selectedInstanceID: InstanceID?,
         previewTransform: InstanceTransform?
     ) throws {
+        if bed != self.bed {
+            buildScene(for: bed)
+            self.bed = bed
+        }
         if let currentDocumentID = documentID,
            currentDocumentID == scene.documentID,
            scene.revision < appliedRevision {
@@ -223,7 +233,8 @@ final class Renderer: NSObject, MTKViewDelegate {
                         transform: usesPreview
                             ? previewTransform ?? instance.transform
                             : instance.transform,
-                        enginePivot: sceneObject.mesh.pivot
+                        enginePivot: sceneObject.mesh.pivot,
+                        bedCenter: bed.center
                     ),
                     selected: sceneObject.id == selectedObjectID &&
                         instance.id == selectedInstanceID

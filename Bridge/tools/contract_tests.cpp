@@ -234,7 +234,7 @@ static void test_md5_shim() {
 
 static void test_abi_version() {
     CHECK_EQ(orca_bridge_abi_version(), ORCA_BRIDGE_ABI_VERSION);
-    CHECK_EQ(ORCA_BRIDGE_ABI_VERSION, 2);
+    CHECK_EQ(ORCA_BRIDGE_ABI_VERSION, 3);
 }
 
 static void test_document_lifecycle(const std::string &dir) {
@@ -286,26 +286,26 @@ static void test_add_failures(const std::string &dir) {
     orca_revision revision = 0;
 
     // null handle
-    GUARD(g1, orca_plater_add_stl(nullptr, "/x.stl", &object_id, &revision));
+    GUARD(g1, orca_plater_add_stl(nullptr, "/x.stl", 100.0, 100.0, &object_id, &revision));
     expect_code(g1, ORCA_STATUS_INVALID_HANDLE, "add_stl(null plater)");
 
     // empty path and null outputs
-    GUARD(g2, orca_plater_add_stl(plater, "", &object_id, &revision));
+    GUARD(g2, orca_plater_add_stl(plater, "", 100.0, 100.0, &object_id, &revision));
     expect_code(g2, ORCA_STATUS_INVALID_ARGUMENT, "add_stl(empty path)");
-    GUARD(g3, orca_plater_add_stl(plater, "/x.stl", nullptr, &revision));
+    GUARD(g3, orca_plater_add_stl(plater, "/x.stl", 100.0, 100.0, nullptr, &revision));
     expect_code(g3, ORCA_STATUS_INVALID_ARGUMENT, "add_stl(null object out)");
-    GUARD(g4, orca_plater_add_stl(plater, "/x.stl", &object_id, nullptr));
+    GUARD(g4, orca_plater_add_stl(plater, "/x.stl", 100.0, 100.0, &object_id, nullptr));
     expect_code(g4, ORCA_STATUS_INVALID_ARGUMENT, "add_stl(null revision out)");
 
     // missing file
     GUARD(g5, orca_plater_add_stl(plater, (dir + "/missing.stl").c_str(),
-                                  &object_id, &revision));
+                                  100.0, 100.0, &object_id, &revision));
     expect_code(g5, ORCA_STATUS_IO_FAILURE, "add_stl(missing file)");
     expect_owned_diagnostic(g5, "add_stl(missing file)");
 
     // garbage input: typed loud failure, either model or engine level
     const std::string garbage = write_garbage_file(dir);
-    GUARD(g6, orca_plater_add_stl(plater, garbage.c_str(), &object_id,
+    GUARD(g6, orca_plater_add_stl(plater, garbage.c_str(), 100.0, 100.0, &object_id,
                                   &revision));
     ++checks;
     if (g6.ok()) {
@@ -330,7 +330,7 @@ static void test_stable_ids_and_revisions(const std::string &dir) {
 
     orca_object_id object_id = 0;
     orca_revision revision = 0;
-    GUARD(g1, orca_plater_add_stl(plater, cube.c_str(), &object_id, &revision));
+    GUARD(g1, orca_plater_add_stl(plater, cube.c_str(), 100.0, 100.0, &object_id, &revision));
     expect_ok(g1, "add cube");
     CHECK(object_id != 0);
     CHECK_EQ(revision, 1); // first successful mutation → revision 1
@@ -349,15 +349,22 @@ static void test_stable_ids_and_revisions(const std::string &dir) {
         CHECK_EQ(object->index_count, 36); // 12 triangles
         CHECK_EQ(object->instance_count, 1);
         CHECK(object->instances[0].id != 0);
-        CHECK_NEAR(object->bbox_min[0], 0.0, 0.01);
-        CHECK_NEAR(object->bbox_min[1], 0.0, 0.01);
-        CHECK_NEAR(object->bbox_min[2], 0.0, 0.01);
-        CHECK_NEAR(object->bbox_max[0], 20.0, 0.01);
-        CHECK_NEAR(object->bbox_max[1], 20.0, 0.01);
-        CHECK_NEAR(object->bbox_max[2], 20.0, 0.01);
+        // Centered import: the mesh bbox is centered on the origin and the
+        // instance sits at the caller's bed center (100, 100).
+        CHECK_NEAR(object->bbox_min[0], -10.0, 0.01);
+        CHECK_NEAR(object->bbox_min[1], -10.0, 0.01);
+        CHECK_NEAR(object->bbox_min[2], -10.0, 0.01);
+        CHECK_NEAR(object->bbox_max[0], 10.0, 0.01);
+        CHECK_NEAR(object->bbox_max[1], 10.0, 0.01);
+        CHECK_NEAR(object->bbox_max[2], 10.0, 0.01);
+        CHECK_NEAR(object->pivot[0], 0.0, 0.01);
+        CHECK_NEAR(object->pivot[1], 0.0, 0.01);
         const orca_instance_transform &t = object->instances[0].transform;
-        CHECK(std::isfinite(t.offset_x) && std::isfinite(t.offset_y) &&
-              std::isfinite(t.offset_z));
+        CHECK_NEAR(t.offset_x, 100.0, 0.01);
+        CHECK_NEAR(t.offset_y, 100.0, 0.01);
+        // z is lifted by ensure_on_bed: the mesh bbox is z-centered (-10..10),
+        // so the instance offset raises the bottom onto the bed (+10).
+        CHECK_NEAR(t.offset_z, 10.0, 0.01);
         CHECK_NEAR(t.scale, 1.0, 1e-9);
         const uint64_t mesh_revision = object->mesh_revision;
         CHECK(mesh_revision != 0);
@@ -461,7 +468,7 @@ static void test_not_found_and_validation(const std::string &dir) {
 
     orca_object_id object_id = 0;
     orca_revision revision = 0;
-    GUARD(g1, orca_plater_add_stl(plater, cube.c_str(), &object_id, &revision));
+    GUARD(g1, orca_plater_add_stl(plater, cube.c_str(), 100.0, 100.0, &object_id, &revision));
     expect_ok(g1, "add cube");
     const orca_revision baseline = revision;
 
@@ -525,7 +532,7 @@ static void test_snapshot_ownership(const std::string &dir) {
     expect_ok(g0, "plater_new");
     orca_object_id object_id = 0;
     orca_revision revision = 0;
-    GUARD(g1, orca_plater_add_stl(plater, cube.c_str(), &object_id, &revision));
+    GUARD(g1, orca_plater_add_stl(plater, cube.c_str(), 100.0, 100.0, &object_id, &revision));
     expect_ok(g1, "add cube");
 
     // copy A
@@ -585,7 +592,7 @@ static void test_engine_serialization(const std::string &dir) {
     expect_ok(g0, "plater_new");
     orca_object_id object_id = 0;
     orca_revision revision = 0;
-    GUARD(g1, orca_plater_add_stl(plater, cube.c_str(), &object_id, &revision));
+    GUARD(g1, orca_plater_add_stl(plater, cube.c_str(), 100.0, 100.0, &object_id, &revision));
     expect_ok(g1, "add cube");
 
     orca_scene_snapshot snap = take_snapshot(plater);
@@ -629,10 +636,12 @@ static std::string prepare_preset_data_dir(const std::string &dir) {
         exit(2);
     }
     const std::string data_dir = dir + "/orcapad-data";
+    const std::string user_dir = data_dir + "/user";
+    const std::string default_dir = data_dir + "/user/default";
     const char *levels[] = {
         data_dir.c_str(),
-        (data_dir + "/user").c_str(),
-        (data_dir + "/user/default").c_str(),
+        user_dir.c_str(),
+        default_dir.c_str(),
     };
     for (const char *level : levels) {
         struct stat st;
@@ -807,6 +816,129 @@ static void check_slice_outputs(const char *gcode_path,
     CHECK(progress.max_percent.load() >= 99);
 }
 
+static void test_preset_metadata(const std::string &data_dir) {
+    orca_presets *presets = nullptr;
+    GUARD(g0, orca_presets_new(data_dir.c_str(), &presets));
+    expect_ok(g0, "presets_new");
+
+    // Select a concrete system machine first: a fresh bundle selects a
+    // non-system default printer, against which no process is compatible.
+    {
+        orca_owned_string machine_first;
+        GUARD(gs1, orca_presets_list_name(presets, 0, 0, &machine_first));
+        expect_ok(gs1, "machine names[0]");
+        orca_owned_string filament_first;
+        GUARD(gs2, orca_presets_list_name(presets, 1, 0, &filament_first));
+        expect_ok(gs2, "filament names[0]");
+        orca_owned_string process_first;
+        GUARD(gs3, orca_presets_list_name(presets, 2, 0, &process_first));
+        expect_ok(gs3, "process names[0]");
+        GUARD(gs4, orca_presets_select(presets, machine_first.data,
+                                       filament_first.data,
+                                       process_first.data));
+        expect_ok(gs4, "select first system presets");
+        orca_owned_string_dispose(&machine_first);
+        orca_owned_string_dispose(&filament_first);
+        orca_owned_string_dispose(&process_first);
+    }
+
+    // null handle / null out / bad kind / out of range are typed rejections
+    orca_preset_entry entry;
+    GUARD(g1, orca_presets_list_entry(nullptr, 0, 0, &entry));
+    expect_code(g1, ORCA_STATUS_INVALID_HANDLE, "entry(null presets)");
+    GUARD(g2, orca_presets_list_entry(presets, 0, 0, nullptr));
+    expect_code(g2, ORCA_STATUS_INVALID_ARGUMENT, "entry(null out)");
+    GUARD(g3, orca_presets_list_entry(presets, 9, 0, &entry));
+    expect_code(g3, ORCA_STATUS_INVALID_ARGUMENT, "entry(bad kind)");
+    GUARD(g4, orca_presets_list_entry(presets, 0, 1 << 20, &entry));
+    expect_code(g4, ORCA_STATUS_NOT_FOUND, "entry(out of range)");
+    orca_preset_entry_dispose(nullptr); // null-safe
+
+    // entries share the exact stable order of orca_presets_list_name
+    for (int kind = 0; kind < 3; ++kind) {
+        int32_t count = 0;
+        GUARD(gc, orca_presets_list_count(presets, kind, &count));
+        expect_ok(gc, "count");
+        int entries_with_vendor = 0;
+        int compatible_processes = 0;
+        for (int32_t index = 0; index < count; ++index) {
+            orca_preset_entry e;
+            e.name = orca_owned_string{};
+            e.vendor = orca_owned_string{};
+            e.compatible = 0xFF;
+            GUARD(ge, orca_presets_list_entry(presets, kind, index, &e));
+            expect_ok(ge, "entry");
+            CHECK(e.name.data != nullptr && e.name.length > 0);
+            CHECK(e.compatible == 0 || e.compatible == 1);
+            if (e.vendor.length > 0) ++entries_with_vendor;
+            if (e.compatible == 1) ++compatible_processes;
+            orca_preset_entry_dispose(&e);
+            orca_preset_entry_dispose(&e); // idempotent
+        }
+        CHECK(entries_with_vendor > 0); // manufacturers are exposed
+        if (kind == 2) // processes: engine marks some compatible with the
+            CHECK(compatible_processes > 0); // selected machine
+    }
+
+    // entry[0] must equal name[0] for every kind
+    for (int kind = 0; kind < 3; ++kind) {
+        orca_owned_string name;
+        GUARD(gn, orca_presets_list_name(presets, kind, 0, &name));
+        expect_ok(gn, "name[0]");
+        orca_preset_entry e;
+        GUARD(ge, orca_presets_list_entry(presets, kind, 0, &e));
+        expect_ok(ge, "entry[0]");
+        CHECK(strcmp(name.data ? name.data : "",
+                     e.name.data ? e.name.data : "") == 0);
+        orca_owned_string_dispose(&name);
+        orca_preset_entry_dispose(&e);
+    }
+    orca_presets_free(presets);
+}
+
+static void test_print_volume(const std::string &data_dir) {
+    orca_presets *presets = nullptr;
+    GUARD(g0, orca_presets_new(data_dir.c_str(), &presets));
+    expect_ok(g0, "presets_new");
+
+    double minX = 0, minY = 0, maxX = 0, maxY = 0;
+    GUARD(g1, orca_presets_print_volume(nullptr, &minX, &minY, &maxX, &maxY));
+    expect_code(g1, ORCA_STATUS_INVALID_HANDLE, "volume(null presets)");
+    GUARD(g2, orca_presets_print_volume(presets, nullptr, &minY, &maxX, &maxY));
+    expect_code(g2, ORCA_STATUS_INVALID_ARGUMENT, "volume(null out)");
+
+    GUARD(g3, orca_presets_print_volume(presets, &minX, &minY, &maxX, &maxY));
+    expect_ok(g3, "print volume");
+    CHECK(maxX > minX);
+    CHECK(maxY > minY);
+    CHECK(minX > -5000.0 && maxX < 5000.0); // sane machine dimensions
+    CHECK(minY > -5000.0 && maxY < 5000.0);
+    orca_presets_free(presets);
+}
+
+static void test_resolved_config(const std::string &data_dir) {
+    orca_presets *presets = nullptr;
+    GUARD(g0, orca_presets_new(data_dir.c_str(), &presets));
+    expect_ok(g0, "presets_new");
+
+    orca_owned_string json;
+    GUARD(g1, orca_presets_resolved_config(nullptr, &json));
+    expect_code(g1, ORCA_STATUS_INVALID_HANDLE, "resolved(null presets)");
+    GUARD(g2, orca_presets_resolved_config(presets, nullptr));
+    expect_code(g2, ORCA_STATUS_INVALID_ARGUMENT, "resolved(null out)");
+
+    GUARD(g3, orca_presets_resolved_config(presets, &json));
+    expect_ok(g3, "resolved config");
+    CHECK(json.data != nullptr);
+    CHECK(json.length > 1000); // the full ~2000-option configuration
+    const char *body = json.data ? json.data : "";
+    CHECK(body[0] == '{');
+    CHECK(strstr(body, "\"printable_area\"") != nullptr);
+    CHECK(strstr(body, "\"layer_height\"") != nullptr);
+    orca_owned_string_dispose(&json);
+    orca_presets_free(presets);
+}
+
 static void test_slice_defaults(const std::string &dir) {
     const std::string cube = write_cube_stl(dir, "orcapad-cube5.stl");
     orca_plater *plater = nullptr;
@@ -814,7 +946,7 @@ static void test_slice_defaults(const std::string &dir) {
     expect_ok(g0, "plater_new");
     orca_object_id object_id = 0;
     orca_revision revision = 0;
-    GUARD(g1, orca_plater_add_stl(plater, cube.c_str(), &object_id, &revision));
+    GUARD(g1, orca_plater_add_stl(plater, cube.c_str(), 100.0, 100.0, &object_id, &revision));
     expect_ok(g1, "add cube");
 
     // a second instance for multi-instance coverage
@@ -873,7 +1005,7 @@ static void test_slice_with_presets(const std::string &dir,
     const std::string cube = write_cube_stl(dir, "orcapad-cube6.stl");
     orca_object_id object_id = 0;
     orca_revision revision = 0;
-    GUARD(g2, orca_plater_add_stl(plater, cube.c_str(), &object_id, &revision));
+    GUARD(g2, orca_plater_add_stl(plater, cube.c_str(), 100.0, 100.0, &object_id, &revision));
     expect_ok(g2, "add cube");
 
     ProgressRecord progress;
@@ -939,6 +1071,9 @@ int main() {
     test_snapshot_ownership(dir);
     test_engine_serialization(dir);
     test_presets(data_dir);
+    test_preset_metadata(data_dir);
+    test_print_volume(data_dir);
+    test_resolved_config(data_dir);
     test_slice_defaults(dir);
     test_slice_with_presets(dir, data_dir);
     test_standalone_slice(dir);

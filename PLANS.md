@@ -41,6 +41,31 @@ work must not deepen hidden-cache or fake-symbol dependencies.
 Bridge; Swift and Metal consume revisioned derived state; all failures are
 typed and loud; current physical-device slice behavior remains green.
 
+## Gate B — Config-driven placement, preset UX, resolved config (in progress)
+**Goal:** make WHAT YOU SEE match WHAT WILL SLICE: placement tied to the
+selected machine's bed, presets grouped/filtered by engine compatibility, and
+the full resolved config inspectable.
+
+- [ ] Bridge ABI v3: `center_around_origin()` + bed-centered import; preset
+      entries (name + vendor + is_compatible from the engine's own flags);
+      typed print volume (`printable_area` bbox); resolved-config JSON dump
+      (`PresetBundle::full_config()` exactly as sliced)
+- [ ] Client placement: bed rectangle from the selected machine drives the
+      viewer grid and the engine↔viewer frame; drag auto-selects + moves;
+      rotate/±15/±45 verified around the object center
+- [ ] Regenerate `Resources/config-schema.json` (currently empty!) from
+      `print_config_def` via the host extractor and commit it
+- [ ] Settings: machines grouped by manufacturer, filaments grouped by
+      manufacturer, processes filtered to engine-compatible with the selected
+      machine
+- [ ] Config viewer: searchable, schema-generated, shows the resolved values
+      with non-default highlighting
+- [ ] Contract tests for every new ABI; census + device acceptance
+
+**Accept:** import lands centered on the SELECTED machine's bed; rotate spins
+about the object center by exact degrees; drag moves; preset lists grouped and
+process-filtered per engine flags; resolved config view matches slice output.
+
 ## Phase 0 — Scaffold + Metal proof ✅
 **Goal:** project skeleton, meta-files, Metal pipeline live on device.
 

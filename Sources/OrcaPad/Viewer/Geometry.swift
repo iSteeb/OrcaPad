@@ -18,24 +18,40 @@ struct VertexPC: Sendable {
 // MARK: - Geometry builders
 
 enum Geometry {
-    /// Bambu-P1-style square bed grid, centred on origin in the XZ plane.
-    static func bedGrid(size: Float = 256, minor: Float = 16) -> [VertexPC] {
+    /// Machine bed grid from the selected printer's print volume, rendered in
+    /// the bed-centered viewer frame. `bed` is in engine (z-up) millimetres;
+    /// minor lines every 16 mm, bright border.
+    static func bedGrid(for bed: EngineBed, minor: Float = 16) -> [VertexPC] {
+        let center = bed.center
         var verts: [VertexPC] = []
-        let half = size / 2
         let dim = SIMD4<Float>(0.14, 0.15, 0.18, 1)   // minor grid lines
         let bright = SIMD4<Float>(0.34, 0.36, 0.42, 1) // border
 
-        var i: Float = -half
-        while i <= half {
-            let isEdge = (i == -half || i == half)
+        func viewer(_ x: Float, _ y: Float) -> SIMD3<Float> {
+            CoordinateMapper.viewerPoint(
+                fromEngine: SIMD3(x, y, 0),
+                bedCenter: center
+            )
+        }
+
+        let step = minor > 0 ? minor : 16
+        // Lines of constant engine x
+        var x = bed.minX
+        while x <= bed.maxX {
+            let isEdge = x == bed.minX || x == bed.maxX
             let c = isEdge ? bright : dim
-            // Lines parallel to Z (varying X)
-            verts.append(VertexPC(position: SIMD3<Float>(i, 0, -half), color: c))
-            verts.append(VertexPC(position: SIMD3<Float>(i, 0, half), color: c))
-            // Lines parallel to X (varying Z)
-            verts.append(VertexPC(position: SIMD3<Float>(-half, 0, i), color: c))
-            verts.append(VertexPC(position: SIMD3<Float>(half, 0, i), color: c))
-            i += minor
+            verts.append(VertexPC(position: viewer(x, bed.minY), color: c))
+            verts.append(VertexPC(position: viewer(x, bed.maxY), color: c))
+            x += step
+        }
+        // Lines of constant engine y
+        var y = bed.minY
+        while y <= bed.maxY {
+            let isEdge = y == bed.minY || y == bed.maxY
+            let c = isEdge ? bright : dim
+            verts.append(VertexPC(position: viewer(bed.minX, y), color: c))
+            verts.append(VertexPC(position: viewer(bed.maxX, y), color: c))
+            y += step
         }
         return verts
     }
@@ -81,8 +97,11 @@ extension Geometry {
             return ([], [])
         }
         func point(_ index: Int) -> SIMD3<Float> {
+            // Object-local frame: the pivot is already subtracted and the
+            // bed anchor is applied per-instance by CoordinateMapper.
             CoordinateMapper.viewerPoint(
-                fromEngine: mesh.positions[index] - mesh.pivot
+                fromEngine: mesh.positions[index] - mesh.pivot,
+                bedCenter: .zero
             )
         }
         var verts: [VertexPNC] = []

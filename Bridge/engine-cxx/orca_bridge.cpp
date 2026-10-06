@@ -127,6 +127,8 @@ void orca_result_dispose(orca_result *result) {
 #include "libslic3r/PresetBundle.hpp"
 #include "libslic3r/Utils.hpp"
 
+#include "nlohmann/json.hpp"
+
 #include <fstream>
 #include <sstream>
 
@@ -252,6 +254,20 @@ static std::vector<std::string> orcapad_system_preset_names(
         if (preset.is_system) names.push_back(preset.name);
     std::sort(names.begin(), names.end());
     return names;
+}
+
+/// System presets sorted by name — the canonical stable order shared by
+/// orca_presets_list_name and orca_presets_list_entry.
+static std::vector<const Slic3r::Preset *> orcapad_system_presets(
+    const Slic3r::PresetCollection &collection) {
+    std::vector<const Slic3r::Preset *> presets;
+    for (const Slic3r::Preset &preset : collection)
+        if (preset.is_system) presets.push_back(&preset);
+    std::sort(presets.begin(), presets.end(),
+              [](const Slic3r::Preset *a, const Slic3r::Preset *b) {
+                  return a->name < b->name;
+              });
+    return presets;
 }
 
 static bool orcapad_has_exact_system_preset(
@@ -415,6 +431,132 @@ orca_result orca_presets_current(orca_presets *presets, int32_t kind,
     });
 }
 
+void orca_preset_entry_dispose(orca_preset_entry *entry) {
+    if (!entry) return;
+    orca_owned_string_dispose(&entry->name);
+    orca_owned_string_dispose(&entry->vendor);
+    entry->compatible = 0;
+}
+
+orca_result orca_presets_list_entry(orca_presets *presets, int32_t kind,
+                                    int32_t index,
+                                    orca_preset_entry *out_entry) {
+    constexpr const char *operation = "orca_presets_list_entry";
+    if (out_entry) {
+        *out_entry = orca_preset_entry{};
+        out_entry->name = orcapad_empty_string();
+        out_entry->vendor = orcapad_empty_string();
+    }
+    if (!presets)
+        return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation,
+                            "presets handle is null");
+    if (!out_entry)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "output pointer is null");
+    if (!orcapad_valid_preset_kind(kind))
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "preset kind is invalid");
+
+    return orcapad_guard(operation, [&]() -> orca_result {
+        const auto list = orcapad_system_presets(presets->collection(kind));
+        if (index < 0 || static_cast<size_t>(index) >= list.size())
+            return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation,
+                                "preset index was not found");
+        const Slic3r::Preset &preset = *list[static_cast<size_t>(index)];
+
+        // Vendor: walk parents via the collection so inherited profiles
+        // (e.g. variant presets) still report their manufacturer.
+        const Slic3r::VendorProfile *vendor = nullptr;
+        if (preset.is_system) {
+            const auto with_vendor = presets->collection(kind)
+                .get_preset_with_vendor_profile(preset);
+            vendor = with_vendor.vendor;
+        }
+        const std::string &vendor_name =
+            vendor && !vendor->name.empty() ? vendor->name
+                                            : (vendor ? vendor->id : "");
+
+        orca_preset_entry entry;
+        entry.name = orcapad_empty_string();
+        entry.vendor = orcapad_empty_string();
+        if (!orcapad_copy_string(preset.name.c_str(), &entry.name) ||
+            !orcapad_copy_string(vendor_name.c_str(), &entry.vendor)) {
+            orca_preset_entry_dispose(&entry);
+            return orcapad_fail(ORCA_STATUS_OUT_OF_MEMORY, operation,
+                                "could not allocate preset entry");
+        }
+        entry.compatible = preset.is_compatible ? 1 : 0;
+        *out_entry = entry;
+        return orcapad_ok();
+    });
+}
+
+orca_result orca_presets_print_volume(orca_presets *presets,
+                                      double *out_min_x, double *out_min_y,
+                                      double *out_max_x, double *out_max_y) {
+    constexpr const char *operation = "orca_presets_print_volume";
+    if (out_min_x) *out_min_x = 0.0;
+    if (out_min_y) *out_min_y = 0.0;
+    if (out_max_x) *out_max_x = 0.0;
+    if (out_max_y) *out_max_y = 0.0;
+    if (!presets)
+        return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation,
+                            "presets handle is null");
+    if (!out_min_x || !out_min_y || !out_max_x || !out_max_y)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "output pointer is null");
+
+    return orcapad_guard(operation, [&]() -> orca_result {
+        const auto *area = presets->bundle->printers.get_selected_preset()
+                               .config.option<Slic3r::ConfigOptionPoints>(
+                                   "printable_area");
+        if (!area || area->values.empty())
+            return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation,
+                                "selected machine defines no printable area");
+        double min_x = area->values.front().x(), max_x = min_x;
+        double min_y = area->values.front().y(), max_y = min_y;
+        for (const auto &point : area->values) {
+            min_x = std::min(min_x, point.x());
+            max_x = std::max(max_x, point.x());
+            min_y = std::min(min_y, point.y());
+            max_y = std::max(max_y, point.y());
+        }
+        if (!(max_x > min_x) || !(max_y > min_y))
+            return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
+                                "printable area is degenerate");
+        *out_min_x = min_x;
+        *out_min_y = min_y;
+        *out_max_x = max_x;
+        *out_max_y = max_y;
+        return orcapad_ok();
+    });
+}
+
+orca_result orca_presets_resolved_config(orca_presets *presets,
+                                         orca_owned_string *out_json) {
+    constexpr const char *operation = "orca_presets_resolved_config";
+    if (out_json) *out_json = orcapad_empty_string();
+    if (!presets)
+        return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation,
+                            "presets handle is null");
+    if (!out_json)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "output pointer is null");
+
+    return orcapad_guard(operation, [&]() -> orca_result {
+        const Slic3r::DynamicPrintConfig config =
+            presets->bundle->full_config();
+        nlohmann::json out = nlohmann::json::object();
+        for (const std::string &key : config.keys())
+            out[key] = config.opt_serialize(key);
+        const std::string serialized = out.dump();
+        if (!orcapad_copy_string(serialized.c_str(), out_json))
+            return orcapad_fail(ORCA_STATUS_OUT_OF_MEMORY, operation,
+                                "could not allocate resolved config");
+        return orcapad_ok();
+    });
+}
+
 // --- plater session ------------------------------------------------------
 
 struct orca_plater {
@@ -474,6 +616,7 @@ orca_result orca_plater_new(orca_plater **out) {
 void orca_plater_free(orca_plater *plater) { delete plater; }
 
 orca_result orca_plater_add_stl(orca_plater *plater, const char *path,
+                                double bed_center_x, double bed_center_y,
                                 orca_object_id *out_object_id,
                                 orca_revision *out_revision) {
     constexpr const char *operation = "orca_plater_add_stl";
@@ -485,6 +628,9 @@ orca_result orca_plater_add_stl(orca_plater *plater, const char *path,
     if (!path || !path[0] || !out_object_id || !out_revision)
         return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
                             "path is empty or output pointer is null");
+    if (!std::isfinite(bed_center_x) || !std::isfinite(bed_center_y))
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "bed center contains a non-finite value");
     struct stat path_status;
     if (stat(path, &path_status) != 0)
         return orcapad_fail(ORCA_STATUS_IO_FAILURE, operation,
@@ -498,9 +644,20 @@ orca_result orca_plater_add_stl(orca_plater *plater, const char *path,
         if (temporary.objects.empty())
             return orcapad_fail(ORCA_STATUS_INVALID_MODEL, operation,
                                 "input contains no model object");
-        temporary.objects[0]->ensure_on_bed(false);
+        Slic3r::ModelObject *imported = temporary.objects[0];
+        // Desktop import parity: rotation/translation operate around the
+        // object's bbox center, so recentre the mesh on the origin and place
+        // the instance at the caller's bed center (selected machine's volume).
+        imported->center_around_origin();
+        if (!imported->instances.empty()) {
+            Slic3r::ModelInstance *instance = imported->instances[0];
+            const Slic3r::Vec3d offset = instance->get_offset();
+            instance->set_offset(Slic3r::Vec3d(bed_center_x, bed_center_y,
+                                               offset.z()));
+        }
+        imported->ensure_on_bed(false);
         Slic3r::ModelObject *object =
-            plater->model.add_object(*temporary.objects[0]);
+            plater->model.add_object(*imported);
         if (!object)
             return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
                                 "engine did not create a document object");

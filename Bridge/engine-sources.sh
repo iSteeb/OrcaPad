@@ -160,5 +160,7 @@ engine_sources() {
     # fully superseded by the real boost-filesystem-1.90 sources above, and
     # keeping both defined the same symbols — dead weight on iOS and a
     # multiple-definition hazard whenever both members get linked.)
-    printf 'cxx\t%s\n' "$ROOT/Bridge/engine-cxx/orca_bridge.cpp"
+    # orca_bridge.cpp resolves the full config through vendored nlohmann/json.
+    printf 'cxx\t%s\t-I%s\n' "$ROOT/Bridge/engine-cxx/orca_bridge.cpp" \
+        "$DEPS/nlohmann"
 }

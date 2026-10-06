@@ -60,6 +60,8 @@ struct PlaterView: View {
     @ViewBuilder
     private var canvas: some View {
         let document = environment.document
+        let bed = environment.presets.printVolume.map(EngineBed.init)
+            ?? EngineBed.fallback
         if let scene = document.scene {
             MetalCanvas(
                 onStatus: {
@@ -67,6 +69,7 @@ struct PlaterView: View {
                 },
                 scene: SceneSync(
                     snapshot: scene,
+                    bed: bed,
                     selectedObjectID: document.selection?.objectID,
                     selectedInstanceID: document.selection?.instanceID,
                     previewTransform: document.previewTransform,
@@ -99,7 +102,13 @@ struct PlaterView: View {
                     await environment.bootstrap()
                 }
                 guard environment.document.isReady else { return }
-                await environment.document.importModel(from: url)
+                let bedCenter = environment.presets.printVolume.map {
+                    SIMD2<Double>($0.centerX, $0.centerY)
+                } ?? .zero
+                await environment.document.importModel(
+                    from: url,
+                    bedCenter: bedCenter
+                )
             }
         case .failure(let error):
             environment.status.report(

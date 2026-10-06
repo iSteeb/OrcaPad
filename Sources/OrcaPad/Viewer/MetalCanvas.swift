@@ -7,6 +7,7 @@ import SwiftUI
 /// frameRequest advances only for explicit camera framing requests.
 struct SceneSync {
     var snapshot: SceneSnapshot
+    var bed: EngineBed
     var selectedObjectID: ObjectID?
     var selectedInstanceID: InstanceID?
     var previewTransform: InstanceTransform?
@@ -69,6 +70,7 @@ struct MetalCanvas: UIViewRepresentable {
             do {
                 try coordinator.renderer?.applyScene(
                     scene.snapshot,
+                    bed: scene.bed,
                     selectedObjectID: scene.selectedObjectID,
                     selectedInstanceID: scene.selectedInstanceID,
                     previewTransform: scene.previewTransform
@@ -172,8 +174,12 @@ struct MetalCanvas: UIViewRepresentable {
             switch gesture.state {
             case .began:
                 if let hit = renderer.pickInstance(at: location, in: view),
-                   let bed = renderer.bedPlaneHit(at: location, in: view),
-                   isSelected(hit) {
+                   let bed = renderer.bedPlaneHit(at: location, in: view) {
+                    // Desktop-like touch flow: dragging an unselected instance
+                    // selects it AND starts the move in one gesture.
+                    if !isSelected(hit) {
+                        onSelect?(hit.objectID, hit.instanceID)
+                    }
                     moveState = (bed, true)
                 } else {
                     moveState = nil

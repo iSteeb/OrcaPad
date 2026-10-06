@@ -7,7 +7,7 @@ extern "C" {
 #endif
 
 /// Version of the C ABI contract in this header. Callers verify it at runtime.
-#define ORCA_BRIDGE_ABI_VERSION ((uint32_t)2)
+#define ORCA_BRIDGE_ABI_VERSION ((uint32_t)3)
 
 typedef int32_t orca_status_code;
 #define ORCA_STATUS_OK                     ((orca_status_code)0)
@@ -93,7 +93,12 @@ orca_result orca_plater_new(orca_plater **out_plater);
 void orca_plater_free(orca_plater *plater);
 
 /// Every successful mutation advances and returns the document revision.
+/// Import centers the mesh via upstream `center_around_origin()` (desktop
+/// parity) and places the instance at the caller-provided bed center
+/// (millimetres, engine z-up space) so placement follows the selected
+/// machine's print volume.
 orca_result orca_plater_add_stl(orca_plater *plater, const char *path,
+                                double bed_center_x, double bed_center_y,
                                 orca_object_id *out_object_id,
                                 orca_revision *out_revision);
 orca_result orca_plater_object_delete(orca_plater *plater,
@@ -133,6 +138,37 @@ orca_result orca_presets_list_count(orca_presets *presets, int32_t kind,
 /// Returned names are caller-owned and independent of later preset calls.
 orca_result orca_presets_list_name(orca_presets *presets, int32_t kind,
                                    int32_t index, orca_owned_string *out_name);
+
+/// Full preset metadata at the same stable order as orca_presets_list_name.
+/// `vendor` is the manufacturer display name (empty when unknown);
+/// `compatible` mirrors the engine's own `is_compatible` flag computed by
+/// `update_compatible` against the currently selected machine (always 1 for
+/// machines themselves).
+typedef struct {
+    orca_owned_string name;
+    orca_owned_string vendor;
+    uint8_t          compatible;
+} orca_preset_entry;
+
+orca_result orca_presets_list_entry(orca_presets *presets, int32_t kind,
+                                    int32_t index,
+                                    orca_preset_entry *out_entry);
+void orca_preset_entry_dispose(orca_preset_entry *entry);
+
+/// Axis-aligned bounding rectangle of the selected machine's `printable_area`
+/// (engine z-up millimetres). The origin position inside the area is
+/// MACHINE-DEPENDENT — most cartesians use a corner (0x0..250x210) while
+/// some beds (e.g. FLSun deltas) are centered (min<0). Callers must derive
+/// placement from this rectangle, never from an origin assumption.
+orca_result orca_presets_print_volume(orca_presets *presets,
+                                      double *out_min_x, double *out_min_y,
+                                      double *out_max_x, double *out_max_y);
+
+/// The complete resolved configuration exactly as slicing will consume it
+/// (`PresetBundle::full_config()` of the current selection), serialized to a
+/// caller-owned JSON object of { "key": "serialized value" }.
+orca_result orca_presets_resolved_config(orca_presets *presets,
+                                         orca_owned_string *out_json);
 orca_result orca_presets_select(orca_presets *presets, const char *machine,
                                 const char *filament, const char *process);
 orca_result orca_presets_current(orca_presets *presets, int32_t kind,

@@ -20,10 +20,11 @@ struct PresetSelection: Equatable, Sendable {
 
 private struct PresetLoadPayload: Sendable {
     let engine: EnginePresets
-    let machines: [String]
-    let filaments: [String]
-    let processes: [String]
+    let machines: [PresetEntry]
+    let filaments: [PresetEntry]
+    let processes: [PresetEntry]
     let selection: PresetSelection
+    let printVolume: PrintVolume
     let warning: AppFailure?
 }
 
@@ -46,11 +47,13 @@ final class PresetStore {
     private let status: StatusCenter
     private var engine: EnginePresets?
     private(set) var phase: Phase = .idle
-    private(set) var machines: [String] = []
-    private(set) var filaments: [String] = []
-    private(set) var processes: [String] = []
+    private(set) var machines: [PresetEntry] = []
+    private(set) var filaments: [PresetEntry] = []
+    private(set) var processes: [PresetEntry] = []
     private(set) var selection: PresetSelection = .empty
     private(set) var isSelecting = false
+    /// Selected machine's print volume; nil until presets are ready.
+    private(set) var printVolume: PrintVolume?
 
     init(status: StatusCenter) {
         self.status = status
@@ -88,9 +91,9 @@ final class PresetStore {
             let engine = try EnginePresets.create(
                 dataDir: dataDirectory.path
             ).get()
-            let machines = try engine.names(kind: .machine).get()
-            let filaments = try engine.names(kind: .filament).get()
-            let processes = try engine.names(kind: .process).get()
+            let machines = try engine.entries(kind: .machine).get()
+            let filaments = try engine.entries(kind: .filament).get()
+            let processes = try engine.entries(kind: .process).get()
             let defaults = PresetSelection(
                 machine: try engine.current(kind: .machine).get(),
                 filament: try engine.current(kind: .filament).get(),
@@ -116,12 +119,17 @@ final class PresetStore {
                     warning = .bridge(error)
                 }
             }
+            // Compatibility flags change once a concrete machine is selected.
+            let refreshedProcesses = stored.isComplete && warning == nil
+                ? try engine.entries(kind: .process).get()
+                : processes
             return PresetLoadPayload(
                 engine: engine,
                 machines: machines,
                 filaments: filaments,
-                processes: processes,
+                processes: refreshedProcesses,
                 selection: selected,
+                printVolume: try engine.printVolume().get(),
                 warning: warning
             )
         }
@@ -133,6 +141,7 @@ final class PresetStore {
             filaments = payload.filaments
             processes = payload.processes
             selection = payload.selection
+            printVolume = payload.printVolume
             persist(payload.selection)
             phase = .ready
             if let warning = payload.warning {
@@ -180,11 +189,19 @@ final class PresetStore {
                 filament: requested.filament,
                 process: requested.process
             ).get()
+            // Selection changes can invalidate process compatibility and
+            // the bed; re-read engine state so the client never guesses it.
+            return (
+                try engine.entries(kind: .process).get(),
+                try engine.printVolume().get()
+            )
         }
         isSelecting = false
         switch result {
-        case .success:
+        case .success((let refreshedProcesses, let volume)):
             selection = requested
+            processes = refreshedProcesses
+            printVolume = volume
             persist(requested)
             status.report(.presets, "presets: selection ready")
         case .failure(let failure):
@@ -192,7 +209,7 @@ final class PresetStore {
         }
     }
 
-    func names(for kind: PresetKind) -> [String] {
+    func names(for kind: PresetKind) -> [PresetEntry] {
         switch kind {
         case .machine: return machines
         case .filament: return filaments
