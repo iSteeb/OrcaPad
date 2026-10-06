@@ -4,12 +4,35 @@ The port in one line: **OrcaSlicer's engine, a native shell, Metal instead of
 OpenGL, touch instead of mouse.** Phases have acceptance criteria; a phase is
 done when its criteria pass on the physical device, not in imagination.
 
-Upstream contact surface (keep it this small): `libslic3r` + config defs +
-`libvgcode`. When OrcaSlicer tags a release, rebasing must cost days, not weeks.
+Upstream contact surface (keep it this small): engine APIs + config defs +
+G-code data semantics. When OrcaSlicer tags a release, rebasing must cost days,
+not weeks. `ARCHITECTURE.md` is the normative design.
 
 ---
 
-## Phase 0 — Scaffold + Metal proof ✅ (in progress)
+## Architecture Gate A — Three-module foundation (in progress)
+**Goal:** clean the proof-of-concept into Swift Client → Bridge → Untouched
+Engine before feature breadth makes the current coupling permanent.
+
+- [x] Document module responsibilities, dependency rules, failure semantics,
+  state ownership, capabilities, and migration order
+- [ ] Align repository and Swift target names with explicit Bridge ownership
+- [ ] Replace diagnostic-string success checks with one typed bridge result
+- [ ] Remove shared static bridge result strings and define data ownership
+- [ ] Introduce stable engine IDs and document revisions
+- [ ] Replace mutable index-coupled Swift scene mirroring with snapshots
+- [ ] Move orchestration/filesystem/slicing state out of `PlaterView`
+- [ ] Add bridge/domain architecture contract tests
+
+Build-system reproducibility remains a later upstreaming gate. The current
+machine-local build is accepted while this architecture is cleaned up, but new
+work must not deepen hidden-cache or fake-symbol dependencies.
+
+**Accept:** one authoritative C++ document model; raw ABI use confined to the
+Bridge; Swift and Metal consume revisioned derived state; all failures are
+typed and loud; current physical-device slice behavior remains green.
+
+## Phase 0 — Scaffold + Metal proof ✅
 **Goal:** project skeleton, meta-files, Metal pipeline live on device.
 
 - [x] xtool project scaffold (Swift 6, iOS 17)
@@ -27,14 +50,14 @@ Upstream contact surface (keep it this small): `libslic3r` + config defs +
 ## Phase 1 — Engine bring-up (the proving ground) ✅ (core gate passed)
 **Goal:** libslic3r running on iOS, called from Swift.
 
-- [x] Cross-compile real libslic3r subset from Linux (79-object static lib:
-  geometry core + admesh + qhull + glu-libtess + header-only CGAL)
-- [x] Swift↔C++ interop layer in `Engine/` with hardened extern-C boundary
-  (Swift owns paths; exceptions/errors → status strings, never crashes)
+- [x] Cross-compile the real FFF libslic3r pipeline and dependencies from Linux
+  (current archive: 262 members / 259 unique sources)
+- [x] Initial extern-C bridge proving Swift can drive the C++ engine
+- [ ] Harden that proof into the typed Bridge contract in Architecture Gate A
 - [x] On-device proof: STL load + admesh repair verified on iPhone
   (12 tris / 8000 mm³ cube, user-confirmed 2026-10-02)
-- [ ] CMake+xcframework for full libslic3r incl. deps (current subset is
-  hand-curated; grows link-driven toward Print pipeline)
+- [ ] Later upstreaming gate: reproducible CMake+xcframework for required
+  libslic3r capabilities and dependencies (current build is machine-local)
 - [x] Slice runs off-main (Task.detached + engine status callback → chip)
 - [x] **ACCEPTED ON DEVICE 2026-10-03**: 483k-tri STL → G-code in Documents
   (user-confirmed slice completion; Files visibility via UIFileSharingEnabled)
@@ -52,20 +75,24 @@ seconds — acceptable for Phase 1; parallelism is a Phase 2 perf item).
 - [x] Real slicing geometry on-device: slice_mesh_ex probe (8 z-levels,
   mid-layer islands+area in status chip) — DONE
 - [ ] 3MF import via engine (blocked on stub/dep decisions — see map)
-- [ ] Instance transform gizmos: move / rotate / snap, lay-flat, auto-arrange
-  (arrange algorithm from engine — never reimplement)
-- [ ] Object list UI; multi-instance; delete/duplicate
-- [ ] Picking (ray-cast against meshes on CPU or via GPU id buffer)
+- [x] Basic move/rotate controls, object list, multi-instance copy/delete,
+  and CPU ray-cast picking implemented (device acceptance still required)
+- [ ] Snap, lay-flat, and auto-arrange (engine algorithms — never reimplement)
+- [ ] Replace index-coupled scene state and O(triangle × instance) picking
+  before treating large plates as production-ready
 
 **Accept:** import a real-world STL, arrange 3 copies, zoom/inspect, slice.
 
-## Phase 3 — Config & presets
+## Phase 3 — Config & presets (in progress)
 **Goal:** the ~2,000-settings problem solved by generation, not typing.
 
-- Extract ConfigOptionDefs at build time → JSON → generate SwiftUI forms
-- Printer/filament/process preset bundles (ship Orca's profiles as resources)
-- Preset switching diffs, search, modified-values badges
-- Background slice job UI: progress, cancel, plate estimate (time/filament)
+- [x] Upstream PresetBundle, inheritance, machine/filament/process selection,
+  search, and preset-aware slicing verified on device and desktop
+- [ ] Stop duplicating profile JSON; package the canonical upstream resources
+- [ ] Expose stable preset IDs, compatibility metadata, and rejection reasons
+- [ ] Extract versioned ConfigOptionDefs schema → generate SwiftUI forms
+- [ ] Preset switching diffs and modified-values badges
+- [ ] Immutable background slice jobs: progress, cancel, plate estimate
 
 **Accept:** pick printer + preset → slice → estimates match desktop Orca
 within a few % for same model/settings.
@@ -73,8 +100,9 @@ within a few % for same model/settings.
 ## Phase 4 — G-code preview & output
 **Goal:** see what you sliced, get it out.
 
-- Port `libvgcode` (already standalone) → xcframework
-- Toolpath renderer in Metal: line primitives by feature type, scrubber,
+- Split reusable G-code/toolpath data semantics from libvgcode's OpenGL
+  renderer; do not port its GL backend to iOS
+- Implement the toolpath renderer in Metal: feature primitives, scrubber,
   layer range, speed/type coloring
 - Export .gcode / .3mf (share sheet + Files); open-in from Mail/Files
 
@@ -103,9 +131,13 @@ in desktop OrcaSlicer identically.
 | Runtime MSL compile cost grows with shader count | Cache `MTLLibrary` in Caches dir once offline compile is possible (Mac collaborator) |
 | Backgrounding kills long slices | Foreground slicing + `beginActivity`; chunked resume later |
 | jetsam on huge multi-plate jobs | 64-bit arm64 fine; budget memory, stream gcode, warn user |
-| Upstream drift | Engine consumed as submodule at tags, never patched in place |
+| Upstream drift | Engine consumed at pinned tags, never privately patched; generic seams go upstream |
+| Competing scene authorities | C++ session is authoritative; Swift snapshots and Metal caches carry revisions |
+| Patch-by-patch bridge debt | Solve typed results, platform services, capabilities, IDs, and jobs as broad contracts |
 
 ## Explicit non-goals (for now)
 
-Seam/support painting, MMU segmentation painting, CAD/parametric editing,
-remote rendering/streaming desktop UI, iPhone layout, watch/tv/vision targets.
+Deferred until the core loop and architecture are complete: seam/support
+painting, MMU segmentation painting, and CAD/parametric editing. Remote desktop
+UI streaming is not planned. iPhone, watch, tv, and vision remain separate
+product decisions; appropriate desktop feature parity is still the destination.

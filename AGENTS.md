@@ -4,16 +4,21 @@ Native iOS/iPadOS port of [OrcaSlicer](https://github.com/OrcaSlicer/OrcaSlicer)
 **slicing engine as-is (C++), GUI from scratch (SwiftUI + Metal)**.
 
 Read order for any agent session in this repo:
-**AGENTS.md → PLANS.md → CONTINUITY.md → LESSONS.md**, then code.
+**AGENTS.md → ARCHITECTURE.md → PLANS.md → CONTINUITY.md → LESSONS.md**, then code.
 Update CONTINUITY.md when progress/decisions/discoveries change; PLANS.md when
 scope changes; LESSONS.md on every corrected mistake.
 
 ## The strategy (do not drift from it)
 
-- libslic3r (the ~312k-LOC headless C++ engine) is used **unmodified** — built
-  as xcframeworks, consumed via Swift↔C++ interop. We are a consumer of
-  upstream, not a fork. Never hand-patch engine sources; if an engine change is
-  unavoidable it goes upstream or behind a thin adapter in `Engine/`.
+- The architecture has exactly three top-level conceptual modules, with one-way
+  dependencies: **Swift Client → Bridge → Untouched Engine**. The normative
+  contracts are in `ARCHITECTURE.md`.
+- The pinned OrcaSlicer engine in `upstream/orcaslicer` is never privately
+  patched or forked. Generic portability improvements may be contributed
+  upstream; slicing algorithms are never duplicated outside the engine.
+- The Bridge is the only module allowed to include engine headers or import the
+  raw C ABI. It owns typed failures, lifetime, capabilities, stable IDs,
+  revisions, jobs, and complete platform adapters — never UI or rendering.
 - The GUI is **native from scratch**: SwiftUI shell, Metal 3D viewer. No
   wxWidgets, no OpenGL/GLES, no SceneKit/RealityKit, no Catalyst, no WebView UI.
 - Skip the exotic tools (seam/support painting, MMU segmentation, CAD editing)
@@ -44,11 +49,16 @@ scope changes; LESSONS.md on every corrected mistake.
   introduce Sendable-happy hacks; keep the confinement explicit.
 - Viewer module (`Sources/OrcaPad/Viewer/`) owns everything Metal. New 3D
   features extend `Renderer`/`Geometry`/`Shaders` — UI never touches MTL types.
-- Future modules: `Engine/` (Swift↔C++ interop over libslic3r), `Settings/`
-  (UI generated from ConfigOptionDefs — never hand-write settings rows),
-  `GCode/` (libvgcode viewer), `Printing/` (LAN/cloud comms).
-- Fail loudly: no silent fallbacks, no empty catches, no `return nil` papering
-  over errors. Renderer errors surface in the status overlay + os_log.
+- Inside the Swift Client, keep focused domain/state, persistence, renderer,
+  settings, preview, and printing boundaries without proliferating packages.
+  Settings UI is generated from ConfigOptionDefs; G-code data semantics may be
+  reused, but the OpenGL libvgcode renderer is not used on iOS.
+- The C++ document session is the sole mutable slicer-domain authority. Swift
+  consumes revisioned immutable snapshots; Metal holds derived caches only.
+- Fail loudly with typed errors and context: no status-text control flow,
+  silent fallbacks, empty catches, `try?` for required work, or `return nil`
+  papering over errors. Renderer errors surface in the status overlay + os_log.
+- Prefer one complete solution for a recurring problem over individual patches.
 - Bundle id `ie.duz.OrcaPad`. Folder `~/OrcaPad`. Deployment target iOS 17.
 
 ## Git discipline

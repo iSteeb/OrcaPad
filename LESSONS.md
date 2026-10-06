@@ -6,6 +6,12 @@ in ~/xtool-cheatsheet.md — link, don't duplicate.)
 
 ## Conventions
 
+- Architecture is exactly three conceptual modules with one-way dependencies:
+  Swift Client → Bridge → untouched upstream Engine. See `ARCHITECTURE.md`.
+- The C++ document session is authoritative. Swift snapshots and Metal buffers
+  are derived, revisioned representations — never competing mutable models.
+- Solve recurring classes of problems through one typed contract; do not grow
+  status-string checks, per-feature shims, index identity, or silent patches.
 - Build output always redirected to a file: `xtool dev build > /tmp/orcapad-build.log 2>&1`
 - All app logging via `os_log` (`Logger(subsystem: "ie.duz.OrcaPad", …)`);
   `print()` is invisible for home-screen-launched apps.
