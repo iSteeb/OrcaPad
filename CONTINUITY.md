@@ -84,6 +84,11 @@
 
 ## OUTCOMES
 
+- [2026-10-06 TOOL] **GATE A VALIDATION CENSUS GREEN**: architecture audit
+  10/10; host contract tests 183/183; warning-free redirected xtool build;
+  archive 258/258 unique with header parity; upstream pristine. Build
+  `d730eea` installed to iPoke — on-device acceptance loop (import →
+  transform → presets → slice → Files) pending user verification.
 - [2026-10-03 USER] Phase 1 accepted on device: a 483,772-triangle STL sliced
   through the real Orca pipeline to G-code in Documents; desktop compatibility
   was subsequently verified with real presets.
