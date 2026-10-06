@@ -1,7 +1,7 @@
 import Foundation
-import OrcaCore
+import OrcaBridgeCore
 
-/// Preset kinds (must match orca_core.h).
+/// Preset kinds (must match orca_bridge.h).
 public enum PresetKind: Int, Sendable {
     case machine = 0
     case filament = 1

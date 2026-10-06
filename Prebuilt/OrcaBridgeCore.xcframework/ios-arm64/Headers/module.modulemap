@@ -1,0 +1,4 @@
+module OrcaBridgeCore {
+    header "orca_bridge.h"
+    export *
+}

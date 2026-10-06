@@ -1,10 +1,10 @@
 #pragma once
 
+#include <stdint.h>
+
 #if defined(__cplusplus)
 extern "C" {
 #endif
-
-#include <stdint.h>
 
 /// Non-owning view into engine-held mesh memory. For orca_stl_load views the
 /// memory is valid until orca_mesh_free; for plater views until the next

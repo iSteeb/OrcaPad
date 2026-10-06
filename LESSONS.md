@@ -18,9 +18,10 @@ in ~/xtool-cheatsheet.md — link, don't duplicate.)
 - MSL shaders live ONLY in `Viewer/Shaders.swift` (runtime-compiled; the Linux
   toolchain cannot produce .metallib files). Swift-side uniform structs must
   keep field order identical to the MSL structs.
-- Upstream (`upstream/orcaslicer`) is NEVER patched. Deviations are adapters:
-  shim headers (Engine/shim/), force-includes (-include), or wrapper TUs in
-  Engine/engine-cxx/. If an adapter becomes load-bearing, document it in
+- Upstream (`upstream/orcaslicer`) is NEVER privately patched. Temporary
+  adapters live under `Bridge/shim/` or `Bridge/engine-cxx/`; generic
+  portability improvements go upstream. If an adapter becomes load-bearing,
+  document it in
   PLANS.md's risk register.
 
 ### Swift 6 / simd specifics (2026-10-03)
@@ -51,7 +52,7 @@ in ~/xtool-cheatsheet.md — link, don't duplicate.)
 - **Do NOT iterate build errors one at a time.** [USER called this out]
   Before the next build attempt, enumerate the FULL error surface: run a
   census compile of every candidate file (parallel, collect all failures),
-  and/or compute the symbol closure up front (Engine/tools/closure.py, or the
+  and/or compute the symbol closure up front (Bridge/tools/closure.py, or the
   linker itself as oracle). One fix batch beats N fix cycles. Reactive
   whack-a-mole cost ~8 rebuild cycles on night one.
 - **Never pair `edit` + `bash` (build/git) as parallel tool calls.** Twice the
@@ -109,8 +110,8 @@ in ~/xtool-cheatsheet.md — link, don't duplicate.)
   scanner rejects it); headers get `#if defined(__cplusplus)` guards instead.
 - Hand-rolled xcframeworks need `HeadersPath` in each AvailableLibraries
   plist entry or the module won't resolve.
-- SwiftPM rejects mixed-language targets: C++ sources live in `Engine/`, Swift
-  interop in `Sources/Engine/`, prebuilt artifacts in `Prebuilt/`.
+- SwiftPM rejects mixed-language targets: C++ adapters live in `Bridge/`, the
+  Swift facade in `Sources/OrcaBridge/`, prebuilt artifacts in `Prebuilt/`.
 - UNCONFIRMED: path-based binaryTarget may be cached under .build — if a
   rebuilt .a seems ignored, `rm -rf .build xtool/.xtool-tmp` before blaming
   the linker. (Suspected once; the real cause was analysis bugs, but the

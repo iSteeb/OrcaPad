@@ -11,7 +11,7 @@ DerivedData/
 /.bsp
 
 # fetched build caches (pinned clones, auto-fetched by build scripts)
-/Engine/cache/
+/Bridge/cache/
 
-# engine cross-build outputs (incremental cache)
-/Engine/build-ios/
+# engine/Bridge cross-build outputs (incremental cache)
+/Bridge/build-ios/

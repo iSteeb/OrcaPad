@@ -1,5 +1,15 @@
 import Foundation
-import OrcaCore
+import OrcaBridgeCore
+
+/// Temporary message-only error retained until Architecture Gate A introduces
+/// the typed Bridge result contract from ARCHITECTURE.md.
+public struct EngineError: Error, Sendable {
+    public let message: String
+
+    public init(message: String) {
+        self.message = message
+    }
+}
 
 /// Swift wrapper over the engine's plater session (Model-backed objects +
 /// instances). Engine calls are blocking (add = admesh read/repair) and the
@@ -208,7 +218,7 @@ public final class EnginePlater: @unchecked Sendable {
         // the plater during it (single Print consumed), and the lock keeps
         // other API calls out until slicing completes.
         let status = gcodePath.withCString { gp in
-            if let presets {
+            if presets != nil {
                 return String(cString: orca_plater_slice_to_gcode_with_presets(
                     h, presetHandle, gp, cCallback,
                     Unmanaged.passUnretained(box).toOpaque(),

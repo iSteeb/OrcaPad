@@ -63,9 +63,8 @@ platform-neutral improvements to OrcaSlicer itself.
 
 ### 2.2 Bridge
 
-Locations today: `Engine/`, `Sources/Engine/`, and the generated
-`Prebuilt/OrcaCore.xcframework`. These paths will be aligned to explicit
-`Bridge` naming during migration.
+Locations: `Bridge/`, `Sources/OrcaBridge/`, and the generated
+`Prebuilt/OrcaBridgeCore.xcframework`.
 
 The bridge is the only module allowed to include engine headers or import the
 raw C module. It is an anti-corruption layer, not a second engine.

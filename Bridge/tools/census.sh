@@ -9,17 +9,17 @@ DEPS="$ROOT/upstream/orcaslicer/deps_src"
 SDK="${SDK:-$HOME/.config/swiftpm/swift-sdks/darwin.artifactbundle/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS27.0.sdk}"
 CLANG="${CLANG:-$HOME/.local/share/swiftly/toolchains/6.4.0/usr/bin/clang++}"
 TARGET="arm64-apple-ios17.0"
-BUILD="$ROOT/Engine/build-ios"
+BUILD="$ROOT/Bridge/build-ios"
 WORK="$(mktemp -d)"
 
 CFLAGS=(
     -target "$TARGET" -isysroot "$SDK"
     -std=c++17 -O1 -Wno-deprecated-declarations -fsyntax-only
-    -I"$ROOT/Engine/shim" -I"$ROOT/Engine/shim/occt-stub"
+    -I"$ROOT/Bridge/shim" -I"$ROOT/Bridge/shim/occt-stub"
     -I"$SRC" -I"$SRC/libslic3r" -I"$BUILD/gen"
-    -I"$DEPS" -I"$DEPS/admesh" -I"$DEPS/qhull/src" -I"$DEPS/glu-libtess/include" -I"$DEPS/libigl" -I"$ROOT/Engine/cache/Orca-deps-libnoise/src" -I"$DEPS/libnest2d/include" -I"$DEPS/clipper2/Clipper2Lib/include" -I"$DEPS/expat/expat/lib" -I"$DEPS/miniz"
+    -I"$DEPS" -I"$DEPS/admesh" -I"$DEPS/qhull/src" -I"$DEPS/glu-libtess/include" -I"$DEPS/libigl" -I"$ROOT/Bridge/cache/Orca-deps-libnoise/src" -I"$DEPS/libnest2d/include" -I"$DEPS/clipper2/Clipper2Lib/include" -I"$DEPS/expat/expat/lib" -I"$DEPS/miniz"
     -I"$DEPS/expat/expat/lib" -I"$DEPS/miniz"
-    -I"$ROOT/Engine/engine-cxx"
+    -I"$ROOT/Bridge/engine-cxx"
     -DSLIC3R_APP_KEY='"OrcaSlicer"' -DSLIC3R_APP_NAME='"OrcaSlicer"'
 )
 

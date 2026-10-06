@@ -16,7 +16,7 @@ Engine before feature breadth makes the current coupling permanent.
 
 - [x] Document module responsibilities, dependency rules, failure semantics,
   state ownership, capabilities, and migration order
-- [ ] Align repository and Swift target names with explicit Bridge ownership
+- [x] Align repository and Swift target names with explicit Bridge ownership
 - [ ] Replace diagnostic-string success checks with one typed bridge result
 - [ ] Remove shared static bridge result strings and define data ownership
 - [ ] Introduce stable engine IDs and document revisions

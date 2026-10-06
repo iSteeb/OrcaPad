@@ -1,15 +1,12 @@
 #!/usr/bin/env bash
-# Cross-builds the OrcaCore static library (libslic3r geometry subset +
-# vendored admesh + vendored qhull) for iOS arm64 from Linux, packs it as a
-# hand-rolled xcframework under Prebuilt/.
+# Cross-builds OrcaBridgeCore (untouched libslic3r sources + the C++ Bridge)
+# for iOS arm64 from Linux and packs a hand-rolled xcframework under Prebuilt/.
+# This machine-local build is temporary; ARCHITECTURE.md defines the boundary.
 #
 # Sources of truth:
 #   upstream/orcaslicer          git submodule, tag v2.4.2 (never patched)
-#   Engine/engine-cxx/           our C++ boundary (orca_core.*)
-#   Engine/shim/                 adapter headers standing in for un-built libs
-#
-# Excluded upstream deps (not needed by this subset): CGAL, OpenCV, OCCT,
-# draco, JPEG, freetype, OpenSSL, PNG, expat, TBB, cereal, boost-compiled.
+#   Bridge/engine-cxx/           C++ Bridge boundary (orca_bridge.*)
+#   Bridge/shim/                 temporary platform/dependency adapters
 
 set -euo pipefail
 
@@ -20,8 +17,8 @@ SDK="${SDK:-$HOME/.config/swiftpm/swift-sdks/darwin.artifactbundle/Developer/Pla
 CLANG="${CLANG:-$HOME/.local/share/swiftly/toolchains/6.4.0/usr/bin/clang++}"
 TARGET="arm64-apple-ios17.0"
 
-BUILD="$ROOT/Engine/build-ios"
-OUT="$ROOT/Prebuilt/OrcaCore.xcframework/ios-arm64"
+BUILD="$ROOT/Bridge/build-ios"
+OUT="$ROOT/Prebuilt/OrcaBridgeCore.xcframework/ios-arm64"
 # INCREMENTAL: obj/ persists across runs; see needs_build + flags stamp.
 mkdir -p "$BUILD/gen/libslic3r" "$BUILD/obj" "$OUT/Headers"
 
@@ -30,16 +27,16 @@ CFLAGS=(
     -std=c++17 -O2 -DNDEBUG -Wno-deprecated-declarations
     # ORDER MATTERS: shims FIRST so adapter headers (boost/log, boost/nowide,
     # tbb, openssl, occt) win over symlinked real boost headers in gen/.
-    -I"$ROOT/Engine/shim" -I"$ROOT/Engine/shim/occt-stub"
+    -I"$ROOT/Bridge/shim" -I"$ROOT/Bridge/shim/occt-stub"
     -I"$SRC" -I"$SRC/libslic3r" -I"$BUILD/gen"
     -I"$DEPS" -I"$DEPS/admesh"
     -I"$DEPS/qhull/src"
     -I"$DEPS/glu-libtess/include"
-    -I"$DEPS/libigl" -I"$ROOT/Engine/cache/Orca-deps-libnoise/src"
+    -I"$DEPS/libigl" -I"$ROOT/Bridge/cache/Orca-deps-libnoise/src"
     -I"$DEPS/libnest2d/include"
     -I"$DEPS/clipper2/Clipper2Lib/include" -I"$DEPS/expat/expat/lib"
     -I"$DEPS/miniz"
-    -I"$ROOT/Engine/engine-cxx"
+    -I"$ROOT/Bridge/engine-cxx"
     -DSLIC3R_APP_KEY='"OrcaSlicer"' -DSLIC3R_APP_NAME='"OrcaSlicer"'
 )
 CONLY_FLAGS=(
@@ -47,7 +44,7 @@ CONLY_FLAGS=(
     -O2 -DNDEBUG -Wno-deprecated-declarations
     -include limits.h
     -I"$DEPS" -I"$DEPS/qhull/src" -I"$DEPS/glu-libtess/include"
-    -I"$DEPS/libigl" -I"$ROOT/Engine/cache/Orca-deps-libnoise/src"
+    -I"$DEPS/libigl" -I"$ROOT/Bridge/cache/Orca-deps-libnoise/src"
     -I"$DEPS/libnest2d/include"
     -I"$DEPS/clipper2/Clipper2Lib/include" -I"$DEPS/expat/expat/lib"
     -I"$DEPS/miniz"
@@ -55,11 +52,11 @@ CONLY_FLAGS=(
 
 # Host boost/eigen + fetched cereal headers exposed via symlinks (NEVER
 # -I/usr/include — glibc headers must not shadow the Darwin SDK).
-CEREAL="$ROOT/Engine/cache/cereal/include/cereal"
+CEREAL="$ROOT/Bridge/cache/cereal/include/cereal"
 if [ ! -f "$CEREAL/access.hpp" ]; then
-    echo "==> fetching cereal v1.3.0 (OrcaSlicer's pin) into Engine/cache/" >&2
-    mkdir -p "$ROOT/Engine/cache"
-    git clone -q --depth 1 -b v1.3.0 https://github.com/USCiLab/cereal "$ROOT/Engine/cache/cereal"
+    echo "==> fetching cereal v1.3.0 (OrcaSlicer's pin) into Bridge/cache/" >&2
+    mkdir -p "$ROOT/Bridge/cache"
+    git clone -q --depth 1 -b v1.3.0 https://github.com/USCiLab/cereal "$ROOT/Bridge/cache/cereal"
 fi
 [ -f "$CEREAL/access.hpp" ] || { echo "FATAL: cereal fetch failed" >&2; exit 1; }
 ln -sfn /usr/include/boost "$BUILD/gen/boost"
@@ -67,7 +64,7 @@ ln -sfn /usr/include/eigen3/Eigen "$BUILD/gen/Eigen"
 ln -sfn /usr/include/eigen3/unsupported "$BUILD/gen/unsupported"
 ln -sfn "$CEREAL" "$BUILD/gen/cereal"
 ln -sfn /usr/include/CGAL "$BUILD/gen/CGAL"
-ln -sfn "$ROOT/Engine/cache/Orca-deps-libnoise/src" "$BUILD/gen/libnoise"
+ln -sfn "$ROOT/Bridge/cache/Orca-deps-libnoise/src" "$BUILD/gen/libnoise"
 ln -sfn /usr/include/x86_64-linux-gnu/gmp.h "$BUILD/gen/gmp.h"
 ln -sfn /usr/include/x86_64-linux-gnu/mpfr.h "$BUILD/gen/mpfr.h"
 
@@ -302,9 +299,9 @@ done
 compile_c "$DEPS/miniz/miniz.c"
 
 # libnoise (fuzzy skin) — full source set
-for f in "$ROOT"/Engine/cache/Orca-deps-libnoise/src/*.cpp \
-         "$ROOT"/Engine/cache/Orca-deps-libnoise/src/model/*.cpp \
-         "$ROOT"/Engine/cache/Orca-deps-libnoise/src/module/*.cpp; do
+for f in "$ROOT"/Bridge/cache/Orca-deps-libnoise/src/*.cpp \
+         "$ROOT"/Bridge/cache/Orca-deps-libnoise/src/model/*.cpp \
+         "$ROOT"/Bridge/cache/Orca-deps-libnoise/src/module/*.cpp; do
     [ -f "$f" ] && compile "$f"
 done
 
@@ -314,15 +311,15 @@ done
 # don't provide. windows_file_codecvt is Windows-only.
 for f in path operations directory exception path_traits portability \
          unique_path codecvt_error_category utf8_codecvt_facet; do
-    compile "$ROOT/Engine/cache/boost-filesystem-1.90/src/$f.cpp" -std=c++20
+    compile "$ROOT/Bridge/cache/boost-filesystem-1.90/src/$f.cpp" -std=c++20
 done
 
 # adapter stubs (3MF/STEP/thumbnails — loud throws, upstream untouched)
-compile "$ROOT/Engine/engine-cxx/format_stubs.cpp"
+compile "$ROOT/Bridge/engine-cxx/format_stubs.cpp"
 
-# our C boundary
-compile "$ROOT/Engine/engine-cxx/boost_filesystem_shim.cpp"
-compile "$ROOT/Engine/engine-cxx/orca_core.cpp"
+# our C Bridge boundary
+compile "$ROOT/Bridge/engine-cxx/boost_filesystem_shim.cpp"
+compile "$ROOT/Bridge/engine-cxx/orca_bridge.cpp"
 
 run_jobs_parallel
 
@@ -331,18 +328,18 @@ mapfile -t OBJS < "$MANIFEST"
 if [ "${#OBJS[@]}" -eq 0 ]; then echo "FATAL: no objects compiled" >&2; exit 1; fi
 # CRITICAL: ar rcs only replaces/adds members — stale members from previous
 # builds survive exclusions. Always start from a clean archive.
-rm -f "$OUT/libOrcaCore.a"
-ar rcs "$OUT/libOrcaCore.a" "${OBJS[@]}"
-actual=$(ar t "$OUT/libOrcaCore.a" | wc -l)
+rm -f "$OUT/libOrcaBridgeCore.a"
+ar rcs "$OUT/libOrcaBridgeCore.a" "${OBJS[@]}"
+actual=$(ar t "$OUT/libOrcaBridgeCore.a" | wc -l)
 if [ "$actual" -ne "${#OBJS[@]}" ]; then
     echo "FATAL: archive has $actual members, manifest has ${#OBJS[@]} — stale members leaked" >&2; exit 1
 fi
-cp "$ROOT/Engine/engine-cxx/orca_core.h" "$OUT/Headers/orca_core.h"
+cp "$ROOT/Bridge/engine-cxx/orca_bridge.h" "$OUT/Headers/orca_bridge.h"
 cat > "$OUT/Headers/module.modulemap" <<'EOF'
-module OrcaCore {
-    header "orca_core.h"
+module OrcaBridgeCore {
+    header "orca_bridge.h"
     export *
 }
 EOF
-file "$OUT/libOrcaCore.a"
-echo "==> done: $OUT/libOrcaCore.a ($(wc -l < "$MANIFEST") objects)"
+file "$OUT/libOrcaBridgeCore.a"
+echo "==> done: $OUT/libOrcaBridgeCore.a ($(wc -l < "$MANIFEST") objects)"

@@ -1,4 +1,0 @@
-module CxxProbe {
-    header "probe.h"
-    export *
-}

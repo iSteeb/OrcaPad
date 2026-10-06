@@ -2,7 +2,7 @@
 // Dumps Slic3r::print_config_def (all ConfigOptionDefs) to JSON so the iOS
 // settings UI can be GENERATED from the defs — never hand-written.
 //
-// Build (host): see Engine/tools/build-extract-config.sh
+// Build (host): see Bridge/tools/build-extract-config.sh
 // Output: JSON array — one object per option:
 //   { key, type (int, Slic3r::ConfigOptionType), nullable, label, full_label,
 //     category, tooltip, gui_flags, default (serialized), min?, max?,
@@ -18,7 +18,7 @@
 #include <string>
 
 // Upstream defines this in utils.cpp (needs macOS libproc.h). Host tool uses
-// the same identity adapter as orca_core.cpp.
+// the same identity adapter as orca_bridge.cpp.
 namespace Slic3r { namespace I18N {
 static std::string identity_translate(const char *s) { return s; }
 translate_fn_type translate_fn = &identity_translate;

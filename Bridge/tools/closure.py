@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""Symbol-closure analyzer for OrcaCore.
+"""Symbol-closure analyzer for OrcaBridgeCore.
 
 Extracts every object from the archive, BFS-walks the undefined-symbol graph
-from the root (orca_core), and reports:
+from the Bridge root, and reports:
   1. which archive objects are actually reachable (kept set)
   2. which Slic3r:: undefineds remain and which upstream .cpp files define them
   3. which non-Slic3r symbol families remain (external-lib debt)
 
-Usage: closure.py <libOrcaCore.a> <libslic3r-src-dir> <llvm-nm-path>
+Usage: closure.py <libOrcaBridgeCore.a> <libslic3r-src-dir> <llvm-nm-path>
 """
 import subprocess, sys, os, re, tempfile, shutil, collections
 
@@ -43,8 +43,9 @@ for m in members:
         undefs[m] = u
 
 # --- BFS closure from root objects ---
-roots = [m for m in members if "orca_core" in m]
-assert roots, "no root object (orca_core) in archive"
+# Accept the former object name while inspecting a pre-migration archive.
+roots = [m for m in members if "orca_bridge" in m or "orca_core" in m]
+assert roots, "no Bridge root object in archive"
 kept, queue, seen = set(roots), list(roots), set(roots)
 while queue:
     m = queue.pop()

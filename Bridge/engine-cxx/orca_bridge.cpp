@@ -1,4 +1,4 @@
-#include "orca_core.h"
+#include "orca_bridge.h"
 
 #include "libslic3r/ExPolygon.hpp"
 #include "libslic3r/I18N.hpp"

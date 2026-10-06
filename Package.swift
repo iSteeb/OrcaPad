@@ -20,7 +20,7 @@ let package = Package(
     targets: [
         .target(
             name: "OrcaPad",
-            dependencies: ["Engine"],
+            dependencies: ["OrcaBridge"],
             resources: [
                 // OrcaSlicer system profiles (JSON-only subset, upstream tag).
                 // data_dir() points here — PresetBundle reads <dir>/system/…
@@ -30,19 +30,19 @@ let package = Package(
                 .interoperabilityMode(.Cxx)
             ]
         ),
-        // Swift↔C++ interop layer over the OrcaSlicer engine static lib.
+        // Typed Swift facade over the sole engine-facing Bridge C ABI.
         .target(
-            name: "Engine",
-            dependencies: ["OrcaCore"],
+            name: "OrcaBridge",
+            dependencies: ["OrcaBridgeCore"],
             swiftSettings: [
                 .interoperabilityMode(.Cxx)
             ]
         ),
-        // libslic3r geometry subset (built by Engine/build-core.sh —
-        // clang -target arm64-apple-ios from Linux, static archive).
+        // Untouched upstream engine + C++ Bridge boundary, cross-built by
+        // Bridge/build-core.sh and packaged as a static xcframework.
         .binaryTarget(
-            name: "OrcaCore",
-            path: "Prebuilt/OrcaCore.xcframework"
+            name: "OrcaBridgeCore",
+            path: "Prebuilt/OrcaBridgeCore.xcframework"
         ),
     ],
     cxxLanguageStandard: .cxx17

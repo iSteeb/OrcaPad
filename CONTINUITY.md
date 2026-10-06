@@ -8,11 +8,10 @@
   while eliminating stringly results, unstable index identity, competing
   mutable scene state, and `PlaterView` orchestration.
 - Next steps:
-  1. Align repository/package names with the Bridge boundary.
-  2. Introduce one typed C result/error contract and migrate Swift wrappers.
-  3. Add stable engine IDs, document revisions, and authoritative snapshots.
-  4. Extract document/preset/slice orchestration from `PlaterView`.
-  5. Add contract tests, then resume feature-parity work.
+  1. Introduce one typed C result/error contract and migrate Swift wrappers.
+  2. Add stable engine IDs, document revisions, and authoritative snapshots.
+  3. Extract document/preset/slice orchestration from `PlaterView`.
+  4. Add contract tests, then resume feature-parity work.
 - Build reproducibility is explicitly deferred; the machine-local build stays
   green but is not the current architecture milestone. [USER]
 
@@ -58,6 +57,11 @@
 
 ## PROGRESS
 
+- [2026-10-06] MODULE BOUNDARIES ALIGNED: proof-only `Engine`/`OrcaCore`
+  naming is now `Bridge`/`OrcaBridge`; Package.swift enforces Client → Bridge
+  → binary C ABI, raw ABI use is confined to `Sources/OrcaBridge`, obsolete
+  CxxProbe/unused wrappers are removed, and build tooling follows the rename.
+  Static boundary audit + warning-free `xtool dev build` green. [CODE][TOOL]
 - [2026-10-06] THREE-MODULE DESIGN SPEC LANDED: `ARCHITECTURE.md` is normative;
   AGENTS/PLANS/LESSONS now enforce Client → Bridge → untouched Engine, typed
   loud failures, authoritative revisioned state, broad fixes over patches, and
@@ -115,7 +119,8 @@
   Metal render of the REAL mesh + auto-framing; slice_mesh_ex report in chip.
   Two render bugs fixed same night: leftover test-cube model matrix (20×
   scale); face-duplicated verts fed shared-vertex indices (garbled mesh).
-- [2026-10-02] Engine/build-ios untracked (incremental cache), obj cache
+- [2026-10-02] Bridge/build-ios (formerly Engine/build-ios) untracked
+  (incremental cache), obj cache
   survived exclusion cycles (corrections cost 0 compiles).
 
 - [2026-10-02] Phase 0 done: app + Metal viewer verified on iPoke (60fps).
@@ -127,7 +132,7 @@
   vendored admesh+qhull+glu-libtess, CGAL header-only for VoronoiUtilsCgal.
   Shims: boost::log, boost::nowide, tbb (sequential), openssl/md5→CommonCrypto,
   OCCT stubs (STEP.hpp parse-only). External symbol debt: benign only.
-- [2026-10-02] Tooling: Engine/tools/closure.py (BFS closure + duplicate audit).
+- [2026-10-02] Tooling: Bridge/tools/closure.py (BFS closure + duplicate audit).
 - [2026-10-02] Root causes fixed: ar rcs ghost members (archive never dropped
   exclusions — now rm -f + member-count guard); Debian multiarch gmp.h.
 - BLOCKERS (2 real T-T duplicates): __gl_pqHeap* (priorityq.c vs
@@ -137,7 +142,7 @@
 ## DISCOVERIES
 
 - [2026-10-06 CODE] Architecture audit: Swift reaches a custom C ABI
-  (`orca_core.h`), not direct C++ interop; the clean v2.4.2 submodule supplies
+  (now `orca_bridge.h`), not direct C++ interop; the clean v2.4.2 submodule supplies
   153/215 libslic3r implementation TUs. The device-only archive is built from
   a manual source list plus include shims/stub symbols, has 3 duplicate object
   members, and depends on ignored caches that a fresh clone cannot recreate.
