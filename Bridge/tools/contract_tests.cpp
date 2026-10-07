@@ -234,7 +234,7 @@ static void test_md5_shim() {
 
 static void test_abi_version() {
     CHECK_EQ(orca_bridge_abi_version(), ORCA_BRIDGE_ABI_VERSION);
-    CHECK_EQ(ORCA_BRIDGE_ABI_VERSION, 4);
+    CHECK_EQ(ORCA_BRIDGE_ABI_VERSION, 5);
 }
 
 static void test_document_lifecycle(const std::string &dir) {
@@ -1055,6 +1055,22 @@ static void test_slice_defaults(const std::string &dir) {
     check_slice_outputs(gcode.c_str(), g3, time_estimate, bytes, progress,
                         "slice defaults");
 
+    // interop lock: the preset-free overlay must land in the exported config
+    // block (empty nozzle_type segfaults desktop AND OrcaPad's own loader)
+    FILE *config_scan = fopen(gcode.c_str(), "r");
+    CHECK(config_scan != nullptr);
+    if (config_scan) {
+        char line[512];
+        bool brass_seen = false;
+        while (fgets(line, sizeof line, config_scan))
+            if (strstr(line, "; nozzle_type = brass")) {
+                brass_seen = true;
+                break;
+            }
+        fclose(config_scan);
+        CHECK(brass_seen);
+    }
+
     // slicing is not a document mutation: revision unchanged
     CHECK_EQ(snapshot_revision(plater), revision2);
 
@@ -1146,6 +1162,102 @@ static void test_standalone_slice(const std::string &dir) {
     expect_code(g2, ORCA_STATUS_IO_FAILURE, "standalone slice missing input");
 }
 
+static void test_gcode_toolpath(const std::string &dir) {
+    // reuse the defaults slice output from test_slice_defaults
+    const std::string gcode = dir + "/defaults.gcode";
+    struct stat status;
+    if (stat(gcode.c_str(), &status) != 0) {
+        ++checks;
+        fail(__FILE__, __LINE__, "defaults.gcode missing (slice test must run first)");
+        return;
+    }
+
+    // typed rejections
+    GUARD(g0, orca_gcode_load(nullptr, nullptr));
+    expect_code(g0, ORCA_STATUS_INVALID_ARGUMENT, "gcode_load(null out)");
+    GUARD(g1, orca_gcode_load((dir + "/missing.gcode").c_str(), nullptr));
+    expect_code(g1, ORCA_STATUS_INVALID_ARGUMENT, "gcode_load(null out 2)");
+
+    orca_gcode *parsed = nullptr;
+    GUARD(g2, orca_gcode_load((dir + "/missing.gcode").c_str(), &parsed));
+    expect_code(g2, ORCA_STATUS_IO_FAILURE, "gcode_load(missing file)");
+
+    // a file with no parseable moves is a typed model failure
+    const std::string empty_gcode = dir + "/empty-file.gcode";
+    FILE *file = fopen(empty_gcode.c_str(), "wb");
+    if (file) {
+        fprintf(file, "; only a comment, nothing printable\n");
+        fclose(file);
+    }
+    orca_gcode *garbage_handle = nullptr;
+    GUARD(g3, orca_gcode_load(empty_gcode.c_str(), &garbage_handle));
+    ++checks;
+    if (g3.ok()) {
+        // a bare comment can still emit noop vertices; extraction must
+        // then fail loudly on the missing printable moves
+        orca_toolpath garbage_tp;
+        GUARD(g3b, orca_gcode_toolpath(garbage_handle, &garbage_tp));
+        ++checks;
+        if (g3b.ok()) {
+            orca_toolpath_dispose(&garbage_tp);
+            fail(__FILE__, __LINE__, "comment-only gcode must not yield a toolpath");
+        } else {
+            expect_owned_diagnostic(g3b, "toolpath(comment-only gcode)");
+        }
+        orca_gcode_free(garbage_handle);
+    } else {
+        expect_owned_diagnostic(g3, "gcode_load(comment-only gcode)");
+    }
+
+    GUARD(g4, orca_gcode_load(gcode.c_str(), &parsed));
+    expect_ok(g4, "gcode_load");
+    CHECK(parsed != nullptr);
+
+    orca_toolpath toolpath;
+    GUARD(g5, orca_gcode_toolpath(nullptr, &toolpath));
+    expect_code(g5, ORCA_STATUS_INVALID_HANDLE, "toolpath(null handle)");
+    GUARD(g6, orca_gcode_toolpath(parsed, nullptr));
+    expect_code(g6, ORCA_STATUS_INVALID_ARGUMENT, "toolpath(null out)");
+
+    GUARD(g7, orca_gcode_toolpath(parsed, &toolpath));
+    expect_ok(g7, "toolpath");
+    CHECK(toolpath.segment_count > 100);
+    CHECK(toolpath.layer_count >= 1);
+    CHECK(toolpath.layers != nullptr);
+    CHECK(toolpath.segments != nullptr);
+    CHECK(toolpath.estimated_time_seconds > 0.0f);
+    CHECK(toolpath.printable_height > 0.0f);
+
+    // layers partition the segments exactly
+    uint64_t total = 0;
+    bool extrusion_seen = false;
+    bool travel_seen = false;
+    bool roles_seen = false;
+    for (uint32_t i = 0; i < toolpath.layer_count; ++i) {
+        const orca_tp_layer &layer = toolpath.layers[i];
+        CHECK(layer.segment_count > 0);
+        total += layer.segment_count;
+    }
+    CHECK_EQ(total, toolpath.segment_count);
+    for (uint32_t i = 0; i < toolpath.segment_count; ++i) {
+        const orca_tp_segment &segment = toolpath.segments[i];
+        if (segment.move_type == 10) extrusion_seen = true;
+        if (segment.move_type == 8) travel_seen = true;
+        if (segment.move_type == 10 && segment.role >= 1 && segment.role <= 19)
+            roles_seen = true;
+    }
+    CHECK(extrusion_seen);
+    CHECK(travel_seen);
+    CHECK(roles_seen); // feature classification survived the parse
+
+    orca_gcode_free(parsed); // toolpath must stay valid after handle free
+    CHECK(toolpath.segments[0].end[0] == toolpath.segments[0].end[0]);
+    orca_toolpath_dispose(&toolpath);
+    orca_toolpath_dispose(&toolpath); // idempotent
+    orca_toolpath_dispose(nullptr);
+    orca_gcode_free(nullptr);
+}
+
 int main() {
     const std::string dir = test_dir();
     // One data directory per PROCESS (the Bridge contract is initialize-once).
@@ -1168,6 +1280,7 @@ int main() {
     test_slice_defaults(dir);
     test_slice_with_presets(dir, data_dir);
     test_standalone_slice(dir);
+    test_gcode_toolpath(dir);
 
     fprintf(stderr, "\n═══ contract tests: %d checks, %d failures ═══\n",
             checks, failures);

@@ -59,19 +59,9 @@ Step::Step_Status Step::mesh(Model *, bool &, bool, double, double) {
     orcapad_unsupported("STEP mesh conversion");
 }
 
-// --- GCode thumbnails (blocked on libpng/jpeg for real generation) ---
-// Only called when a thumbnail generator callback is provided; OrcaPad's
-// headless export passes none. Stub keeps the link honest + loud.
-namespace GCodeThumbnails {
-std::pair<GCodeThumbnailDefinitionsList, ThumbnailErrors>
-make_and_check_thumbnail_list(const std::string &, const std::string_view) {
-    orcapad_unsupported("gcode thumbnails");
-}
-std::pair<GCodeThumbnailDefinitionsList, ThumbnailErrors>
-make_and_check_thumbnail_list(const ConfigBase &) {
-    orcapad_unsupported("gcode thumbnails");
-}
-} // namespace GCodeThumbnails
+// --- GCode thumbnails: the REAL GCode/Thumbnails.cpp is compiled into the
+// closure (pure-string list parsing for load paths; PNG/QOI via vendored
+// miniz/qoi; JPEG reaches the loud adapter in jpeg_stubs.cpp).
 
 } // namespace Slic3r
 
@@ -118,13 +108,6 @@ namespace Slic3r {
 // reporting "unavailable" is honest, not a feature fallback.
 std::string log_memory_info(bool) { return "memory info unavailable on OrcaPad"; }
 } // namespace Slic3r
-
-// --- Thumbnails error strings (Thumbnails.cpp is stubbed out) ---
-namespace Slic3r { namespace GCodeThumbnails {
-std::string get_error_string(const enum_bitmask<ThumbnailError> &) {
-    return "thumbnails unsupported";
-}
-}} // namespace Slic3r::GCodeThumbnails
 
 // --- utils.cpp adapters (macOS libproc wall) — REAL implementations ---
 #include <fstream>
@@ -264,24 +247,9 @@ void write_rgb_to_file_scaled(const std::string &, size_t, size_t,
 }
 }} // namespace Slic3r::png
 
-// --- thumbnails helpers (Thumbnails.cpp is out; only used with a
-//     thumbnail callback, which OrcaPad never provides) ---
-#include "libslic3r/GCode/Thumbnails.hpp"
-namespace Slic3r { namespace GCodeThumbnails {
-std::string get_hex(const unsigned int input) {
-    char buf[16];
-    snprintf(buf, sizeof(buf), "%x", input);
-    return std::string(buf);
-}
-std::string rjust(std::string input, unsigned int width, char fill_char) {
-    if (input.size() >= width) return input;
-    input.insert(0, width - input.size(), fill_char);
-    return input;
-}
-std::unique_ptr<CompressedImageBuffer> compress_thumbnail(const ThumbnailData &, GCodeThumbnailsFormat) {
-    throw std::runtime_error("OrcaPad: gcode thumbnails not supported");
-}
-}} // namespace Slic3r::GCodeThumbnails
+// --- thumbnails helpers: the REAL GCode/Thumbnails.cpp is compiled into the
+// closure (parse + PNG/QOI encode through vendored miniz/qoi; JPEG reaches
+// the loud adapter in jpeg_stubs.cpp). No stubs remain here.
 
 // --- miniz zip wrappers + rename (utils.cpp/3mf walls) ---
 #include "miniz_extension.hpp"

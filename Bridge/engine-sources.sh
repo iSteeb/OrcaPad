@@ -152,8 +152,13 @@ engine_sources() {
         printf 'cxx\t%s\t-std=c++20\n' "$ROOT/Bridge/cache/boost-filesystem-1.90/src/$f.cpp"
     done
 
-    # adapter stubs (3MF/STEP/thumbnails — loud throws, upstream untouched)
+    # adapter stubs (3MF/STEP — loud throws, upstream untouched)
     printf 'cxx\t%s\n' "$ROOT/Bridge/engine-cxx/format_stubs.cpp"
+    # real thumbnail parse/encode (PNG via miniz, QOI vendored; JPEG hits the
+    # loud adapter below)
+    printf 'cxx\t%s\n' "$SRC/libslic3r/GCode/Thumbnails.cpp"
+    printf 'cxx\t%s\n' "$ROOT/Bridge/engine-cxx/jpeg_stubs.cpp"
+    printf 'c\t%s\n' "$DEPS/qoi/qoilib.c"
 
     # our C Bridge boundary
     # (boost_filesystem_shim.cpp is retired: its POSIX implementations were

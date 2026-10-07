@@ -130,6 +130,8 @@ void orca_result_dispose(orca_result *result) {
 #include "nlohmann/json.hpp"
 
 #include <fstream>
+
+#include <fstream>
 #include <sstream>
 
 // --- data_dir adapter ----------------------------------------------------
@@ -1170,7 +1172,178 @@ orca_result orca_plater_snapshot(orca_plater *plater,
     });
 }
 
-// --- config overlays + shared slice-pipeline tail -------------------------
+// --- G-code toolpath preview ----------------------------------------------
+
+struct orca_gcode {
+    Slic3r::GCodeProcessorResult result;
+};
+
+/// Sniffs which feature-tag dialect the file uses ("; FEATURE:" BBL style
+/// vs ";TYPE:" compatible) so the processor parses roles written by either
+/// exporter configuration.
+static bool orcapad_gcode_uses_bbl_tags(const char *path) {
+    std::ifstream file(path, std::ios::in | std::ios::binary);
+    if (!file) return false;
+    std::string chunk;
+    chunk.resize(1 << 20); // 1 MiB is far beyond any header block
+    file.read(chunk.data(), static_cast<std::streamsize>(chunk.size()));
+    chunk.resize(static_cast<size_t>(file.gcount()));
+    return chunk.find(";FEATURE:") != std::string::npos ||
+           chunk.find("; FEATURE:") != std::string::npos;
+}
+
+orca_result orca_gcode_load(const char *path, orca_gcode **out_gcode) {
+    constexpr const char *operation = "orca_gcode_load";
+    if (out_gcode) *out_gcode = nullptr;
+    if (!out_gcode)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "output pointer is null");
+    if (!path || !path[0])
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "path is empty");
+    struct stat path_status;
+    if (stat(path, &path_status) != 0)
+        return orcapad_fail(ORCA_STATUS_IO_FAILURE, operation,
+                            "input file is not accessible");
+
+    return orcapad_guard(operation, [&]() -> orca_result {
+        Slic3r::GCodeProcessor::s_IsBBLPrinter =
+            orcapad_gcode_uses_bbl_tags(path);
+        Slic3r::GCodeProcessor processor;
+        processor.init_filament_maps_and_nozzle_type_when_import_only_gcode();
+        processor.process_file(path);
+        auto handle = std::make_unique<orca_gcode>();
+        handle->result = processor.extract_result();
+        if (handle->result.moves.empty())
+            return orcapad_fail(ORCA_STATUS_INVALID_MODEL, operation,
+                                "gcode contains no moves");
+        *out_gcode = handle.release();
+        return orcapad_ok();
+    });
+}
+
+void orca_gcode_free(orca_gcode *gcode) { delete gcode; }
+
+void orca_toolpath_dispose(orca_toolpath *toolpath) {
+    if (!toolpath) return;
+    std::free(toolpath->segments);
+    std::free(toolpath->layers);
+    *toolpath = orca_toolpath{};
+}
+
+orca_result orca_gcode_toolpath(orca_gcode *gcode,
+                                orca_toolpath *out_toolpath) {
+    constexpr const char *operation = "orca_gcode_toolpath";
+    if (out_toolpath) *out_toolpath = orca_toolpath{};
+    if (!gcode)
+        return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation,
+                            "gcode handle is null");
+    if (!out_toolpath)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "output pointer is null");
+
+    return orcapad_guard(operation, [&]() -> orca_result {
+        const auto &moves = gcode->result.moves;
+
+        size_t segment_count = 0;
+        size_t layer_count = 0;
+        uint32_t previous_layer = std::numeric_limits<uint32_t>::max();
+        for (size_t i = 1; i < moves.size(); ++i) {
+            const auto type = moves[i].type;
+            if (type != Slic3r::EMoveType::Extrude &&
+                type != Slic3r::EMoveType::Travel)
+                continue;
+            ++segment_count;
+            if (moves[i].layer_id != previous_layer) {
+                ++layer_count;
+                previous_layer = moves[i].layer_id;
+            }
+        }
+        if (segment_count == 0 || layer_count == 0)
+            return orcapad_fail(ORCA_STATUS_INVALID_MODEL, operation,
+                                "gcode contains no printable moves");
+        if (segment_count > std::numeric_limits<uint32_t>::max() ||
+            layer_count > std::numeric_limits<uint32_t>::max())
+            return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
+                                "toolpath exceeds ABI count range");
+
+        orca_toolpath toolpath = orca_toolpath{};
+        toolpath.segment_count = static_cast<uint32_t>(segment_count);
+        toolpath.layer_count = static_cast<uint32_t>(layer_count);
+        toolpath.segments = static_cast<orca_tp_segment *>(
+            std::malloc(segment_count * sizeof(orca_tp_segment)));
+        toolpath.layers = static_cast<orca_tp_layer *>(
+            std::calloc(layer_count, sizeof(orca_tp_layer)));
+        if (!toolpath.segments || !toolpath.layers) {
+            orca_toolpath_dispose(&toolpath);
+            return orcapad_fail(ORCA_STATUS_OUT_OF_MEMORY, operation,
+                                "could not allocate toolpath");
+        }
+
+        size_t out = 0;
+        uint32_t layer_index = 0;
+        bool layer_open = false;
+        uint32_t open_layer_id = 0;
+        for (size_t i = 1; i < moves.size(); ++i) {
+            const auto &move = moves[i];
+            if (move.type != Slic3r::EMoveType::Extrude &&
+                move.type != Slic3r::EMoveType::Travel)
+                continue;
+            if (move.layer_id > std::numeric_limits<uint16_t>::max()) {
+                orca_toolpath_dispose(&toolpath);
+                return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
+                                    "layer id exceeds ABI range");
+            }
+            // Layers are keyed by the engine's layer_id (z can climb within a
+            // layer — spiral vase); the layer record carries its first z.
+            if (!layer_open || move.layer_id != open_layer_id) {
+                if (layer_open) ++layer_index;
+                open_layer_id = move.layer_id;
+                toolpath.layers[layer_index].z = move.print_z;
+                toolpath.layers[layer_index].first_segment =
+                    static_cast<uint32_t>(out);
+                toolpath.layers[layer_index].segment_count = 0;
+                toolpath.layers[layer_index].time_seconds = 0.0f;
+                layer_open = true;
+            }
+            const auto &previous = moves[i - 1].position;
+            orca_tp_segment &segment = toolpath.segments[out];
+            segment.start[0] = previous.x();
+            segment.start[1] = previous.y();
+            segment.start[2] = previous.z();
+            segment.end[0] = move.position.x();
+            segment.end[1] = move.position.y();
+            segment.end[2] = move.position.z();
+            segment.feedrate = move.feedrate;
+            segment.width = move.width;
+            segment.height = move.height;
+            segment.mm3_per_mm = move.mm3_per_mm;
+            segment.move_type = static_cast<uint8_t>(move.type);
+            segment.role = static_cast<uint8_t>(move.extrusion_role);
+            segment.extruder = move.extruder_id;
+            segment.flags = move.internal_only ? 1 : 0;
+            segment.layer_id = static_cast<uint16_t>(move.layer_id);
+            segment.reserved = 0;
+            segment.print_z = move.print_z;
+            ++out;
+            orca_tp_layer &layer = toolpath.layers[layer_index];
+            layer.segment_count += 1;
+            layer.time_seconds += move.time[static_cast<size_t>(
+                Slic3r::PrintEstimatedStatistics::ETimeMode::Normal)];
+        }
+
+        toolpath.estimated_time_seconds =
+            gcode->result.print_statistics
+                .modes[static_cast<size_t>(
+                    Slic3r::PrintEstimatedStatistics::ETimeMode::
+                        Normal)]
+                .time;
+        toolpath.printable_height = gcode->result.printable_height;
+        *out_toolpath = toolpath;
+        return orcapad_ok();
+    });
+}
+
 
 static void orcapad_config_overlays(Slic3r::DynamicPrintConfig &config) {
     // The preset-free compatibility path starts from raw defaults, which
@@ -1182,16 +1355,28 @@ static void orcapad_config_overlays(Slic3r::DynamicPrintConfig &config) {
     // file, 2026-10-03). Generic-PLA overlay until presets land.
     config.set_key_value("filament_density", new Slic3r::ConfigOptionFloats{1.24});
     // `; nozzle_type =` (empty coEnums) round-trips as a ZERO-length
-    // vector on desktop load; GCodeProcessor::update_slice_warnings()
+    // vector on load; GCodeProcessor::update_slice_warnings()
     // then indexes nozzle_hrc_lists (sized by nozzle_type) through
     // m_filament_maps → out-of-bounds read → segfault (gdb-verified
-    // 2026-10-03). Desktop presets always set a concrete value.
-    // Mutate the def-created option in place — replacing it with a raw
-    // ConfigOptionStrings swaps the dynamic type away from
-    // ConfigOptionEnumsGenericNullable (typed accessor = bad cast).
-    if (auto *nt = dynamic_cast<Slic3r::ConfigOptionStrings *>(
-            config.option("nozzle_type", true)))
-        nt->values = { "brass" };
+    // 2026-10-03, re-verified on the OrcaPad host loader 2026-10-06).
+    // Desktop presets always set a concrete value.
+    // CORRECTION 2026-10-06: ConfigOptionEnumsGenericTempl derives from
+    // ConfigOptionINTS and serializes through keys_map — the old Strings
+    // cast never matched AND full_print_config()'s static default instance
+    // carries a NULL keys_map, so "brass" silently never landed in exported
+    // gcode (re-verified: empty `; nozzle_type =` → loader OOB). Set the enum
+    // ordinal AND wire keys_map from the pinned def; dynamic type stays
+    // EnumsGenericNullable.
+    if (auto *nt = dynamic_cast<Slic3r::ConfigOptionEnumsGenericNullable *>(
+            config.option("nozzle_type", true))) {
+        if (nt->keys_map == nullptr) {
+            const auto def = Slic3r::print_config_def.options.find(
+                "nozzle_type");
+            if (def != Slic3r::print_config_def.options.end())
+                nt->keys_map = def->second.enum_keys_map;
+        }
+        nt->values = { int(Slic3r::NozzleType::ntBrass) };
+    }
 }
 
 static orca_result orcapad_run_print(const char *operation,

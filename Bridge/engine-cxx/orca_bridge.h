@@ -7,7 +7,7 @@ extern "C" {
 #endif
 
 /// Version of the C ABI contract in this header. Callers verify it at runtime.
-#define ORCA_BRIDGE_ABI_VERSION ((uint32_t)4)
+#define ORCA_BRIDGE_ABI_VERSION ((uint32_t)5)
 
 typedef int32_t orca_status_code;
 #define ORCA_STATUS_OK                     ((orca_status_code)0)
@@ -190,6 +190,56 @@ orca_result orca_presets_reset_kind(orca_presets *presets, int32_t kind);
 orca_result orca_presets_config_dump(orca_presets *presets, int32_t kind,
                                     uint8_t edited,
                                     orca_owned_string *out_json);
+
+/// Parsed G-code for the toolpath preview. Loading runs the full upstream
+/// GCodeProcessor over the file (CPU-heavy: run off the main thread; the
+/// engine mutex serializes it against other engine work).
+typedef struct orca_gcode orca_gcode;
+
+orca_result orca_gcode_load(const char *path, orca_gcode **out_gcode);
+void orca_gcode_free(orca_gcode *gcode);
+
+/// One preview segment. Positions are canonical engine z-up millimetres;
+/// `role` carries the engine's own Slic3r::ExtrusionRole values (0..19) and
+/// `move_type` its EMoveType values (Travel=8, Extrude=10) — never the
+/// libvgcode reorderings.
+typedef struct {
+    float    start[3];
+    float    end[3];
+    float    feedrate;      // mm/s
+    float    width;         // mm
+    float    height;        // mm
+    float    mm3_per_mm;    // flow cross-section
+    uint8_t  move_type;
+    uint8_t  role;
+    uint8_t  extruder;
+    uint8_t  flags;         // bit0 = internal_only
+    uint16_t layer_id;
+    uint16_t reserved;
+    float    print_z;       // layer z, mm
+} orca_tp_segment;
+
+typedef struct {
+    float    z;             // layer z, mm
+    uint32_t first_segment;
+    uint32_t segment_count;
+    float    time_seconds;
+} orca_tp_layer;
+
+typedef struct {
+    uint32_t          segment_count;
+    uint32_t          layer_count;
+    orca_tp_segment  *segments;   // caller-owned; see dispose
+    orca_tp_layer    *layers;
+    float             estimated_time_seconds;
+    float             printable_height;
+} orca_toolpath;
+
+/// Extracts the compact, caller-owned toolpath copy; the `orca_gcode` handle
+/// may be freed immediately afterwards.
+orca_result orca_gcode_toolpath(orca_gcode *gcode,
+                                orca_toolpath *out_toolpath);
+void orca_toolpath_dispose(orca_toolpath *toolpath);
 orca_result orca_presets_select(orca_presets *presets, const char *machine,
                                 const char *filament, const char *process);
 orca_result orca_presets_current(orca_presets *presets, int32_t kind,

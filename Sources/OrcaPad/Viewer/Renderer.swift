@@ -171,7 +171,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         return vd
     }
 
-    private static func pcVertexDescriptor() -> MTLVertexDescriptor {
+    static func pcVertexDescriptor() -> MTLVertexDescriptor {
         let vd = MTLVertexDescriptor()
         vd.attributes[0].format = .float3
         vd.attributes[0].offset = 0
