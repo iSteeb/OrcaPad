@@ -223,7 +223,7 @@ in ~/xtool-cheatsheet.md — link, don't duplicate.)
   call runs in a SEPARATE tool turn. No exceptions for "quick" appends.
 - Camera framing formula that worked: distance = max(bboxDim) × 2.6
   (clamped 110–1400), target at 45% of height, pitch 0.42 rad.
-- [USER 2026-10-13] Do NOT use subagents in this repo/session environment —
+- [USER 2026-10-07] Do NOT use subagents in this repo/session environment —
   the tool returned empty output on every call. Do audits directly with rg.
 - Entity snapshots must validate raw ABI values BEFORE calling a Swift
   initializer with preconditions, or a bad engine value traps instead of
@@ -238,5 +238,5 @@ in ~/xtool-cheatsheet.md — link, don't duplicate.)
 - Before exposing an engine option, read its real key in PrintConfig.cpp
   (physical-printer host is `host_type`, coEnum — not `print_host_type`).
   Swift imports C fixed-size arrays as tuples — index them via byte offsets.
-- Never use `rm -rf ./*` style cleanup [USER 2026-10-13]: create a fresh
+- Never use `rm -rf ./*` style cleanup [USER 2026-10-07]: create a fresh
   scratch dir instead of emptying one.

@@ -1,6 +1,6 @@
 # OrcaPad ↔ OrcaSlicer desktop parity report
 
-Audited 2026-10-13 at `8d4cdaf`; updated through `8edb8a6` (ABI v16) against `upstream/orcaslicer` v2.4.2 (pinned, unmodified).
+Audited 2026-10-07 at `8d4cdaf`; updated through `8edb8a6` (ABI v16) against `upstream/orcaslicer` v2.4.2 (pinned, unmodified).
 Status: ✅ done · 🟡 partial · ❌ missing · ➖ N/A on iOS / deliberate.
 "Work" says what closing the gap needs: **UI** (Swift only), **Bridge** (new
 ABI over engine code already compiled), **Closure** (engine TU/dependency not
@@ -25,7 +25,7 @@ yet in `Bridge/engine-sources.sh`), **Client-reimpl** (desktop logic lives in
 | Split to objects / parts | `GLCanvas3D.cpp:6836,6848`, `Plater.cpp:17251` | none found | ❌ | Bridge (`ModelObject::split` is compiled) |
 | Mirror | `Plater.cpp:7605` | snapshot rejects left-handed instances | ❌ | Bridge + renderer (winding flip) |
 | Cut | `GLGizmosManager.cpp:210` | none found | ❌ | Closure: `CutUtils.cpp` (no exotic dependencies) |
-| Mesh boolean | `GLGizmosManager.cpp:211` | stubbed in `format_stubs.cpp:97` | ➖ deferred by user (2026-10-13) | Closure: CGAL PMP + libigl / mcut (heavy) |
+| Mesh boolean | `GLGizmosManager.cpp:211` | stubbed in `format_stubs.cpp:97` | ➖ deferred by user (2026-10-07) | Closure: CGAL PMP + libigl / mcut (heavy) |
 | Support / seam / fuzzy-skin / MMU paint | `GLGizmosManager.cpp:212-215` | `PlateTabView.swift:258` placeholder | ❌ (deferred by AGENTS.md) | Bridge: `TriangleSelector.cpp` is compiled; brush UI is needed |
 | Text emboss / SVG | `GLGizmosManager.cpp:216-217` | none found (engine `Emboss.cpp`/`NSVGUtils.cpp` now compiled for 3MF) | ❌ | Bridge + UI + iOS font access |
 | Measure / Assembly / Simplify / Brim ears | `GLGizmosManager.cpp:218-221` | none found | ❌ | Closure: `Measure.cpp`, `QuadricEdgeCollapse.cpp`; brim ears are Client-reimpl |
@@ -70,7 +70,7 @@ yet in `Bridge/engine-sources.sh`), **Client-reimpl** (desktop logic lives in
 | Feature | Desktop evidence | OrcaPad evidence | Status | Work |
 |---|---|---|---|---|
 | Schemes: FeatureType, Speed, Height, Width, Fan, Temperature | `libvgcode/include/Types.hpp:80-102` | `GcodePreviewStore.swift:8-13` | ✅ | — |
-| VolumetricFlowRate, ActualSpeed/Volumetric, LayerTime lin/log, PA, Accel, Jerk, Tool | `Types.hpp:80-102` | ABI v14 fields; all schemes in `GcodePreviewStore.swift` color modes | ✅ ColorPrint/Summary ➖ | — |
+| VolumetricFlowRate, ActualSpeed/Volumetric, LayerTime lin/log, PA, Accel, Jerk, Tool | `Types.hpp:80-102` | ABI v14 fields; all schemes in `GcodePreviewStore.swift` color modes | ✅ | — |
 | ColorPrint / Summary | same | none found (Tool scheme ✅ above) | ❌ | ColorPrint needs per-layer color changes (see slider row) |
 | Travel toggle | `Types.hpp:168` | `PreviewTabView.swift:225` dock | ✅ | — |
 | Wipes, retractions, unretractions, seams, tool/color changes, pauses, custom G-code | `Types.hpp:169-176` | ABI v14 marker segments (point moves) + Seams/Retract dock toggles; markers rendered as crosses | 🟡 tool/color changes, pauses, custom G-code exported but not yet drawn | UI |
@@ -95,17 +95,17 @@ yet in `Bridge/engine-sources.sh`), **Client-reimpl** (desktop logic lives in
 
 | Feature | Desktop evidence | OrcaPad evidence | Status | Work |
 |---|---|---|---|---|
-| Device tab (printer web UI) | `PrinterWebView.hpp:37` | `DeviceTabView.swift`: native printer list + send; no embedded printer web page yet | 🟡 allowed by user 2026-10-13 (scoped AGENTS.md exception) — not built yet | UI (WKWebView of `print_host_webui`/host URL) |
+| Device tab (printer web UI) | `PrinterWebView.hpp:37` | `DeviceTabView.swift`: native printer list + send; no embedded printer web page yet | 🟡 allowed by user 2026-10-07 (scoped AGENTS.md exception) — not built yet | UI (WKWebView of `print_host_webui`/host URL) |
 | Print hosts (OctoPrint, Moonraker, PrusaLink/Connect, Duet, Repetier, MKS, Elegoo, Flashforge, SimplyPrint, …) | `Utils/PrintHost.cpp:58-73`, `PrintConfig.hpp:80` | `PrintHostService.swift` (URLSession, mirrors desktop's GUI-layer libcurl): OctoPrint `/api/files/local` + Moonraker `/server/files/upload`, upload + optional start print | 🟡 2 of 16 host types; others are typed rejections | Client-reimpl per host |
 | Bambu cloud/LAN monitor | `Monitor.cpp` | — | ➖ proprietary network plugin | — |
 | OBJ / AMF import | `Plater.cpp` load_files | ABI v10 `orca_plater_import_model` → `Model::read_from_file` | ✅ | — |
 | 3MF project load/save | `Plater.cpp:12102,12234,15551` | ABI v11 `orca_project_open` (model + embedded presets + `load_config_model` + plate type, atomic) / `orca_project_save` (`store_bbs_3mf`, `full_config_secure`); Plate ▸ File menu | ✅ single plate incl. plate thumbnail (multi-plate projects rejected loudly) | — |
-| STEP | `Format/STEP.cpp` (OCCT) | stubbed in `format_stubs.cpp:47-58` | ➖ deferred by user (2026-10-13) | Closure: OpenCASCADE (heavy) |
-| SVG import | `Format/svg.cpp` (OCCT + nanosvg) | stubbed in `format_stubs.cpp:87` | ➖ deferred by user (2026-10-13) | Closure: OCCT |
-| DRC | `Format/DRC.cpp` (draco) | stubbed in `format_stubs.cpp:84` | ➖ deferred by user (2026-10-13) | Closure: draco (not vendored) |
+| STEP | `Format/STEP.cpp` (OCCT) | stubbed in `format_stubs.cpp:47-58` | ➖ deferred by user (2026-10-07) | Closure: OpenCASCADE (heavy) |
+| SVG import | `Format/svg.cpp` (OCCT + nanosvg) | stubbed in `format_stubs.cpp:87` | ➖ deferred by user (2026-10-07) | Closure: OCCT |
+| DRC | `Format/DRC.cpp` (draco) | stubbed in `format_stubs.cpp:84` | ➖ deferred by user (2026-10-07) | Closure: draco (not vendored) |
 | Export plate STL/OBJ, printable 3MF | `Plater.cpp:15047` | none found | ❌ | Bridge (STL/OBJ store compiled); 3MF blocked as above |
 | Recent projects, auto-backup | `MainFrame.cpp`, `bbs_3mf.cpp` backup manager | projects saved to Files ▸ OrcaPad ▸ Projects; no recent list, backup manager compiled but unused | 🟡 | UI |
-| Calibration menu (temp, max flow, PA, flow, retraction, VFA, cornering, input shaping) | `MainFrame.cpp:3328-3478`, `Plater.cpp:12622-13396` | none found | ➖ deferred by user (2026-10-13) | Engine `calib.cpp` is compiled, but the models are `.drc` (`Plater.cpp:12634-13359`), so draco is required first |
+| Calibration menu (temp, max flow, PA, flow, retraction, VFA, cornering, input shaping) | `MainFrame.cpp:3328-3478`, `Plater.cpp:12622-13396` | none found | ➖ deferred by user (2026-10-07) | Engine `calib.cpp` is compiled, but the models are `.drc` (`Plater.cpp:12634-13359`), so draco is required first |
 | Preferences | `Preferences.hpp:31` | none found | ❌ | UI |
 | Setup wizard (vendor/printer picking) | `ConfigWizard.cpp` | all system printers are listed | 🟡 | UI |
 
@@ -123,11 +123,11 @@ Plus ✅ G-code/3MF thumbnails (ABI v16).
 
 ## Remaining work (recommended order)
 
-**Deferred by user (2026-10-13):** STEP/SVG import, Draco/DRC, Calibration
+**Deferred by user (2026-10-07):** STEP/SVG import, Draco/DRC, Calibration
 menu, mesh boolean.
 
 **Unblocked, highest value first:**
-0. Device tab printer web page (decision made 2026-10-13).
+0. Device tab printer web page (decision made 2026-10-07).
 1. Per-layer color change / pause / custom G-code (slider) — Bridge over compiled `CustomGCode.cpp`; unlocks ColorPrint scheme.
 2. Undo/redo — Bridge Model snapshot stack under the session revision.
 3. Object list: split, parts/modifiers/negative volumes, per-object settings, rename — Bridge over compiled `Model.cpp`.

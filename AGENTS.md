@@ -21,7 +21,7 @@ scope changes; LESSONS.md on every corrected mistake.
   revisions, jobs, and complete platform adapters — never UI or rendering.
 - The GUI is **native from scratch**: SwiftUI shell, Metal 3D viewer. No
   wxWidgets, no OpenGL/GLES, no SceneKit/RealityKit, no Catalyst, no WebView UI.
-  Scoped exception [USER 2026-10-13]: the Device tab may embed the connected
+  Scoped exception [USER 2026-10-07]: the Device tab may embed the connected
   printer's OWN web interface (desktop PrinterWebView parity); OrcaPad's
   own UI stays native.
 - Skip the exotic tools (seam/support painting, MMU segmentation, CAD editing)

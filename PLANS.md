@@ -88,7 +88,9 @@ Device, each tab a clean feature module over the same stores.
       G-code/3MF thumbnails (v16) — see PARITY.md
 - [ ] Parity backlog: PARITY.md "Remaining work" (unblocked list + blocked
       decisions)
-- [ ] Device tab: printer web UI (needs a decision — WebView ban)
+- [ ] Device tab: printer web UI — allowed by user 2026-10-07 (scoped
+      AGENTS.md exception: the printer's OWN web page, desktop
+      PrinterWebView parity); not built yet
 
 **Accept:** device walkthrough of all four tabs; edits in Prepare change the
 sliced gcode (verified in Preview + resolved config); Preview scrubs layers.
@@ -179,10 +181,18 @@ seconds — acceptable for Phase 1; parallelism is a Phase 2 perf item).
 - [x] Upstream PresetBundle, inheritance, machine/filament/process selection,
   search, and preset-aware slicing verified on device and desktop
 - [ ] Stop duplicating profile JSON; package the canonical upstream resources
-- [ ] Expose stable preset IDs, compatibility metadata, and rejection reasons
-- [ ] Extract versioned ConfigOptionDefs schema → generate SwiftUI forms
-- [ ] Preset switching diffs and modified-values badges
-- [ ] Immutable background slice jobs: progress, cancel, plate estimate
+      (`Sources/OrcaPad/Resources/system/` is still a copy)
+- [x] Compatibility metadata (engine `is_compatible` + vendor, ABI v3)
+- [ ] Stable preset IDs and compatibility rejection reasons (names only today)
+- [x] Extract versioned ConfigOptionDefs schema → generate SwiftUI forms
+      (Gate B schema, C2/C5 generated editor + extracted desktop layout)
+- [x] Modified-value badges, per-key/per-kind reset, unsaved-changes prompt
+      (C2, C5b)
+- [ ] Preset compare/diff view (PARITY.md §2)
+- [x] Background slice jobs: progress, cancel, validate, estimates; results
+      carry their source revision (ABI v9/v14)
+- [ ] Edit while slicing (ARCHITECTURE §5): today edits are rejected while a
+      slice runs instead of slicing a captured immutable revision
 
 **Accept:** pick printer + preset → slice → estimates match desktop Orca
 within a few % for same model/settings.
@@ -190,11 +200,15 @@ within a few % for same model/settings.
 ## Phase 4 — G-code preview & output
 **Goal:** see what you sliced, get it out.
 
-- Split reusable G-code/toolpath data semantics from libvgcode's OpenGL
-  renderer; do not port its GL backend to iOS
-- Implement the toolpath renderer in Metal: feature primitives, scrubber,
-  layer range, speed/type coloring
-- Export .gcode / .3mf (share sheet + Files); open-in from Mail/Files
+- [x] Split reusable G-code/toolpath data semantics from libvgcode's OpenGL
+  renderer; do not port its GL backend to iOS (upstream GCodeProcessor via
+  ABI v5/v6/v14, engine ExtrusionRole/EMoveType values)
+- [x] Implement the toolpath renderer in Metal: feature primitives, scrubber,
+  layer range, speed/type coloring (Gate C3/C4, all color schemes)
+- [x] Export .gcode / .3mf (share sheet + Files)
+- [ ] Open-in from Mail/Files (no document types declared yet)
+- [ ] Acceptance: 60fps scrub of a real print on device; exported G-code
+  compared in desktop OrcaSlicer
 
 **Accept:** scrub a real print's toolpath at 60fps; exported gcode loads
 in desktop OrcaSlicer identically.
@@ -202,8 +216,12 @@ in desktop OrcaSlicer identically.
 ## Phase 5 — Printers & polish
 **Goal:** a product.
 
-- LAN send (Bambu MQTT/SSM path), basic printer status (temp, camera frame)
-- Calibration subset (flow/PA passes generating their own gcode)
+- [x] Print-host send: OctoPrint + Moonraker upload/start (ABI v15)
+- [ ] Remaining print hosts (PrusaLink/Connect, Duet, Repetier, …)
+- [ ] Printer status (temps, progress, camera frame); Bambu MQTT/LAN is a
+  proprietary-plugin path (➖ in PARITY.md)
+- [ ] Calibration subset — deferred by user 2026-10-07 (upstream calibration
+  models are `.drc`, so Draco must enter the closure first)
 - Memory hardening (jetsam budgeting, streaming), iPad keyboard/pointer,
   landscape lock review, App Store asset pipeline workaround for icons
 - TestFlight via Mac (xtool can't upload — plan the handoff)
