@@ -9,6 +9,7 @@ enum StatusSubsystem: String, CaseIterable, Hashable, Sendable {
     case presets = "presets"
     case slice = "slice"
     case preview = "preview"
+    case device = "device"
 }
 
 enum AppFailure: Error, LocalizedError, Sendable {

@@ -355,6 +355,14 @@ orca_result orca_presets_new(const char *data_dir_path, orca_presets **out) {
         presets->bundle->update_compatible(
             Slic3r::PresetSelectCompatibleType::Always);
         orcapad_apply_default_bed_type(*presets->bundle);
+        // Desktop keeps physical printers in the preset bundle; this fork's
+        // GUI loads them from its own dir. OrcaPad's convention (documented):
+        // <data_dir>/user/default/physical_machine — loaded here.
+        Slic3r::PresetsConfigSubstitutions physical_substitutions;
+        presets->bundle->physical_printers.load_printers(
+            data_dir_path, "user/default/physical_machine",
+            physical_substitutions,
+            Slic3r::ForwardCompatibilitySubstitutionRule::Enable);
         *out = presets.release();
         return orcapad_ok();
     });
@@ -2084,6 +2092,149 @@ orca_result orca_plater_slice_to_gcode_with_presets(
         print.is_BBL_printer() = presets->bundle->is_bbl_vendor();
         return orcapad_run_print(operation, print, gcode_path, progress, ctx,
                                  job, out_report);
+    });
+}
+
+// --- physical printers -----------------------------------------------------
+
+static bool orcapad_valid_host_type(const std::string &host_type) {
+    const Slic3r::ConfigOptionDef *def =
+        Slic3r::print_config_def.get("host_type");
+    return def && std::find(def->enum_values.begin(), def->enum_values.end(),
+                            host_type) != def->enum_values.end();
+}
+
+void orca_physical_printer_dispose(orca_physical_printer *printer) {
+    if (!printer) return;
+    orca_owned_string_dispose(&printer->name);
+    orca_owned_string_dispose(&printer->host_type);
+    orca_owned_string_dispose(&printer->url);
+    orca_owned_string_dispose(&printer->api_key);
+    orca_owned_string_dispose(&printer->preset_names);
+    *printer = orca_physical_printer{};
+}
+
+orca_result orca_physical_printer_count(orca_presets *presets, int32_t *out_count) {
+    constexpr const char *operation = "orca_physical_printer_count";
+    if (out_count) *out_count = 0;
+    if (!presets)
+        return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation, "presets handle is null");
+    if (!out_count)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation, "output pointer is null");
+    return orcapad_guard(operation, [&]() -> orca_result {
+        const size_t count = presets->bundle->physical_printers().size();
+        if (count > static_cast<size_t>(std::numeric_limits<int32_t>::max()))
+            return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
+                                "physical printer count exceeds ABI range");
+        *out_count = static_cast<int32_t>(count);
+        return orcapad_ok();
+    });
+}
+
+orca_result orca_physical_printer_list(orca_presets *presets, int32_t index,
+                                       orca_physical_printer *out_printer) {
+    constexpr const char *operation = "orca_physical_printer_list";
+    if (out_printer) *out_printer = orca_physical_printer{};
+    if (!presets)
+        return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation, "presets handle is null");
+    if (!out_printer)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation, "output pointer is null");
+    return orcapad_guard(operation, [&]() -> orca_result {
+        const auto &printers = presets->bundle->physical_printers();
+        if (index < 0 || static_cast<size_t>(index) >= printers.size())
+            return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation,
+                                "physical printer index was not found");
+        const Slic3r::PhysicalPrinter &printer =
+            printers[static_cast<size_t>(index)];
+        orca_physical_printer entry;
+        std::string presets_list;
+        for (const std::string &preset : printer.get_preset_names())
+            presets_list += (presets_list.empty() ? "" : "\n") + preset;
+        if (!orcapad_copy_string(printer.name.c_str(), &entry.name) ||
+            !orcapad_copy_string(
+                printer.config.opt_serialize("host_type").c_str(),
+                &entry.host_type) ||
+            !orcapad_copy_string(printer.config.opt_string("print_host").c_str(), &entry.url) ||
+            !orcapad_copy_string(printer.config.opt_string("printhost_apikey").c_str(), &entry.api_key) ||
+            !orcapad_copy_string(presets_list.c_str(), &entry.preset_names)) {
+            orca_physical_printer_dispose(&entry);
+            return orcapad_fail(ORCA_STATUS_OUT_OF_MEMORY, operation,
+                                "could not allocate physical printer entry");
+        }
+        *out_printer = entry;
+        return orcapad_ok();
+    });
+}
+
+orca_result orca_physical_printer_upsert(orca_presets *presets, const char *name,
+                                         const char *host_type, const char *url,
+                                         const char *api_key,
+                                         const char *preset_name) {
+    constexpr const char *operation = "orca_physical_printer_upsert";
+    if (!presets)
+        return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation, "presets handle is null");
+    if (!name || !name[0] || !host_type || !host_type[0] || !url || !url[0] ||
+        !api_key || !preset_name || !preset_name[0])
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "name, host type, url, api key or preset name is empty");
+    const std::string url_value(url);
+    if (url_value.rfind("http://", 0) != 0 && url_value.rfind("https://", 0) != 0)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "print host URL must start with http:// or https://");
+    return orcapad_guard(operation, [&]() -> orca_result {
+        if (!orcapad_valid_host_type(host_type))
+            return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                                "unknown print host type");
+        auto &collection = presets->bundle->physical_printers;
+        const std::string preset(preset_name);
+        if (!presets->bundle->printers.find_preset(preset, false, true))
+            return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation,
+                                "printer preset was not found");
+        Slic3r::PhysicalPrinter *existing = collection.find_printer(name, true);
+        Slic3r::PhysicalPrinter printer =
+            existing ? *existing
+                     : Slic3r::PhysicalPrinter(name, collection.default_config(),
+                                               presets->bundle->printers.get_edited_preset());
+        printer.name = name;
+        if (auto *host = printer.config.option<Slic3r::ConfigOptionEnum<Slic3r::PrintHostType>>(
+                "host_type", true)) {
+            // map the enum string through the pinned def's keys_map
+            const auto *def = Slic3r::print_config_def.get("host_type");
+            const int value = def && def->enum_keys_map
+                ? def->enum_keys_map->at(host_type) : 0;
+            host->value = static_cast<Slic3r::PrintHostType>(value);
+        } else {
+            return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
+                                "host type option is missing from the printer config");
+        }
+        printer.config.opt_string("print_host") = url;
+        printer.config.opt_string("printhost_apikey") = api_key;
+        printer.add_preset(preset);
+        printer.update_preset_names_in_config();
+        // ConfigBase::save_to_json does NOT create the parent directory and
+        // fails silently when it is missing (desktop's GUI creates it first).
+        boost::filesystem::create_directories(
+            boost::filesystem::path(Slic3r::data_dir()) /
+            "user/default/physical_machine");
+        collection.save_printer(printer);
+        return orcapad_ok();
+    });
+}
+
+orca_result orca_physical_printer_delete(orca_presets *presets, const char *name) {
+    constexpr const char *operation = "orca_physical_printer_delete";
+    if (!presets)
+        return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation, "presets handle is null");
+    if (!name || !name[0])
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation, "name is empty");
+    return orcapad_guard(operation, [&]() -> orca_result {
+        if (!presets->bundle->physical_printers.find_printer(name, true))
+            return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation,
+                                "physical printer was not found");
+        if (!presets->bundle->physical_printers.delete_printer(name))
+            return orcapad_fail(ORCA_STATUS_IO_FAILURE, operation,
+                                "engine refused to delete the physical printer");
+        return orcapad_ok();
     });
 }
 

@@ -10,6 +10,7 @@ final class AppEnvironment {
     let document: DocumentStore
     let presets: PresetStore
     let slicing: SliceService
+    let printHost: PrintHostService
     private(set) var isBootstrapping = false
 
     init() {
@@ -18,6 +19,7 @@ final class AppEnvironment {
         document = DocumentStore(status: status)
         presets = PresetStore(status: status)
         slicing = SliceService(status: status)
+        printHost = PrintHostService(status: status)
     }
 
     /// Desktop "Open project": the document AND the preset session change

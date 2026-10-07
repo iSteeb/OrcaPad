@@ -272,7 +272,7 @@ static void test_md5_shim() {
 
 static void test_abi_version() {
     CHECK_EQ(orca_bridge_abi_version(), ORCA_BRIDGE_ABI_VERSION);
-    CHECK_EQ(ORCA_BRIDGE_ABI_VERSION, 14);
+    CHECK_EQ(ORCA_BRIDGE_ABI_VERSION, 15);
 }
 
 static void test_document_lifecycle(const std::string &dir) {
@@ -1806,6 +1806,79 @@ static void test_user_presets(const std::string &data_dir) {
     orca_presets_free(presets);
 }
 
+// Physical printers: engine-backed storage, persisted to the data dir,
+// reloaded by fresh sessions.
+static void test_physical_printers(const std::string &data_dir) {
+    orca_presets *presets = nullptr;
+    GUARD(g0, orca_presets_new(data_dir.c_str(), &presets));
+    expect_ok(g0, "presets_new");
+    GUARD(gsel, orca_presets_select(presets, "Anycubic Vyper 0.4 nozzle",
+                                    "Anycubic Generic PLA",
+                                    "0.20mm Standard @Anycubic Vyper"));
+    expect_ok(gsel, "select Vyper");
+
+    int32_t count = -1;
+    GUARD(g1, orca_physical_printer_count(presets, &count));
+    expect_ok(g1, "count");
+    CHECK_EQ(count, 0);
+
+    GUARD(e1, orca_physical_printer_upsert(presets, "Vyper", "not_a_host",
+                                           "http://192.168.1.5", "key", "Anycubic Vyper 0.4 nozzle"));
+    expect_code(e1, ORCA_STATUS_INVALID_ARGUMENT, "bad host type");
+    GUARD(e2, orca_physical_printer_upsert(presets, "Vyper", "octoprint",
+                                           "ftp://x", "key", "Anycubic Vyper 0.4 nozzle"));
+    expect_code(e2, ORCA_STATUS_INVALID_ARGUMENT, "non-http url");
+    GUARD(e3, orca_physical_printer_upsert(presets, "Vyper", "octoprint",
+                                           "http://192.168.1.5", "key", "__missing__"));
+    expect_code(e3, ORCA_STATUS_NOT_FOUND, "missing preset");
+
+    GUARD(g2, orca_physical_printer_upsert(presets, "Vyper", "octoprint",
+                                           "http://192.168.1.5", "secret", "Anycubic Vyper 0.4 nozzle"));
+    expect_ok(g2, "upsert");
+    GUARD(g3, orca_physical_printer_count(presets, &count));
+    expect_ok(g3, "count after upsert");
+    CHECK_EQ(count, 1);
+    orca_physical_printer entry;
+    GUARD(g4, orca_physical_printer_list(presets, 0, &entry));
+    expect_ok(g4, "list");
+    CHECK(strcmp(entry.name.data, "Vyper") == 0);
+    CHECK(strcmp(entry.host_type.data, "octoprint") == 0);
+    CHECK(strcmp(entry.url.data, "http://192.168.1.5") == 0);
+    CHECK(strcmp(entry.api_key.data, "secret") == 0);
+    CHECK(strcmp(entry.preset_names.data, "Anycubic Vyper 0.4 nozzle") == 0);
+    orca_physical_printer_dispose(&entry);
+
+    // update in place
+    GUARD(g5, orca_physical_printer_upsert(presets, "Vyper", "moonraker",
+                                           "http://192.168.1.9", "k2", "Anycubic Vyper 0.4 nozzle"));
+    expect_ok(g5, "upsert update");
+    GUARD(g6, orca_physical_printer_list(presets, 0, &entry));
+    expect_ok(g6, "list after update");
+    CHECK(strcmp(entry.host_type.data, "moonraker") == 0);
+    orca_physical_printer_dispose(&entry);
+    orca_presets_free(presets);
+
+    // persisted: a fresh session reloads it
+    orca_presets *fresh = nullptr;
+    GUARD(g7, orca_presets_new(data_dir.c_str(), &fresh));
+    expect_ok(g7, "presets_new fresh");
+    GUARD(g8, orca_physical_printer_count(fresh, &count));
+    expect_ok(g8, "count fresh");
+    CHECK_EQ(count, 1);
+    GUARD(g9, orca_physical_printer_list(fresh, 0, &entry));
+    expect_ok(g9, "list fresh");
+    CHECK(strcmp(entry.host_type.data, "moonraker") == 0);
+    orca_physical_printer_dispose(&entry);
+    GUARD(g10, orca_physical_printer_delete(fresh, "Vyper"));
+    expect_ok(g10, "delete");
+    GUARD(g11, orca_physical_printer_count(fresh, &count));
+    expect_ok(g11, "count after delete");
+    CHECK_EQ(count, 0);
+    GUARD(e4, orca_physical_printer_delete(fresh, "Vyper"));
+    expect_code(e4, ORCA_STATUS_NOT_FOUND, "delete missing");
+    orca_presets_free(fresh);
+}
+
 struct CancelOnProgress {
     orca_slice_job *job;
     std::atomic<int> calls{0};
@@ -2031,6 +2104,7 @@ int main() {
     test_slice_cancel(dir);
     test_project_roundtrip(dir, data_dir);
     test_user_presets(data_dir);
+    test_physical_printers(data_dir);
     test_arrange_orient(dir, data_dir);
     test_gcode_toolpath(dir);
 

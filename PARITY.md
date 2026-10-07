@@ -61,7 +61,7 @@ yet in `Bridge/engine-sources.sh`), **Client-reimpl** (desktop logic lives in
 | Compare presets | `UnsavedChangesDialog.hpp:408`, `Tab.cpp:6626` | none found | ❌ | UI (config_dump already exists) |
 | Save / rename / delete / detach user presets | `Tab.cpp:6663,6801`; `Preset.cpp:2865,2983`; `SavePresetDialog.cpp:135` | ABI v12 `orca_presets_save_user`/`delete_user` (desktop name rules, Orca filament scoping, `.info`, persisted + reloaded); `PresetActions.swift` menu + save sheet; user/project groups in pickers | ✅ (rename = save-as + delete) | — |
 | Unsaved-changes prompt when switching presets | `UnsavedChangesDialog.hpp:266` | `PrepareTabView.swift` confirmation (discard / keep editing; save via preset menu) | 🟡 no "transfer changes to new preset" | Bridge (apply dirty options onto new selection) |
-| Physical printers (host/URL) | `PhysicalPrinterDialog.hpp:27` | none found | ❌ | Bridge (`PhysicalPrinter` in Preset.cpp) — a Device-tab prerequisite |
+| Physical printers (host/URL) | `PhysicalPrinterDialog.hpp:27` | ABI v15 over the engine's `PhysicalPrinterCollection` (persisted JSON under `user/default/physical_machine`, reloaded each session); Device tab editor | ✅ | — |
 | Import / export configs, bundles | `MainFrame.cpp:2762,2804,3688,3723` | none found | ❌ | Bridge |
 | Resolved-config inspector | (no desktop equivalent) | `ResolvedConfigView.swift` | ✅ extra | — |
 
@@ -96,8 +96,8 @@ yet in `Bridge/engine-sources.sh`), **Client-reimpl** (desktop logic lives in
 
 | Feature | Desktop evidence | OrcaPad evidence | Status | Work |
 |---|---|---|---|---|
-| Device tab (printer web UI) | `PrinterWebView.hpp:37` | `DeviceTabView.swift` placeholder | ❌ | **Decision:** AGENTS.md bans WebView *UI*; embedding the printer's own page needs your OK |
-| Print hosts (OctoPrint, Moonraker, PrusaLink/Connect, Duet, Repetier, MKS, Elegoo, Flashforge, SimplyPrint, …) | `Utils/PrintHost.cpp:58-73`, `PrintConfig.hpp:80` | none found | ❌ | Client-reimpl (these are GUI-side libcurl HTTP; native URLSession) |
+| Device tab (printer web UI) | `PrinterWebView.hpp:37` | `DeviceTabView.swift`: native printer list + send; no embedded printer web page | 🟡 web UI pending your decision (AGENTS.md bans WebView UI) | — |
+| Print hosts (OctoPrint, Moonraker, PrusaLink/Connect, Duet, Repetier, MKS, Elegoo, Flashforge, SimplyPrint, …) | `Utils/PrintHost.cpp:58-73`, `PrintConfig.hpp:80` | `PrintHostService.swift` (URLSession, mirrors desktop's GUI-layer libcurl): OctoPrint `/api/files/local` + Moonraker `/server/files/upload`, upload + optional start print | 🟡 2 of 16 host types; others are typed rejections | Client-reimpl per host |
 | Bambu cloud/LAN monitor | `Monitor.cpp` | — | ➖ proprietary network plugin | — |
 | OBJ / AMF import | `Plater.cpp` load_files | ABI v10 `orca_plater_import_model` → `Model::read_from_file` | ✅ | — |
 | 3MF project load/save | `Plater.cpp:12102,12234,15551` | ABI v11 `orca_project_open` (model + embedded presets + `load_config_model` + plate type, atomic) / `orca_project_save` (`store_bbs_3mf`, `full_config_secure`); Plate ▸ File menu | ✅ single plate (multi-plate projects rejected loudly; no thumbnails yet) | — |
@@ -118,6 +118,6 @@ yet in `Bridge/engine-sources.sh`), **Client-reimpl** (desktop logic lives in
 4. ~~3MF load/save~~ ✅ done (ABI v10 import of STL/OBJ/AMF/3MF geometry; ABI v11 single-plate project open/save incl. presets + plate type). Follow-ups: multi-plate, project thumbnails.
 5. ~~User presets (C5b) + unsaved-changes prompt~~ ✅ done (ABI v12). Physical printers move to item 7 (print hosts).
 6. **Arrange / orient / lay-flat**: needs NLopt for Arrange; `Orient.cpp` is a small closure step; lay-flat is client logic on the v7 rotate.
-7. **Print host upload (Moonraker/OctoPrint/PrusaLink)**: native networking, needs the physical-printer model from item 5.
+7. ~~Print host upload~~ ✅ OctoPrint + Moonraker done (ABI v15 physical printers via the engine collection; other host types are typed rejections).
 8. **Preview ABI v8**: retract/seam/wipe markers, `actual_feedrate`/`layer_duration`/PA/accel/jerk, stealth time and filament statistics. These complete the Types.hpp scheme list.
 9. Object list volumes/modifiers, per-object settings, undo/redo, multi-plate: larger Bridge and client-reimpl work.

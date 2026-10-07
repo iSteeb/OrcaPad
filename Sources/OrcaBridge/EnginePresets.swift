@@ -415,6 +415,97 @@ public final class EnginePresets: @unchecked Sendable {
         return .success(())
     }
 
+    /// Desktop PhysicalPrinterDialog: one connected printer.
+    public struct PhysicalPrinterRecord: Sendable, Equatable {
+        public let name: String
+        /// Engine `host_type` enum value ("octoprint", "moonraker", …).
+        public let hostType: String
+        public let url: String
+        public let apiKey: String
+        /// Printer presets usable through this host.
+        public let presetNames: [String]
+
+        public init(
+            name: String, hostType: String, url: String, apiKey: String, presetNames: [String]
+        ) {
+            self.name = name
+            self.hostType = hostType
+            self.url = url
+            self.apiKey = apiKey
+            self.presetNames = presetNames
+        }
+    }
+
+    public func physicalPrinters() -> Result<[PhysicalPrinterRecord], BridgeError> {
+        let operation = "EnginePresets.physicalPrinters"
+        lock.lock(); defer { lock.unlock() }
+        guard let handle else { return .failure(invalidHandle(operation)) }
+        var count: Int32 = 0
+        if let error = bridgeFailure(operation: operation, call: {
+            orca_physical_printer_count(handle, &count)
+        }) {
+            return .failure(error)
+        }
+        var records: [PhysicalPrinterRecord] = []
+        for index in 0..<Int(count) {
+            var raw = orca_physical_printer()
+            if let error = bridgeFailure(operation: operation, call: {
+                orca_physical_printer_list(handle, Int32(index), &raw)
+            }) {
+                return .failure(error)
+            }
+            defer { orca_physical_printer_dispose(&raw) }
+            // Strings are consumed in place (reset to empty), so the deferred
+            // dispose never double-frees them.
+            let name: String, host: String, url: String, key: String, presets: String
+            switch (
+                consumeBridgeString(&raw.name, operation: operation),
+                consumeBridgeString(&raw.host_type, operation: operation),
+                consumeBridgeString(&raw.url, operation: operation),
+                consumeBridgeString(&raw.api_key, operation: operation),
+                consumeBridgeString(&raw.preset_names, operation: operation)
+            ) {
+            case (.success(let n), .success(let h), .success(let u), .success(let k), .success(let p)):
+                (name, host, url, key, presets) = (n, h, u, k, p)
+            case (.failure(let error), _, _, _, _), (_, .failure(let error), _, _, _),
+                 (_, _, .failure(let error), _, _), (_, _, _, .failure(let error), _),
+                 (_, _, _, _, .failure(let error)):
+                return .failure(error)
+            }
+            records.append(PhysicalPrinterRecord(
+                name: name, hostType: host, url: url, apiKey: key,
+                presetNames: presets.split(separator: "\n").map(String.init)
+            ))
+        }
+        return .success(records)
+    }
+
+    public func upsertPhysicalPrinter(
+        name: String, hostType: String, url: String, apiKey: String, presetName: String
+    ) -> Result<Void, BridgeError> {
+        let operation = "EnginePresets.upsertPhysicalPrinter"
+        lock.lock(); defer { lock.unlock() }
+        guard let handle else { return .failure(invalidHandle(operation)) }
+        if let error = bridgeFailure(operation: operation, call: {
+            orca_physical_printer_upsert(handle, name, hostType, url, apiKey, presetName)
+        }) {
+            return .failure(error)
+        }
+        return .success(())
+    }
+
+    public func deletePhysicalPrinter(name: String) -> Result<Void, BridgeError> {
+        let operation = "EnginePresets.deletePhysicalPrinter"
+        lock.lock(); defer { lock.unlock() }
+        guard let handle else { return .failure(invalidHandle(operation)) }
+        if let error = bridgeFailure(operation: operation, call: {
+            orca_physical_printer_delete(handle, name)
+        }) {
+            return .failure(error)
+        }
+        return .success(())
+    }
+
     /// Desktop "Delete preset" (user presets only).
     public func deleteUser(kind: PresetKind, name: String) -> Result<Void, BridgeError> {
         let operation = "EnginePresets.deleteUser"

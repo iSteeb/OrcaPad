@@ -7,7 +7,7 @@ extern "C" {
 #endif
 
 /// Version of the C ABI contract in this header. Callers verify it at runtime.
-#define ORCA_BRIDGE_ABI_VERSION ((uint32_t)14)
+#define ORCA_BRIDGE_ABI_VERSION ((uint32_t)15)
 
 typedef int32_t orca_status_code;
 #define ORCA_STATUS_OK                     ((orca_status_code)0)
@@ -213,6 +213,30 @@ orca_result orca_presets_save_user(orca_presets *presets, int32_t kind,
 /// ORCA_STATUS_INVALID_CONFIGURATION.
 orca_result orca_presets_delete_user(orca_presets *presets, int32_t kind,
                                      const char *name);
+
+/// Physical printers (desktop PhysicalPrinterDialog / Device tab): persisted
+/// through the engine's own PhysicalPrinterCollection as JSON under
+/// <data_dir>/user/default/physical_machine. `host_type` is one of the
+/// engine's `print_host_type` enum values ("octoprint", "moonraker", …).
+typedef struct {
+    orca_owned_string name;
+    orca_owned_string host_type;
+    orca_owned_string url;          // print_host, e.g. http://192.168.1.2
+    orca_owned_string api_key;      // printhost_apikey
+    orca_owned_string preset_names; // '\n'-joined printer presets
+} orca_physical_printer;
+void orca_physical_printer_dispose(orca_physical_printer *printer);
+
+orca_result orca_physical_printer_count(orca_presets *presets, int32_t *out_count);
+orca_result orca_physical_printer_list(orca_presets *presets, int32_t index,
+                                       orca_physical_printer *out_printer);
+/// Creates or updates the physical printer `name` and ties it to printer
+/// preset `preset_name`. Rejects unknown host types and non-http(s) URLs.
+orca_result orca_physical_printer_upsert(orca_presets *presets, const char *name,
+                                         const char *host_type, const char *url,
+                                         const char *api_key,
+                                         const char *preset_name);
+orca_result orca_physical_printer_delete(orca_presets *presets, const char *name);
 
 /// Plate (bed) type state — desktop sidebar "plate type" parity. Values are
 /// the engine's `Slic3r::BedType` (1 = Cool Plate … btCount-1); slicing reads
