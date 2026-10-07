@@ -3,8 +3,56 @@ import Observation
 import OrcaBridge
 import simd
 
-/// Loads and holds the parsed toolpath for the Preview tab. The C++ document
-/// stays untouched: this is a derived, read-only view of a sliced file.
+/// How toolpath segments are colored (desktop "color scheme" parity).
+enum ToolpathColorMode: String, CaseIterable, Identifiable, Sendable {
+    case feature = "Line Type"
+    case speed = "Speed"
+    case layerHeight = "Layer Height"
+    case lineWidth = "Line Width"
+
+    var id: String { rawValue }
+
+    var unit: String {
+        switch self {
+        case .feature: return ""
+        case .speed: return "mm/s"
+        case .layerHeight, .lineWidth: return "mm"
+        }
+    }
+}
+
+/// Engine ExtrusionRole display names (values are the engine's own enum —
+/// see orca_bridge.h; never libvgcode's ordering).
+enum ToolpathRole {
+    static func name(_ role: UInt8) -> String {
+        switch role {
+        case 1: return "Inner wall"
+        case 2: return "Outer wall"
+        case 3: return "Overhang wall"
+        case 4: return "Sparse infill"
+        case 5: return "Internal solid infill"
+        case 6: return "Top surface"
+        case 7: return "Bottom surface"
+        case 8: return "Ironing"
+        case 9: return "Bridge"
+        case 10: return "Internal bridge"
+        case 11: return "Gap infill"
+        case 12: return "Skirt"
+        case 13: return "Brim"
+        case 14: return "Support"
+        case 15: return "Support interface"
+        case 16: return "Support transition"
+        case 17: return "Prime tower"
+        case 18: return "Custom"
+        case 19: return "Multiple"
+        default: return "Undefined"
+        }
+    }
+}
+
+/// Loads and holds the parsed toolpath plus the Preview tab's view state
+/// (layer range, in-layer progress, color mode, visibility filters). A
+/// derived, read-only view of a sliced file — the C++ document is untouched.
 @MainActor
 @Observable
 final class GcodePreviewStore {
@@ -15,39 +63,58 @@ final class GcodePreviewStore {
         case failed(AppFailure)
     }
 
+    struct RoleSummary: Identifiable, Sendable {
+        let role: UInt8
+        let segmentCount: Int
+        var id: UInt8 { role }
+    }
+
     private(set) var phase: Phase = .idle
     private(set) var toolpath: GcodeToolpath?
-    /// Number of layers currently visible (slider-driven, 0...layerCount).
-    private(set) var visibleLayers: Int = 0
-    /// Bounds of the whole toolpath in engine coordinates.
+    private(set) var loadedPath: String?
     private(set) var boundsMin: SIMD3<Float> = .zero
     private(set) var boundsMax: SIMD3<Float> = .zero
+    private(set) var roles: [RoleSummary] = []
+    private(set) var feedrateRange: ClosedRange<Float> = 0...1
+    private(set) var heightRange: ClosedRange<Float> = 0...1
+    private(set) var widthRange: ClosedRange<Float> = 0...1
+
+    // View state (desktop: vertical layer range slider + horizontal move bar)
+    private(set) var lowerLayer = 0
+    private(set) var upperLayer = 0
+    private(set) var topLayerProgress = 0
+    var colorMode: ToolpathColorMode = .feature
+    var hiddenRoles: Set<UInt8> = []
+    var showTravel = false
 
     private var isLoading = false
-    private var loadedPath: String?
 
     var layerCount: Int { toolpath?.layers.count ?? 0 }
 
-    var visibleSegmentCount: Int {
-        guard let toolpath, visibleLayers > 0,
-              visibleLayers <= toolpath.layers.count else { return 0 }
-        let layer = toolpath.layers[visibleLayers - 1]
-        return layer.firstSegment + layer.segmentCount
+    var topLayerSegmentCount: Int {
+        guard let toolpath, upperLayer < toolpath.layers.count else { return 0 }
+        return toolpath.layers[upperLayer].segmentCount
     }
 
-    var currentLayer: ToolpathLayer? {
-        guard let toolpath, visibleLayers > 0,
-              visibleLayers <= toolpath.layers.count else { return nil }
-        return toolpath.layers[visibleLayers - 1]
+    func layer(at index: Int) -> ToolpathLayer? {
+        guard let toolpath, index >= 0, index < toolpath.layers.count else { return nil }
+        return toolpath.layers[index]
     }
 
+    /// The segment the "tool head" is at (end of the in-layer progress).
+    var toolSegment: ToolpathSegment? {
+        guard let toolpath, let layer = layer(at: upperLayer),
+              topLayerProgress > 0 else { return nil }
+        let index = layer.firstSegment + topLayerProgress - 1
+        guard index < toolpath.segments.count else { return nil }
+        return toolpath.segments[index]
+    }
+
+    /// Estimated time remaining after the visible top layer.
     var remainingSeconds: Float {
-        guard let toolpath, visibleLayers > 0,
-              visibleLayers <= toolpath.layers.count else {
-            return toolpath?.estimatedSeconds ?? 0
-        }
+        guard let toolpath else { return 0 }
         var remaining: Float = 0
-        for index in visibleLayers..<toolpath.layers.count {
+        for index in (upperLayer + 1)..<max(upperLayer + 1, toolpath.layers.count) {
             remaining += toolpath.layers[index].timeSeconds
         }
         return remaining
@@ -63,28 +130,69 @@ final class GcodePreviewStore {
         isLoading = false
         switch result {
         case .success(let toolpath):
-            self.toolpath = toolpath
-            loadedPath = url.path
-            var minimum = SIMD3<Float>(repeating: .infinity)
-            var maximum = SIMD3<Float>(repeating: -.infinity)
-            for segment in toolpath.segments {
-                minimum = simd_min(minimum, segment.start)
-                minimum = simd_min(minimum, segment.end)
-                maximum = simd_max(maximum, segment.start)
-                maximum = simd_max(maximum, segment.end)
-            }
-            boundsMin = minimum
-            boundsMax = maximum
-            visibleLayers = toolpath.layers.count
-            phase = .ready
+            install(toolpath, path: url.path)
         case .failure(let failure):
             phase = .failed(failure)
         }
     }
 
-    func setVisibleLayers(_ count: Int) {
-        guard let toolpath else { return }
-        visibleLayers = min(max(count, 0), toolpath.layers.count)
+    private func install(_ toolpath: GcodeToolpath, path: String) {
+        var minimum = SIMD3<Float>(repeating: .infinity)
+        var maximum = SIMD3<Float>(repeating: -.infinity)
+        var roleCounts: [UInt8: Int] = [:]
+        var feed = (Float.infinity, -Float.infinity)
+        var height = (Float.infinity, -Float.infinity)
+        var width = (Float.infinity, -Float.infinity)
+        for segment in toolpath.segments {
+            minimum = simd_min(minimum, simd_min(segment.start, segment.end))
+            maximum = simd_max(maximum, simd_max(segment.start, segment.end))
+            guard segment.isExtrusion else { continue }
+            roleCounts[segment.role, default: 0] += 1
+            feed = (min(feed.0, segment.feedrate), max(feed.1, segment.feedrate))
+            height = (min(height.0, segment.height), max(height.1, segment.height))
+            width = (min(width.0, segment.width), max(width.1, segment.width))
+        }
+        func range(_ pair: (Float, Float)) -> ClosedRange<Float> {
+            guard pair.0.isFinite, pair.1.isFinite, pair.1 >= pair.0 else { return 0...1 }
+            return pair.0...max(pair.1, pair.0 + 0.0001)
+        }
+        self.toolpath = toolpath
+        loadedPath = path
+        boundsMin = minimum
+        boundsMax = maximum
+        roles = roleCounts
+            .map { RoleSummary(role: $0.key, segmentCount: $0.value) }
+            .sorted { $0.role < $1.role }
+        feedrateRange = range(feed)
+        heightRange = range(height)
+        widthRange = range(width)
+        hiddenRoles = []
+        lowerLayer = 0
+        upperLayer = max(toolpath.layers.count - 1, 0)
+        topLayerProgress = topLayerSegmentCount
+        phase = .ready
+    }
+
+    func setLayerRange(lower: Int, upper: Int) {
+        let last = max(layerCount - 1, 0)
+        let clampedUpper = min(max(upper, 0), last)
+        let clampedLower = min(max(lower, 0), clampedUpper)
+        let upperChanged = clampedUpper != upperLayer
+        lowerLayer = clampedLower
+        upperLayer = clampedUpper
+        if upperChanged { topLayerProgress = topLayerSegmentCount }
+    }
+
+    func setTopLayerProgress(_ progress: Int) {
+        topLayerProgress = min(max(progress, 0), topLayerSegmentCount)
+    }
+
+    func toggleRole(_ role: UInt8) {
+        if hiddenRoles.contains(role) {
+            hiddenRoles.remove(role)
+        } else {
+            hiddenRoles.insert(role)
+        }
     }
 }
 
