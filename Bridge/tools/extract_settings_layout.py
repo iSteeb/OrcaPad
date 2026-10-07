@@ -18,6 +18,9 @@ The parser understands the constructs Tab.cpp actually uses:
 Keys missing from print_config_def (GUI-only legends) are dropped and
 reported. Options a preset defines but the layout omits are surfaced by the
 client under a trailing "Other" page, so nothing is ever hidden.
+
+--check: extract into memory and fail (exit 1) when the committed output
+differs, without writing (used by Bridge/tools/parity-check.py).
 """
 import json
 import re
@@ -202,10 +205,18 @@ def main() -> int:
         print(f"FATAL: layout extraction looks broken: {counts}", file=sys.stderr)
         return 1
 
-    OUT.write_text(json.dumps({
+    rendered = json.dumps({
         "source": "upstream/orcaslicer/src/slic3r/GUI/Tab.cpp (pinned v2.4.2)",
         "layout": layout,
-    }, indent=1) + "\n")
+    }, indent=1) + "\n"
+    if "--check" in sys.argv[1:]:
+        if not OUT.exists() or OUT.read_text() != rendered:
+            print(f"FATAL: {OUT.relative_to(ROOT)} is stale vs Tab.cpp; rerun "
+                  "Bridge/tools/extract_settings_layout.py", file=sys.stderr)
+            return 1
+        print(f"layout current: {counts}")
+        return 0
+    OUT.write_text(rendered)
     print(f"layout ok: {counts}; dropped GUI-only keys: {sorted(dropped)}")
     return 0
 

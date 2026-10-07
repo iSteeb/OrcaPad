@@ -46,6 +46,10 @@ Bridge/build-host-tests.sh  compiles the SAME closure for the Linux host and
                             RUNS the contract tests (asserts enabled)
 Bridge/tools/contract_tests.cpp      C ABI + engine contract test suite
 Bridge/tools/architecture-audit.sh   static boundary audit (no build)
+Bridge/tools/parity-check.py         desktop-parity checker: extracts the desktop
+                            feature surface from upstream, verifies the
+                            manifest's OrcaPad evidence, generates PARITY.md
+Bridge/tools/parity-manifest.toml    THE feature-status source of truth
 Prebuilt/OrcaBridgeCore.xcframework  shipped binary — regenerated, never edited
 Sources/OrcaBridge/         Swift facade; the ONLY raw-ABI consumer
 Sources/OrcaPad/App/        AppEnvironment (process-lifetime owner), StatusCenter,
@@ -138,7 +142,8 @@ contract test literal in the same commit)**
 | `Sources/OrcaPad` (Swift client / viewer) | `xtool dev build`; device run for UI/gesture paths |
 | Upstream pin change, or `Bridge/tools/extract_config.cpp` | after host tests: `./Bridge/tools/build-extract-config.sh` (regenerates the committed `Resources/config-schema.json`) |
 | Contract-adjacent docs (`ARCHITECTURE.md`, this file) | nothing — but keep the tables truthful |
-| **Before every commit, any change** | `./Bridge/tools/architecture-audit.sh` |
+| A feature lands or changes status (any layer) | update `Bridge/tools/parity-manifest.toml` (status + evidence), then `./Bridge/tools/parity-check.py --write` |
+| **Before every commit, any change** | `./Bridge/tools/architecture-audit.sh` and `./Bridge/tools/parity-check.py --check` |
 
 Ground rules for the matrix:
 
@@ -155,6 +160,10 @@ Ground rules for the matrix:
 - A red contract test or audit is a commit blocker; fix the cause, never the
   assertion, unless the contract itself changed (then update the test AND
   `ARCHITECTURE.md` in the same change).
+- `PARITY.md` is GENERATED from `Bridge/tools/parity-manifest.toml`; never
+  edit it by hand. A red parity check is a commit blocker: an unclaimed or
+  orphan item means the pinned upstream surface moved (re-map it), stale
+  evidence means a claim no longer holds (fix the code or the status).
 - Device verification (import → transform → preset select → slice → G-code in
   Files) remains the acceptance loop for Gate A; host tests do not replace it.
 

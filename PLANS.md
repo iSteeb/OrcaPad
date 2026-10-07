@@ -86,8 +86,10 @@ Device, each tab a clean feature module over the same stores.
       formats (v10), 3MF projects (v11), preview v14 (markers, all schemes,
       filament totals), physical printers + OctoPrint/Moonraker upload (v15),
       G-code/3MF thumbnails (v16) — see PARITY.md
-- [ ] Parity backlog: PARITY.md "Remaining work" (unblocked list + blocked
-      decisions)
+- [x] Programmatic parity checker (`Bridge/tools/parity-check.py`): desktop
+      surface extracted from upstream (551 items, 14 surfaces), manifest
+      evidence verified, PARITY.md generated + commit-gated
+- [ ] Parity backlog: generated PARITY.md "Remaining work" (priority order)
 - [ ] Device tab: printer web UI — allowed by user 2026-10-07 (scoped
       AGENTS.md exception: the printer's OWN web page, desktop
       PrinterWebView parity); not built yet

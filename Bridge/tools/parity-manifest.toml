@@ -1,0 +1,1546 @@
+# OrcaPad desktop-parity manifest: the single source of truth for feature
+# status. Bridge/tools/parity-check.py extracts the desktop surface from the
+# pinned upstream sources and requires every extracted item to be claimed by
+# exactly one feature below; done/partial evidence is verified against the
+# code; PARITY.md is generated from this file (--write) and checked (--check).
+#
+# Feature fields:
+#   id        area.slug (unique)            area     plate|prepare|preview|device|files|app
+#   title     human name                    status   done|partial|missing|deferred|na
+#   desktop   extracted item ids claimed    source   "upstream-path:regex" anchor when the
+#                                                    desktop feature has no extracted item
+#   evidence  OrcaPad proof, all must hold:
+#               abi:orca_fn     header decl + Bridge def + facade use + contract test
+#               client:REGEX    Sources/OrcaPad/**/*.swift
+#               facade:REGEX    Sources/OrcaBridge/*.swift
+#               bridge:REGEX    Bridge/engine-cxx/*
+#               tests:REGEX     Bridge/tools/contract_tests.cpp
+#               plist:REGEX     App-Info.plist
+#               resource:PATH   Sources/OrcaPad/Resources/PATH exists
+#   gap       what a partial feature lacks  work     UI|Bridge|Closure|Client-reimpl (joined by +)
+#   priority  remaining-work order (lower first)
+#   reason    why na / deferred             note     free text
+#
+# Keyboard shortcuts are claimed by the keyboard features (app/plate/preview
+# .keyboard) rather than by the feature they trigger: a touch implementation
+# does not satisfy a hardware-keyboard shortcut.
+
+[meta]
+title = "OrcaPad \u2194 OrcaSlicer desktop parity"
+intro = """
+Remaining work is ordered by the user's 2026-10-07 sequence: Device printer
+web UI, then plate/object editing, prepare/presets/settings, Files
+integration, and preview. Deferred by the user (2026-10-07): STEP/SVG import,
+Draco, the calibration menu and mesh boolean; AGENTS.md defers the painting
+tools until the core loop ships.
+"""
+
+# =========================================================================
+# Plate / 3D editor
+# =========================================================================
+
+[[feature]]
+id = "plate.import"
+area = "plate"
+title = "Import models (STL, OBJ, AMF, 3MF geometry; multi-object)"
+status = "done"
+desktop = ["menu:Import", "menu:Import 3MF/STL/STEP/SVG/OBJ/AMF", "toolbar:add", "context:Add Models",
+           "format:FT_STL", "format:FT_OBJ", "format:FT_AMF", "format:FT_3MF", "format:FT_MODEL"]
+evidence = ["abi:orca_plater_import_model", 'client:func importModel\(']
+note = "STEP/SVG/DRC are plate.import-cad"
+
+[[feature]]
+id = "plate.import-cad"
+area = "plate"
+title = "STEP / SVG / Draco import"
+status = "deferred"
+desktop = ["format:FT_STEP", "format:FT_SVG", "format:FT_DRC", "pref:Show options when importing STEP file"]
+work = "Closure"
+reason = "deferred by user 2026-10-07: STEP/SVG need OpenCASCADE, DRC needs draco in the closure"
+
+[[feature]]
+id = "plate.delete"
+area = "plate"
+title = "Delete selected / delete all"
+status = "partial"
+desktop = ["menu:Delete selected", "menu:Delete all", "context:Delete", "context:Delete All"]
+evidence = ["abi:orca_plater_object_delete", 'client:func deleteObjects\(']
+gap = "no Delete all command; deletes act on the single selection or the object list"
+work = "UI"
+priority = 14
+
+[[feature]]
+id = "plate.instances"
+area = "plate"
+title = "Add / remove instances (more / fewer)"
+status = "done"
+desktop = ["toolbar:more", "toolbar:fewer", "context:Add instance", "context:Remove instance"]
+evidence = ["abi:orca_plater_instance_add", "abi:orca_plater_instance_delete", 'client:func addInstance\(']
+
+[[feature]]
+id = "plate.instance-count"
+area = "plate"
+title = "Set number of instances"
+status = "missing"
+desktop = ["context:Set number of instances"]
+work = "UI"
+priority = 15
+
+[[feature]]
+id = "plate.clone"
+area = "plate"
+title = "Clone selected (N copies as objects, optional arrange)"
+status = "missing"
+desktop = ["menu:Clone selected", "context:Clone", "dialog:CloneDialog", "pref:Auto arrange plate after cloning"]
+work = "Bridge + UI"
+priority = 16
+
+[[feature]]
+id = "plate.selection"
+area = "plate"
+title = "Tap selection / deselect"
+status = "done"
+desktop = ["menu:Deselect all"]
+evidence = ['client:func select\(objectID: ObjectID\?', "client:func pick"]
+
+[[feature]]
+id = "plate.multi-select"
+area = "plate"
+title = "Multi-select, rectangle select, select all"
+status = "missing"
+desktop = ["menu:Select all", "context:Select All", "kb:Select multiple objects", "kb:Select objects by rectangle"]
+work = "UI + Bridge"
+priority = 7
+
+[[feature]]
+id = "plate.move"
+area = "plate"
+title = "Move gizmo + panel"
+status = "partial"
+desktop = ["gizmo:Move"]
+evidence = ["abi:orca_plater_instance_set", "client:private var movePanel"]
+gap = "X/Y only: Z and the world/object coordinate switch are omitted (the engine rests objects on the bed; user decision)"
+work = "UI"
+priority = 30
+
+[[feature]]
+id = "plate.rotate"
+area = "plate"
+title = "Rotate gizmo + panel"
+status = "partial"
+desktop = ["gizmo:Rotate"]
+evidence = ["abi:orca_plater_instance_rotate", "client:struct RotatePanel"]
+gap = "one ring at a time, fixed 5\u00b0 snap (no fine 1\u00b0 zone), no free-angle relative entry"
+work = "UI"
+priority = 11
+
+[[feature]]
+id = "plate.scale"
+area = "plate"
+title = "Scale gizmo + panel"
+status = "partial"
+desktop = ["gizmo:Scale"]
+evidence = ["client:struct ScalePanel", "abi:orca_plater_instance_set"]
+gap = "on-canvas handles are uniform only (the panel has per-axis scale and size)"
+work = "UI"
+priority = 12
+
+[[feature]]
+id = "plate.scale-to-fit"
+area = "plate"
+title = "Scale to build volume"
+status = "missing"
+desktop = ["context:Scale to build volume"]
+work = "Bridge"
+priority = 17
+
+[[feature]]
+id = "plate.lay-flat"
+area = "plate"
+title = "Lay on face (Flatten)"
+status = "partial"
+desktop = ["gizmo:Flatten"]
+evidence = ["abi:orca_plater_instance_lay_flat", 'client:func layFlatSelected\(']
+gap = "taps any facet; no convex-hull plane grouping/highlighting"
+work = "Bridge + UI"
+priority = 13
+
+[[feature]]
+id = "plate.arrange"
+area = "plate"
+title = "Arrange"
+status = "done"
+desktop = ["toolbar:arrange", "context:Arrange", "plate:Arrange objects on current plate"]
+evidence = ["abi:orca_plater_arrange", 'client:func arrangeAll\(']
+note = "single plate: overflow is parked beside the bed until plate.multi-plate"
+
+[[feature]]
+id = "plate.orient"
+area = "plate"
+title = "Auto-orient"
+status = "done"
+desktop = ["toolbar:orient", "context:Auto orientation", "context:Auto Rotate", "plate:Auto orient objects on current plate"]
+evidence = ["abi:orca_plater_orient", 'client:func orientAll\(']
+
+[[feature]]
+id = "plate.center"
+area = "plate"
+title = "Center on bed"
+status = "done"
+desktop = ["context:Center"]
+evidence = ["client:Center on bed"]
+
+[[feature]]
+id = "plate.drop"
+area = "plate"
+title = "Drop to bed / auto drop"
+status = "partial"
+desktop = ["context:Drop", "context:Auto Drop"]
+evidence = ["abi:orca_plater_ensure_on_bed"]
+gap = "objects always rest on the bed; no toggle to keep an object floating"
+work = "Bridge + UI"
+priority = 31
+
+[[feature]]
+id = "plate.split"
+area = "plate"
+title = "Split to objects / parts"
+status = "missing"
+desktop = ["toolbar:splitobjects", "toolbar:splitvolumes", "context:Split", "context:To objects", "context:To parts"]
+work = "Bridge + UI"
+priority = 2
+note = "ModelObject::split / ModelVolume::split are compiled"
+
+[[feature]]
+id = "plate.merge"
+area = "plate"
+title = "Assemble objects into one multi-part object"
+status = "missing"
+desktop = ["context:Assemble"]
+work = "Bridge"
+priority = 18
+
+[[feature]]
+id = "plate.mirror"
+area = "plate"
+title = "Mirror (X / Y / Z)"
+status = "missing"
+desktop = ["context:Mirror", "context:Along X axis", "context:Along Y axis", "context:Along Z axis"]
+work = "Bridge + UI"
+priority = 6
+note = "snapshot contract rejects left-handed instances today; renderer needs winding flip"
+
+[[feature]]
+id = "plate.undo-redo"
+area = "plate"
+title = "Undo / redo"
+status = "missing"
+desktop = ["menu:Undo", "menu:Redo"]
+source = "src/slic3r/Utils/UndoRedo.hpp:class Stack"
+work = "Bridge + UI"
+priority = 1
+
+[[feature]]
+id = "plate.copy-paste"
+area = "plate"
+title = "Cut / copy / paste objects"
+status = "missing"
+desktop = ["menu:Copy", "menu:Paste", "menu:Cut"]
+work = "Bridge + UI"
+priority = 8
+
+[[feature]]
+id = "plate.object-list"
+area = "plate"
+title = "Object list"
+status = "partial"
+source = "src/slic3r/GUI/GUI_ObjectList.hpp:class ObjectList\\b"
+evidence = ["client:private var objectsList"]
+gap = "objects only: no parts/modifiers tree, per-object settings or rename"
+work = "UI + Bridge"
+priority = 3
+
+[[feature]]
+id = "plate.rename"
+area = "plate"
+title = "Rename object"
+status = "missing"
+desktop = ["context:Rename", "kb:Select the object/part and mouse click to change the name"]
+work = "Bridge + UI"
+priority = 3
+
+[[feature]]
+id = "plate.parts-modifiers"
+area = "plate"
+title = "Parts, modifiers, negative volumes, support blockers/enforcers"
+status = "missing"
+desktop = ["context:{_(item.first)}@append_menu_items_add_volume", "context:Load...", "context:Change type",
+           "context:{info.label}@append_menu_item_change_type", "kb:Select a part"]
+work = "Bridge + UI"
+priority = 4
+note = "ModelVolumeType is engine data; multi-volume rendering needed"
+
+[[feature]]
+id = "plate.primitives"
+area = "plate"
+title = "Add primitive (cube, cylinder, sphere, cone, disc, torus)"
+status = "missing"
+desktop = ["context:Add Primitive", "context:Cube", "context:Cylinder", "context:Sphere", "context:Cone",
+           "context:Disc", "context:Torus"]
+work = "Bridge + UI"
+priority = 19
+
+[[feature]]
+id = "plate.handy-models"
+area = "plate"
+title = "Handy models (bundled test models)"
+status = "missing"
+desktop = ["context:Add Handy models", "context:{_(model.label)}@append_submenu_add_handy_model", "format:FT_GALLERY"]
+work = "UI"
+priority = 32
+
+[[feature]]
+id = "plate.height-range"
+area = "plate"
+title = "Height range modifiers (layer config ranges)"
+status = "missing"
+desktop = ["context:Height range Modifier"]
+work = "Bridge + UI"
+priority = 20
+
+[[feature]]
+id = "plate.per-object-settings"
+area = "plate"
+title = "Per-object / per-part process settings"
+status = "missing"
+desktop = ["context:Edit Process Settings", "context:Copy Process Settings", "context:Paste Process Settings",
+           "context:Edit in Parameter Table", "dialog:ObjectTableDialog",
+           "context:{_(cat.first)}@create_settings_popupmenu",
+           "context:{_(category.first)}@create_freq_settings_popupmenu"]
+work = "Bridge + UI"
+priority = 5
+
+[[feature]]
+id = "plate.object-filament"
+area = "plate"
+title = "Assign filament to object / part"
+status = "missing"
+desktop = ["context:Change filament", "context:Change Filament",
+           "context:{item_name}@append_menu_item_change_extruder",
+           "context:{item_name}@append_menu_item_change_filament"]
+work = "Bridge + UI"
+priority = 25
+note = "needs prepare.multi-filament"
+
+[[feature]]
+id = "plate.printable"
+area = "plate"
+title = "Printable toggle"
+status = "missing"
+desktop = ["context:Printable"]
+work = "Bridge + UI"
+priority = 21
+
+[[feature]]
+id = "plate.visibility"
+area = "plate"
+title = "Hide / show parts"
+status = "missing"
+desktop = ["context:Hide"]
+work = "UI"
+priority = 33
+
+[[feature]]
+id = "plate.instance-to-object"
+area = "plate"
+title = "Set instance as an individual object"
+status = "missing"
+desktop = ["context:Set as an individual object"]
+work = "Bridge"
+priority = 22
+
+[[feature]]
+id = "plate.fill-bed"
+area = "plate"
+title = "Fill bed with copies / instances"
+status = "missing"
+desktop = ["context:Fill bed with copies", "context:Fill bed with instances"]
+work = "Bridge + UI"
+priority = 23
+
+[[feature]]
+id = "plate.flush-options"
+area = "plate"
+title = "Flush into infill / support / object"
+status = "missing"
+desktop = ["context:Flush into objects' infill", "context:Flush into objects' support", "context:Flush into this object"]
+work = "Bridge + UI"
+priority = 26
+note = "multi-material; per-object flush_into_* options"
+
+[[feature]]
+id = "plate.convert-units"
+area = "plate"
+title = "Convert units (inch / metre)"
+status = "missing"
+desktop = ["context:{item.second}@append_menu_items_convert_unit"]
+work = "Bridge + UI"
+priority = 34
+
+[[feature]]
+id = "plate.reload"
+area = "plate"
+title = "Reload from disk / replace model"
+status = "missing"
+desktop = ["context:Reload from disk", "context:Reload All", "context:Replace 3D file", "context:Replace all with 3D files"]
+work = "Bridge + UI"
+priority = 35
+note = "needs security-scoped bookmarks to the original files"
+
+[[feature]]
+id = "plate.cut"
+area = "plate"
+title = "Cut tool"
+status = "missing"
+desktop = ["gizmo:Cut", "context:Invalidate cut info"]
+work = "Closure + UI"
+priority = 24
+note = "CutUtils.cpp has no exotic dependencies"
+
+[[feature]]
+id = "plate.simplify"
+area = "plate"
+title = "Simplify mesh"
+status = "missing"
+desktop = ["gizmo:Simplify", "context:Simplify Model"]
+work = "Closure + UI"
+priority = 27
+
+[[feature]]
+id = "plate.subdivide"
+area = "plate"
+title = "Subdivide (smooth) mesh"
+status = "missing"
+desktop = ["context:Subdivision mesh"]
+work = "Closure + UI"
+priority = 36
+
+[[feature]]
+id = "plate.measure"
+area = "plate"
+title = "Measure tool"
+status = "missing"
+desktop = ["gizmo:Measure"]
+work = "Closure + UI"
+priority = 28
+
+[[feature]]
+id = "plate.assembly"
+area = "plate"
+title = "Assembly view / assemble gizmo"
+status = "missing"
+desktop = ["gizmo:Assembly", "toolbar:assembly_view"]
+work = "Closure + UI"
+priority = 37
+
+[[feature]]
+id = "plate.brim-ears"
+area = "plate"
+title = "Brim ears"
+status = "missing"
+desktop = ["gizmo:BrimEars"]
+work = "Bridge + UI"
+priority = 38
+
+[[feature]]
+id = "plate.text-emboss"
+area = "plate"
+title = "Text emboss / engrave"
+status = "missing"
+desktop = ["gizmo:Emboss", "context:Edit text", "context:{item_name}@append_menu_itemm_add_"]
+work = "Bridge + UI"
+priority = 39
+note = "Emboss.cpp is compiled; needs iOS font access"
+
+[[feature]]
+id = "plate.svg-part"
+area = "plate"
+title = "SVG emboss part"
+status = "missing"
+desktop = ["gizmo:Svg", "context:Edit SVG"]
+work = "Bridge + UI"
+priority = 40
+note = "NSVGUtils + Emboss are compiled (no OCCT needed for SVG parts)"
+
+[[feature]]
+id = "plate.variable-layer-height"
+area = "plate"
+title = "Variable layer height"
+status = "missing"
+desktop = ["toolbar:layersediting"]
+work = "Bridge + UI"
+priority = 29
+note = "SlicingAdaptive.cpp is compiled"
+
+[[feature]]
+id = "plate.mesh-boolean"
+area = "plate"
+title = "Mesh boolean"
+status = "deferred"
+desktop = ["gizmo:MeshBoolean", "context:Mesh boolean"]
+work = "Closure"
+reason = "deferred by user 2026-10-07 (CGAL PMP / mcut closure)"
+
+[[feature]]
+id = "plate.fix-model"
+area = "plate"
+title = "Fix model (mesh repair)"
+status = "deferred"
+desktop = ["context:Fix model"]
+work = "Closure"
+reason = "uses the CGAL repair closure deferred with mesh boolean (user, 2026-10-07)"
+
+[[feature]]
+id = "plate.paint-supports"
+area = "plate"
+title = "Support painting"
+status = "deferred"
+desktop = ["gizmo:FdmSupports", "kb:Support/Color Painting: adjust pen radius",
+           "kb:Support/Color Painting: adjust section position", "pref:Keep painted feature after mesh change"]
+work = "Bridge + UI"
+reason = "AGENTS.md: painting tools wait until the core loop ships (TriangleSelector.cpp is compiled)"
+
+[[feature]]
+id = "plate.paint-seam"
+area = "plate"
+title = "Seam painting"
+status = "deferred"
+desktop = ["gizmo:Seam"]
+work = "Bridge + UI"
+reason = "AGENTS.md: painting tools wait until the core loop ships"
+
+[[feature]]
+id = "plate.paint-fuzzy-skin"
+area = "plate"
+title = "Fuzzy-skin painting"
+status = "deferred"
+desktop = ["gizmo:FuzzySkin"]
+work = "Bridge + UI"
+reason = "AGENTS.md: painting tools wait until the core loop ships"
+
+[[feature]]
+id = "plate.paint-mmu"
+area = "plate"
+title = "Multi-material (color) painting"
+status = "deferred"
+desktop = ["gizmo:MmSegmentation"]
+work = "Bridge + UI"
+reason = "AGENTS.md: MMU segmentation waits until the core loop ships"
+
+[[feature]]
+id = "plate.sla"
+area = "plate"
+title = "SLA support points / SLA archives"
+status = "na"
+desktop = ["kb:Gizmo SLA support points", "dialog:SlaGizmoHelpDialog", "dialog:SLAImportDialog", "format:FT_SL1"]
+reason = "SLA remnants; OrcaSlicer ships FFF only"
+
+[[feature]]
+id = "plate.multi-plate"
+area = "plate"
+title = "Multiple plates (add / delete / select / lock / name / reorder / duplicate)"
+status = "missing"
+desktop = ["toolbar:addplate", "plate:Remove current plate (if not last one)", "plate:Lock current plate",
+           "plate:Unlock current plate", "plate:Edit current plate name", "plate:Move plate to the front",
+           "menu:Duplicate Current Plate", "context:Delete Plate", "context:Edit Plate Name", "context:Unlock",
+           "context:Select All Plates", "dialog:PlateNameEditDialog"]
+work = "Client-reimpl + Bridge"
+priority = 10
+note = "PartPlate is GUI code; also completes arrange overflow and multi-plate 3MF"
+
+[[feature]]
+id = "plate.plate-settings"
+area = "plate"
+title = "Per-plate settings (bed type, print sequence, spiral, first-layer order)"
+status = "missing"
+desktop = ["plate:Customize current plate", "dialog:PlateSettingsDialog"]
+work = "Client-reimpl + Bridge"
+priority = 41
+
+[[feature]]
+id = "plate.camera-gestures"
+area = "plate"
+title = "Camera orbit / pan / zoom"
+status = "done"
+desktop = ["kb:Zoom View", "kb:{key Left mouse button}", "kb:{key Middle mouse button}", "kb:{key Right mouse button}"]
+evidence = ["client:UIPinchGestureRecognizer", "client:UIPanGestureRecognizer", "client:final class OrbitCamera"]
+note = "touch: one-finger orbit, two-finger pan, pinch zoom"
+
+[[feature]]
+id = "plate.camera-views"
+area = "plate"
+title = "Camera view presets (default / top / bottom / front / rear / left / right)"
+status = "missing"
+desktop = ["menu:Default View", "menu:Top", "menu:Bottom", "menu:Front", "menu:Rear", "menu:Left", "menu:Right"]
+work = "UI"
+priority = 9
+
+[[feature]]
+id = "plate.camera-projection"
+area = "plate"
+title = "Perspective / orthographic camera, camera style"
+status = "missing"
+desktop = ["menu:Use Perspective View", "menu:Use Orthogonal View", "menu:Auto Perspective",
+           "pref:Camera style", "pref:Use free camera"]
+work = "UI"
+priority = 42
+
+[[feature]]
+id = "plate.navigator"
+area = "plate"
+title = "3D navigator cube"
+status = "missing"
+desktop = ["menu:Show 3D Navigator"]
+work = "UI"
+priority = 43
+
+[[feature]]
+id = "plate.gridlines"
+area = "plate"
+title = "Bed gridlines"
+status = "partial"
+desktop = ["menu:Show Gridlines"]
+evidence = ["client:grid"]
+gap = "grid is always shown; no toggle"
+work = "UI"
+priority = 44
+
+[[feature]]
+id = "plate.labels"
+area = "plate"
+title = "Object labels in the 3D view"
+status = "missing"
+desktop = ["menu:Show Labels", "context:Show Labels"]
+work = "UI"
+priority = 45
+
+[[feature]]
+id = "plate.overhang"
+area = "plate"
+title = "Overhang highlighting"
+status = "missing"
+desktop = ["menu:Show Overhang"]
+work = "UI"
+priority = 46
+
+[[feature]]
+id = "plate.selected-outline"
+area = "plate"
+title = "Selected-object outline"
+status = "missing"
+desktop = ["menu:Show Selected Outline (beta)"]
+work = "UI"
+priority = 47
+
+[[feature]]
+id = "plate.keyboard"
+area = "plate"
+title = "Hardware-keyboard shortcuts: 3D editor"
+status = "missing"
+desktop = ["kb:Arrange all objects", "kb:Arrange objects on selected plates",
+           "kb:Auto orients all objects on the active plate.",
+           "kb:Auto orients selected objects or all objects. If there are selected objects, it just orients the selected ones. Otherwise, it will orient all objects in the current project.",
+           "kb:Camera Angle - Left side", "kb:Camera Angle - Right side", "kb:Camera view - Behind",
+           "kb:Camera view - Bottom", "kb:Camera view - Default", "kb:Camera view - Front", "kb:Camera view - Top",
+           "kb:Clone selected", "kb:Delete all", "kb:Delete objects, parts, modifiers", "kb:Deselect all",
+           "kb:Gizmo assemble", "kb:Gizmo brim ears", "kb:Gizmo cut", "kb:Gizmo FDM paint-on fuzzy skin",
+           "kb:Gizmo FDM paint-on seam", "kb:Gizmo measure", "kb:Gizmo mesh boolean", "kb:Gizmo move",
+           "kb:Gizmo place face on bed", "kb:Gizmo rotate", "kb:Gizmo scale", "kb:Gizmo text emboss/engrave",
+           "kb:Keyboard 1-9: set filament for object/part", "kb:Move selection 10 mm in negative X direction",
+           "kb:Move selection 10 mm in negative Y direction", "kb:Move selection 10 mm in positive X direction",
+           "kb:Move selection 10 mm in positive Y direction", "kb:Move: press to snap by 1mm",
+           "kb:Movement in camera space", "kb:Movement step set to 1 mm", "kb:Redo", "kb:Undo",
+           "kb:Select all objects", "kb:Select the object/part and press space to change the name",
+           "kb:Set extruder number for the objects and parts", "kb:Toggle printable for object/part",
+           "kb:Zoom in", "kb:Zoom out"]
+work = "UI"
+priority = 60
+
+# =========================================================================
+# Prepare / presets / settings
+# =========================================================================
+
+[[feature]]
+id = "prepare.preset-selection"
+area = "prepare"
+title = "Printer / filament / process selection, vendor grouping, compatibility"
+status = "done"
+source = "src/slic3r/GUI/PresetComboBoxes.hpp:class PlaterPresetComboBox"
+evidence = ["abi:orca_presets_select", "abi:orca_presets_list_entry", "client:struct GroupedPickerList"]
+
+[[feature]]
+id = "prepare.settings-editor"
+area = "prepare"
+title = "Settings pages (desktop page/optgroup layout, modes, typed widgets, reset)"
+status = "done"
+desktop = ["settings:process/Quality", "settings:process/Strength", "settings:process/Speed",
+           "settings:process/Support", "settings:process/Multimaterial", "settings:process/Others",
+           "settings:filament/Filament", "settings:filament/Cooling", "settings:filament/Setting Overrides",
+           "settings:filament/Advanced", "settings:filament/Multimaterial", "settings:filament/Dependencies",
+           "settings:filament/Notes", "settings:machine/Basic information", "settings:machine/Machine G-code",
+           "settings:machine/Motion ability", "settings:machine/Multimaterial", "settings:machine/Extruder",
+           "settings:machine/Notes", "dialog:ParamsDialog", "dialog:SettingsDialog", "dialog:TipsDialog"]
+evidence = ["resource:settings-layout.json", "client:struct SettingsPagesScreen", "abi:orca_presets_set_value",
+            "abi:orca_presets_reset_value", "abi:orca_presets_reset_kind"]
+note = "color fields, per-extruder vectors and option dependencies are separate features"
+
+[[feature]]
+id = "prepare.color-widget"
+area = "prepare"
+title = "Color picker for color options"
+status = "missing"
+source = "src/slic3r/GUI/Field.hpp:class ColourPicker"
+work = "UI"
+priority = 101
+
+[[feature]]
+id = "prepare.per-extruder-values"
+area = "prepare"
+title = "Per-extruder vector values"
+status = "partial"
+source = "src/slic3r/GUI/Tab.cpp:build_extruder_pages|extruder_idx"
+evidence = ["client:multiline"]
+gap = "only one-element vectors are editable (as scalars)"
+work = "UI"
+priority = 102
+
+[[feature]]
+id = "prepare.option-dependencies"
+area = "prepare"
+title = "Option dependency enable/disable and sanity prompts"
+status = "missing"
+source = "src/slic3r/GUI/ConfigManipulation.cpp:toggle_print_fff_options"
+work = "Client-reimpl"
+priority = 103
+
+[[feature]]
+id = "prepare.global-search"
+area = "prepare"
+title = "Settings search"
+status = "partial"
+source = "src/slic3r/GUI/Search.hpp:class OptionsSearcher"
+evidence = ["client:\\.searchable"]
+gap = "per-screen search only; desktop searches every tab"
+work = "UI"
+priority = 105
+
+[[feature]]
+id = "prepare.user-presets"
+area = "prepare"
+title = "Save / delete / detach user presets"
+status = "done"
+desktop = ["dialog:SavePresetDialog", "dialog:DeleteConfirmDialog"]
+evidence = ["abi:orca_presets_save_user", "abi:orca_presets_delete_user", "client:struct PresetSaveSheet"]
+note = "rename = save-as + delete"
+
+[[feature]]
+id = "prepare.unsaved-changes"
+area = "prepare"
+title = "Unsaved-changes prompt on preset switch"
+status = "partial"
+desktop = ["dialog:UnsavedChangesDialog"]
+evidence = ["client:confirmationDialog"]
+gap = "discard / keep editing only: no transfer of changes onto the new preset"
+work = "Bridge + UI"
+priority = 106
+
+[[feature]]
+id = "prepare.compare-presets"
+area = "prepare"
+title = "Compare presets"
+status = "missing"
+desktop = ["dialog:DiffPresetDialog", "dialog:FullCompareDialog"]
+work = "UI"
+priority = 104
+
+[[feature]]
+id = "prepare.bed-type"
+area = "prepare"
+title = "Plate type (curr_bed_type)"
+status = "done"
+source = "src/slic3r/GUI/Plater.cpp:bed_type"
+evidence = ["abi:orca_presets_set_bed_type", "client:struct PlateTypeRow"]
+
+[[feature]]
+id = "prepare.nozzle"
+area = "prepare"
+title = "Nozzle diameter selector"
+status = "partial"
+source = "src/slic3r/GUI/Plater.cpp:nozzle_diameter"
+evidence = ["client:struct GroupedPickerList"]
+gap = "nozzle variants are separate printer presets; no nozzle combo"
+work = "UI"
+priority = 112
+
+[[feature]]
+id = "prepare.multi-filament"
+area = "prepare"
+title = "Multiple filaments / extruders (sidebar list, edit, merge)"
+status = "missing"
+desktop = ["context:Edit", "context:Merge with", "context:{item_name}@create_filament_action_menu",
+           "pref:Optimize filaments area height for...", "pref:Remove mixed temperature restriction",
+           "dialog:FilamentPickerDialog"]
+source = "src/slic3r/GUI/Plater.cpp:on_filament_count_change|add_filament"
+work = "Bridge + UI"
+priority = 100
+
+[[feature]]
+id = "prepare.flushing-volumes"
+area = "prepare"
+title = "Flushing volumes"
+status = "missing"
+desktop = ["dialog:WipingDialog", "pref:Auto flush after changing..."]
+work = "Bridge + UI"
+priority = 107
+
+[[feature]]
+id = "prepare.ramming"
+area = "prepare"
+title = "Filament ramming parameters editor"
+status = "missing"
+desktop = ["dialog:RammingDialog"]
+work = "UI"
+priority = 113
+
+[[feature]]
+id = "prepare.filament-grouping"
+area = "prepare"
+title = "Filament grouping (multi-nozzle printers)"
+status = "missing"
+desktop = ["plate:Filament grouping", "dialog:FilamentMapDialog"]
+work = "Bridge + UI"
+priority = 114
+
+[[feature]]
+id = "prepare.config-import-export"
+area = "prepare"
+title = "Import / export configs and preset bundles"
+status = "missing"
+desktop = ["menu:Import Configs", "menu:Export Preset Bundle", "menu:Preset Bundle", "dialog:ExportConfigsDialog",
+           "format:FT_INI"]
+work = "Bridge + UI"
+priority = 108
+
+[[feature]]
+id = "prepare.create-presets"
+area = "prepare"
+title = "Create printer / filament preset wizards"
+status = "missing"
+desktop = ["dialog:CreateFilamentPresetDialog", "dialog:CreatePrinterPresetDialog",
+           "dialog:CreatePresetForPrinterDialog", "dialog:CreatePresetSuccessfulDialog",
+           "dialog:EditFilamentPresetDialog"]
+work = "Bridge + UI"
+priority = 109
+
+[[feature]]
+id = "prepare.setup-wizard"
+area = "prepare"
+title = "Setup wizard (vendor / printer / filament picking)"
+status = "partial"
+desktop = ["menu:Setup Wizard", "dialog:ConfigWizard", "dialog:GuideFrame"]
+evidence = ["client:struct GroupedPickerList"]
+gap = "all system printers are listed; no vendor/model selection that limits the lists"
+work = "UI"
+priority = 110
+
+[[feature]]
+id = "prepare.bed-shape"
+area = "prepare"
+title = "Bed shape, custom bed texture / model"
+status = "missing"
+desktop = ["dialog:BedShapeDialog", "format:FT_TEX"]
+work = "UI"
+priority = 111
+
+[[feature]]
+id = "prepare.edit-gcode"
+area = "prepare"
+title = "Custom G-code editor with placeholder browser"
+status = "partial"
+desktop = ["dialog:EditGCodeDialog"]
+evidence = ["client:multiline"]
+gap = "multiline editor without the placeholder browser"
+work = "UI"
+priority = 115
+
+[[feature]]
+id = "prepare.physical-printers"
+area = "prepare"
+title = "Physical printers (host, URL, API key; engine-stored)"
+status = "done"
+desktop = ["dialog:PhysicalPrinterDialog"]
+evidence = ["abi:orca_physical_printer_upsert", "abi:orca_physical_printer_list", "client:PhysicalPrinterEditor"]
+
+[[feature]]
+id = "prepare.slice"
+area = "prepare"
+title = "Slice with progress, cancel, validation and warnings"
+status = "done"
+source = "src/slic3r/GUI/BackgroundSlicingProcess.hpp:class BackgroundSlicingProcess"
+evidence = ["abi:orca_slice_job_new", "abi:orca_slice_job_cancel", "client:struct SliceWarningsList"]
+note = "edits are rejected while slicing (ARCHITECTURE \u00a75 edit-while-slicing is open)"
+
+[[feature]]
+id = "prepare.auto-slice"
+area = "prepare"
+title = "Auto slice after changes"
+status = "missing"
+desktop = ["pref:Auto slice after changes"]
+work = "UI"
+priority = 116
+
+[[feature]]
+id = "prepare.preset-sync"
+area = "prepare"
+title = "OrcaCloud preset sync"
+status = "missing"
+desktop = ["menu:Sync Presets", "pref:Auto sync user presets (Printer/Filament/Process)", "pref:Preferences sync",
+           "pref:Preset sync", "pref:User sync", "dialog:OAuthDialog"]
+work = "Client-reimpl"
+priority = 130
+
+[[feature]]
+id = "prepare.profile-updates"
+area = "prepare"
+title = "Online system-profile updates"
+status = "missing"
+desktop = ["pref:Update built-in presets automatically.", "dialog:MsgUpdateConfig", "dialog:MsgUpdateForced",
+           "dialog:MsgNoUpdates", "dialog:MsgDataIncompatible"]
+work = "Bridge + UI"
+priority = 131
+
+# =========================================================================
+# Preview / G-code
+# =========================================================================
+
+[[feature]]
+id = "preview.schemes"
+area = "preview"
+title = "Color schemes (feature, speed, height, width, flow, fan, temperature, layer time, PA, accel, jerk, tool)"
+status = "done"
+desktop = ["view:FeatureType", "view:Speed", "view:ActualSpeed", "view:Height", "view:Width",
+           "view:VolumetricFlowRate", "view:LayerTimeLinear", "view:LayerTimeLogarithmic", "view:FanSpeed",
+           "view:Temperature", "view:PressureAdvance", "view:Acceleration", "view:Jerk", "view:Tool"]
+evidence = ["client:enum ToolpathColorMode", "abi:orca_gcode_toolpath"]
+
+[[feature]]
+id = "preview.actual-flow"
+area = "preview"
+title = "Actual volumetric flow scheme"
+status = "missing"
+desktop = ["view:ActualVolumetricFlowRate"]
+work = "Bridge + UI"
+priority = 206
+
+[[feature]]
+id = "preview.summary"
+area = "preview"
+title = "Summary view"
+status = "missing"
+desktop = ["view:Summary"]
+work = "UI"
+priority = 207
+
+[[feature]]
+id = "preview.color-print"
+area = "preview"
+title = "Per-layer filament (color) change + ColorPrint scheme"
+status = "missing"
+desktop = ["view:ColorPrint", "slider:Change Filament", "slider:Filament", "slider:Delete Filament Change",
+           "option:ColorChanges"]
+work = "Bridge + UI"
+priority = 200
+note = "Model::custom_gcode_per_print_z / CustomGCode.cpp are compiled"
+
+[[feature]]
+id = "preview.pause-custom-gcode"
+area = "preview"
+title = "Pause / custom G-code / template at layer"
+status = "missing"
+desktop = ["slider:Add Pause", "slider:Delete Pause", "slider:Add Custom G-code", "slider:Edit Custom G-code",
+           "slider:Delete Custom G-code", "slider:Add Custom Template", "slider:Delete Custom Template",
+           "option:PausePrints", "option:CustomGCodes"]
+work = "Bridge + UI"
+priority = 201
+
+[[feature]]
+id = "preview.jump-to-layer"
+area = "preview"
+title = "Jump to layer"
+status = "missing"
+desktop = ["slider:Jump to Layer"]
+work = "UI"
+priority = 203
+
+[[feature]]
+id = "preview.one-layer"
+area = "preview"
+title = "One-layer mode"
+status = "missing"
+source = "src/slic3r/GUI/IMSlider.cpp:one_layer"
+work = "UI"
+priority = 202
+
+[[feature]]
+id = "preview.layer-slider"
+area = "preview"
+title = "Layer range slider + move scrubber"
+status = "done"
+source = "src/slic3r/GUI/IMSlider.hpp:class IMSlider"
+evidence = ["client:struct LayerRangeSlider"]
+
+[[feature]]
+id = "preview.travel"
+area = "preview"
+title = "Travel moves"
+status = "done"
+desktop = ["option:Travels"]
+evidence = ["client:var showTravel"]
+
+[[feature]]
+id = "preview.markers"
+area = "preview"
+title = "Seams, retractions, unretractions"
+status = "done"
+desktop = ["option:Seams", "option:Retractions", "option:Unretractions"]
+evidence = ["client:var showSeams", "client:var showRetractions"]
+
+[[feature]]
+id = "preview.wipes-toolchanges"
+area = "preview"
+title = "Wipe and tool-change markers"
+status = "missing"
+desktop = ["option:Wipes", "option:ToolChanges"]
+work = "UI"
+priority = 204
+
+[[feature]]
+id = "preview.legend"
+area = "preview"
+title = "Legend: feature toggles, time share, filament/cost totals, normal + stealth time"
+status = "done"
+source = "src/slic3r/GUI/GCodeViewer.cpp:render_legend"
+evidence = ["client:private var legend", "client:estimatedStealthSeconds", "client:costPerKG"]
+
+[[feature]]
+id = "preview.shells-cog"
+area = "preview"
+title = "Object shells and center of gravity"
+status = "missing"
+source = "src/slic3r/GUI/GCodeViewer.hpp:Shells"
+work = "UI"
+priority = 205
+
+[[feature]]
+id = "preview.gcode-window"
+area = "preview"
+title = "G-code line window"
+status = "missing"
+desktop = ["menu:Show G-code Window"]
+work = "Bridge + UI"
+priority = 208
+
+[[feature]]
+id = "preview.export-toolpaths"
+area = "preview"
+title = "Export toolpaths as OBJ"
+status = "missing"
+desktop = ["menu:Export toolpaths as OBJ"]
+work = "Client-reimpl"
+priority = 209
+
+[[feature]]
+id = "preview.gcode-viewer"
+area = "preview"
+title = "Open external G-code (viewer mode)"
+status = "done"
+desktop = ["format:FT_GCODE"]
+evidence = ["abi:orca_gcode_load", "client:fileImporter"]
+
+[[feature]]
+id = "preview.keyboard"
+area = "preview"
+title = "Hardware-keyboard shortcuts: preview sliders"
+status = "missing"
+desktop = ["kb:Vertical slider - Move active thumb Up", "kb:Vertical slider - Move active thumb Down",
+           "kb:Horizontal slider - Move active thumb Left", "kb:Horizontal slider - Move active thumb Right",
+           "kb:Horizontal slider - Move to start position", "kb:Horizontal slider - Move to last position",
+           "kb:Move slider 5x faster", "kb:On/Off one layer mode of the vertical slider", "kb:On/Off G-code window"]
+work = "UI"
+priority = 220
+
+# =========================================================================
+# Device / printing
+# =========================================================================
+
+[[feature]]
+id = "device.printer-webui"
+area = "device"
+title = "Printer web UI in the Device tab (Mainsail / Fluidd / OctoPrint)"
+status = "missing"
+source = "src/slic3r/GUI/PrinterWebView.hpp:class PrinterWebView"
+work = "UI"
+priority = 0
+note = "scoped AGENTS.md exception (user, 2026-10-07)"
+
+[[feature]]
+id = "device.upload"
+area = "device"
+title = "Send G-code to OctoPrint / Moonraker (upload + start)"
+status = "done"
+desktop = ["host:htOctoPrint", "host:htMoonraker", "dialog:PrintHostSendDialog"]
+evidence = ['client:case "octoprint"', 'client:case "moonraker"', "client:func upload\\("]
+
+[[feature]]
+id = "device.upload-queue"
+area = "device"
+title = "Upload queue"
+status = "missing"
+desktop = ["dialog:PrintHostQueueDialog"]
+work = "UI"
+priority = 310
+
+[[feature]]
+id = "device.discovery"
+area = "device"
+title = "Printer discovery (Bonjour)"
+status = "missing"
+desktop = ["dialog:BonjourDialog", "dialog:IPListDialog"]
+work = "UI"
+priority = 311
+
+[[feature]]
+id = "device.host-prusalink"
+area = "device"
+title = "PrusaLink / Prusa Connect hosts"
+status = "missing"
+desktop = ["host:htPrusaLink", "host:htPrusaConnect"]
+work = "Client-reimpl"
+priority = 300
+
+[[feature]]
+id = "device.host-duet"
+area = "device"
+title = "Duet host"
+status = "missing"
+desktop = ["host:htDuet"]
+work = "Client-reimpl"
+priority = 301
+
+[[feature]]
+id = "device.host-repetier"
+area = "device"
+title = "Repetier host"
+status = "missing"
+desktop = ["host:htRepetier"]
+work = "Client-reimpl"
+priority = 302
+
+[[feature]]
+id = "device.host-flashair"
+area = "device"
+title = "FlashAir host"
+status = "missing"
+desktop = ["host:htFlashAir"]
+work = "Client-reimpl"
+priority = 303
+
+[[feature]]
+id = "device.host-astrobox"
+area = "device"
+title = "AstroBox host"
+status = "missing"
+desktop = ["host:htAstroBox"]
+work = "Client-reimpl"
+priority = 304
+
+[[feature]]
+id = "device.host-mks"
+area = "device"
+title = "MKS host"
+status = "missing"
+desktop = ["host:htMKS"]
+work = "Client-reimpl"
+priority = 305
+
+[[feature]]
+id = "device.host-esp3d"
+area = "device"
+title = "ESP3D host"
+status = "missing"
+desktop = ["host:htESP3D"]
+work = "Client-reimpl"
+priority = 306
+
+[[feature]]
+id = "device.host-crealityprint"
+area = "device"
+title = "Creality Print host + LAN discovery"
+status = "missing"
+desktop = ["host:htCrealityPrint", "dialog:CrealityDiscoveryDialog"]
+work = "Client-reimpl"
+priority = 307
+
+[[feature]]
+id = "device.host-obico"
+area = "device"
+title = "Obico host"
+status = "missing"
+desktop = ["host:htObico"]
+work = "Client-reimpl"
+priority = 308
+
+[[feature]]
+id = "device.host-flashforge"
+area = "device"
+title = "Flashforge host"
+status = "missing"
+desktop = ["host:htFlashforge"]
+work = "Client-reimpl"
+priority = 309
+
+[[feature]]
+id = "device.host-simplyprint"
+area = "device"
+title = "SimplyPrint host (cloud auth)"
+status = "missing"
+desktop = ["host:htSimplyPrint", "dialog:PrinterCloudAuthDialog"]
+work = "Client-reimpl"
+priority = 312
+
+[[feature]]
+id = "device.host-elegoolink"
+area = "device"
+title = "ElegooLink host"
+status = "missing"
+desktop = ["host:htElegooLink"]
+work = "Client-reimpl"
+priority = 313
+
+[[feature]]
+id = "device.host-3dprinteros"
+area = "device"
+title = "3DPrinterOS host"
+status = "missing"
+desktop = ["host:ht3DPrinterOS"]
+work = "Client-reimpl"
+priority = 314
+
+[[feature]]
+id = "device.calibration"
+area = "device"
+title = "Calibration menu (temperature, flow, PA, retraction, max flow, VFA, cornering, input shaping)"
+status = "deferred"
+desktop = ["menu:Temperature", "menu:Flow ratio", "menu:Pressure advance", "menu:Retraction", "menu:Max flowrate",
+           "menu:VFA", "menu:Cornering", "menu:Input Shaping", "menu:Input Shaping Frequency",
+           "menu:Input Shaping Damping/zeta factor", "menu:Calibration Guide", "dialog:CalibrationDialog",
+           "dialog:PA_Calibration_Dlg", "dialog:Temp_Calibration_Dlg", "dialog:MaxVolumetricSpeed_Test_Dlg",
+           "dialog:VFA_Test_Dlg", "dialog:Retraction_Test_Dlg", "dialog:Cornering_Test_Dlg",
+           "dialog:Input_Shaping_Freq_Test_Dlg", "dialog:Input_Shaping_Damp_Test_Dlg",
+           "dialog:FlowRateCalibrationDialog", "dialog:HistoryWindow", "dialog:EditCalibrationHistoryDialog",
+           "dialog:NewCalibrationHistoryDialog"]
+work = "Closure + UI"
+reason = "deferred by user 2026-10-07: calibration models are .drc, so draco must enter the closure first"
+
+[[feature]]
+id = "device.bambu"
+area = "device"
+title = "Bambu cloud / LAN monitor, AMS, device management"
+status = "na"
+desktop = ["dialog:AMSMaterialsSetting", "dialog:AMSSetting", "dialog:AmsReplaceMaterialDialog",
+           "dialog:BindMachineDialog", "dialog:UnBindMachineDialog", "dialog:PingCodeBindDialog",
+           "dialog:ConnectPrinterDialog", "dialog:InputIpAddressDialog", "dialog:DeviceErrorDialog",
+           "dialog:PrintErrorDialog", "dialog:SelectMachineDialog", "dialog:SendToPrinterDialog",
+           "dialog:SendMultiMachinePage", "dialog:MultiMachinePickPage", "dialog:PrinterPartsDialog",
+           "dialog:PrintOptionsDialog", "dialog:SafetyOptionsDialog", "dialog:ThermalPreconditioningDialog",
+           "dialog:ExtrusionCalibration", "dialog:FanControlPopupNew", "dialog:EditDevNameDialog",
+           "dialog:NetworkPluginDownloadDialog", "dialog:NetworkPluginRestartDialog", "dialog:DownPluginFrame",
+           "dialog:UpdatePluginDialog", "dialog:ZUserLogin", "dialog:PartSkipDialog", "dialog:PartSkipConfirmDialog",
+           "dialog:RecenterDialog", "dialog:SyncAmsInfoDialog", "dialog:ConfirmBeforeSendDialog",
+           "dialog:SendFailedConfirm", "dialog:SecondaryCheckDialog", "dialog:NetworkErrorDialog",
+           "dialog:AuxiliaryDialog", "dialog:PrivacyUpdateDialog",
+           "pref:Enable Bambu Cloud", "pref:Enable network plug-in", "pref:Network plug-in version",
+           "pref:Enable SSL(FTP)", "pref:Enable SSL(MQTT)", "pref:Skip AMS blacklist check", "pref:Login region",
+           "pref:Hide login side panel", "pref:Use encrypted file for token storage", "pref:Multi device management",
+           "pref:Filament sync mode", "pref:Allow Abnormal Storage", "pref:Stealth mode"]
+reason = "proprietary Bambu network plug-in and cloud services"
+
+# =========================================================================
+# Files / projects / app integration
+# =========================================================================
+
+[[feature]]
+id = "files.project"
+area = "files"
+title = "3MF project open / save (presets, plate type, thumbnail)"
+status = "done"
+desktop = ["menu:Open Project", "menu:Save Project", "menu:Save Project as", "format:FT_PROJECT",
+           "dialog:Newer3mfVersionDialog"]
+evidence = ["abi:orca_project_open", "abi:orca_project_save", 'client:func saveProject\(']
+note = "single plate (multi-plate projects are rejected loudly)"
+
+[[feature]]
+id = "files.new-project"
+area = "files"
+title = "New project"
+status = "missing"
+desktop = ["menu:New Project"]
+work = "UI"
+priority = 152
+
+[[feature]]
+id = "files.export-gcode"
+area = "files"
+title = "Export / share G-code"
+status = "done"
+desktop = ["menu:Export", "menu:Export G-code"]
+evidence = ["client:ShareLink"]
+
+[[feature]]
+id = "files.export-sliced-3mf"
+area = "files"
+title = "Export sliced 3MF (.gcode.3mf)"
+status = "missing"
+desktop = ["menu:Export plate sliced file", "menu:Export all plate sliced file", "format:FT_GCODE_3MF"]
+work = "Bridge + UI"
+priority = 153
+
+[[feature]]
+id = "files.export-generic-3mf"
+area = "files"
+title = "Export generic 3MF"
+status = "missing"
+desktop = ["menu:Export Generic 3MF"]
+work = "Bridge + UI"
+priority = 154
+
+[[feature]]
+id = "files.export-stl"
+area = "files"
+title = "Export objects as STL"
+status = "missing"
+desktop = ["menu:Export all objects as one STL", "menu:Export all objects as STLs", "context:Export as one STL",
+           "context:Export as STLs"]
+work = "Bridge + UI"
+priority = 151
+
+[[feature]]
+id = "files.export-drc"
+area = "files"
+title = "Export objects as Draco"
+status = "deferred"
+desktop = ["menu:Export all objects as one DRC", "menu:Export all objects as DRCs", "context:Export as one DRC",
+           "context:Export as DRCs", "pref:Quality level for Draco export"]
+work = "Closure"
+reason = "deferred by user 2026-10-07 (draco)"
+
+[[feature]]
+id = "files.import-zip"
+area = "files"
+title = "Import zip archive"
+status = "missing"
+desktop = ["menu:Import Zip Archive", "format:FT_ZIP", "dialog:FileArchiveDialog"]
+work = "UI"
+priority = 155
+
+[[feature]]
+id = "files.recent"
+area = "files"
+title = "Recent projects / files"
+status = "missing"
+desktop = ["menu:Recent files", "pref:Maximum recent files", "pref:Add STL/STEP files to recent files list"]
+work = "UI"
+priority = 156
+
+[[feature]]
+id = "files.backup"
+area = "files"
+title = "Project auto-backup / crash restore"
+status = "missing"
+desktop = ["pref:Auto backup"]
+work = "Bridge + UI"
+priority = 157
+
+[[feature]]
+id = "files.open-in"
+area = "files"
+title = "Open-in from Files / Mail (document types)"
+status = "missing"
+desktop = ["pref:Associate 3MF files to OrcaSlicer", "pref:Associate STL files to OrcaSlicer",
+           "pref:Associate STEP files to OrcaSlicer", "pref:Associate DRC files to OrcaSlicer"]
+work = "UI"
+priority = 150
+
+[[feature]]
+id = "files.model-links"
+area = "files"
+title = "Model download links (Printables / MakerWorld / Thingiverse) and downloads folder"
+status = "missing"
+desktop = ["pref:{link_association:prusaslicer}", "pref:{link_association:bambustudio}",
+           "pref:{link_association:cura}", "pref:Downloads folder", "dialog:DownloadDialog",
+           "dialog:DownloadProgressDialog"]
+work = "UI"
+priority = 158
+
+# =========================================================================
+# App / preferences / help
+# =========================================================================
+
+[[feature]]
+id = "app.preferences"
+area = "app"
+title = "Preferences screen"
+status = "missing"
+desktop = ["menu:Preferences", "dialog:PreferencesDialog", "pref:Units", "pref:Default page", "pref:Load behaviour",
+           "pref:Don't warn when loading 3MF with modified G-code", "pref:Store full source file paths in projects",
+           "pref:Show shared profiles notification", "pref:Unsaved projects", "pref:Unsaved presets",
+           "pref:Synchronizing printer preset", "pref:Show unsupported presets", "pref:Group user filament presets",
+           "pref:Remember printer configuration", "pref:Developer mode", "pref:Internal developer mode",
+           "pref:Log Level"]
+work = "UI"
+priority = 400
+
+[[feature]]
+id = "app.appearance"
+area = "app"
+title = "Light / dark appearance"
+status = "partial"
+desktop = ["pref:Enable dark mode"]
+evidence = ['client:preferredColorScheme\(\.dark\)']
+gap = "dark only"
+work = "UI"
+priority = 405
+
+[[feature]]
+id = "app.localization"
+area = "app"
+title = "Localization"
+status = "missing"
+desktop = ["pref:Language"]
+work = "UI"
+priority = 406
+note = "iOS picks the language per app in Settings; OrcaPad strings are English only"
+
+[[feature]]
+id = "app.render-quality"
+area = "app"
+title = "Viewer quality options (MSAA, FXAA, shadows, SSAO, smooth normals, FPS)"
+status = "missing"
+desktop = ["pref:MSAA Multiplier", "pref:FXAA post-processing", "pref:Phong shading", "pref:Shadows",
+           "pref:Smooth normals", "pref:SSAO ambient occlusion", "pref:FPS cap", "pref:Show FPS overlay"]
+work = "UI"
+priority = 407
+
+[[feature]]
+id = "app.keyboard"
+area = "app"
+title = "Hardware-keyboard shortcuts: global"
+status = "missing"
+desktop = ["menu:Keyboard Shortcuts", "dialog:KBShortcutsDialog", "kb:New Project", "kb:Open Project",
+           "kb:Save Project", "kb:Save Project as", "kb:Import geometry data from STL/STEP/3MF/OBJ/AMF files",
+           "kb:Export plate sliced file", "kb:Slice plate", "kb:Print plate", "kb:Cut", "kb:Copy to clipboard",
+           "kb:Paste from clipboard", "kb:Preferences", "kb:Switch table page", "kb:Delete selected",
+           "kb:Show keyboard shortcuts list", "kb:Switch between Prepare/Preview", "kb:Collapse/Expand the sidebar"]
+work = "UI"
+priority = 401
+
+[[feature]]
+id = "app.about"
+area = "app"
+title = "About and third-party licenses"
+status = "missing"
+desktop = ["menu:{_L(about_title)}@init_menubar_as_editor", "menu:{about_title}@generate_help_menu",
+           "dialog:AboutDialog", "dialog:CopyrightsDialog"]
+work = "UI"
+priority = 402
+
+[[feature]]
+id = "app.tips"
+area = "app"
+title = "Tip of the day"
+status = "missing"
+desktop = ["menu:Show Tip of the Day"]
+work = "UI"
+priority = 408
+
+[[feature]]
+id = "app.mouse-preferences"
+area = "app"
+title = "Mouse-button and wheel mapping"
+status = "na"
+desktop = ["pref:Left Mouse Drag", "pref:Middle Mouse Drag", "pref:Right Mouse Drag", "pref:Reverse mouse zoom",
+           "pref:Zoom to mouse position"]
+reason = "mouse-specific; touch uses fixed orbit / pan / pinch gestures"
+
+[[feature]]
+id = "app.3dconnexion"
+area = "app"
+title = "3Dconnexion devices"
+status = "na"
+desktop = ["kb:Show/Hide 3Dconnexion devices settings dialog"]
+reason = "no 3Dconnexion support on iOS"
+
+[[feature]]
+id = "app.desktop-window"
+area = "app"
+title = "Desktop window management"
+status = "na"
+desktop = ["menu:New Window", "menu:Quit", "menu:Reset Window Layout", "dialog:MainFrame",
+           "dialog:DesktopIntegrationDialog", "pref:Allow only one OrcaSlicer instance", "pref:Show splash screen",
+           "pref:Use window buttons on left side",
+           "pref:File associations for the Microsoft Store version are managed by Windows Settings."]
+reason = "desktop OS concepts; iOS manages app lifecycle and windows"
+
+[[feature]]
+id = "app.updates"
+area = "app"
+title = "Application update checks"
+status = "na"
+desktop = ["menu:Check for Updates", "pref:Check for stable updates only", "dialog:UpdateVersionDialog",
+           "dialog:MsgUpdateSlic3r", "dialog:ReleaseNoteDialog"]
+reason = "App Store / TestFlight deliver app updates"
+
+[[feature]]
+id = "app.model-mall"
+area = "app"
+title = "MakerWorld model mall, publish and rating"
+status = "na"
+desktop = ["menu:Upload Models", "menu:Download Models", "dialog:ModelMallDialog", "dialog:PublishDialog",
+           "dialog:ScoreDialog"]
+reason = "Bambu MakerWorld web services behind the proprietary plug-in"
+
+[[feature]]
+id = "app.network-test"
+area = "app"
+title = "Network test"
+status = "na"
+desktop = ["menu:Open Network Test", "dialog:NetworkTestDialog", "pref:Network test"]
+reason = "tests Bambu cloud endpoints"
+
+[[feature]]
+id = "app.troubleshoot"
+area = "app"
+title = "Troubleshoot center / system info / config folder"
+status = "na"
+desktop = ["menu:Troubleshoot Center", "dialog:TroubleshootDialog", "dialog:SysInfoDialog",
+           "menu:Show Configuration Folder", "dialog:SourceViewDialog"]
+reason = "desktop diagnostics; on iOS logs go to os_log and user data is visible in Files"
+
+[[feature]]
+id = "app.message-dialogs"
+area = "app"
+title = "Generic message / choice dialogs"
+status = "na"
+desktop = ["dialog:MessageDialog", "dialog:RichMessageDialog", "dialog:InfoDialog", "dialog:WarningDialog",
+           "dialog:ErrorDialog", "dialog:MultiChoiceDialog", "dialog:SingleChoiceDialog"]
+reason = "dialog infrastructure; OrcaPad uses native SwiftUI alerts and sheets"

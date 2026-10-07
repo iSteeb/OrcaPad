@@ -41,6 +41,11 @@ in ~/xtool-cheatsheet.md — link, don't duplicate.)
   cast every ray toward 1/3 of the touch on 3x screens (broken tap-select
   and drag-move until C6).
 - Build output always redirected to a file: `xtool dev build > /tmp/orcapad-build.log 2>&1`
+- Feature status lives ONLY in `Bridge/tools/parity-manifest.toml`; PARITY.md
+  is generated (`parity-check.py --write`) and `--check` gates commits. The
+  desktop surface is extracted from upstream, never hand-listed: a hand-kept
+  parity table had silently drifted (e.g. "ActualVolumetric" claimed done
+  with no client scheme).
 - Test/build policy lives in AGENTS.md's "Builds, tests, and audits" matrix.
   The engine compile list is shared (`Bridge/engine-sources.sh`) — never fork
   it; host contract tests and the architecture audit are commit gates.

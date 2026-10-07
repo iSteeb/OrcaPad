@@ -6,7 +6,9 @@
   (Swift Client → Bridge → untouched Engine). [USER 2026-10-07: "complete
   feature parity, highest priority first, mark completions in the .md files"]
 - Done through ABI v16 (`8edb8a6`): all 8 ranked PARITY items + thumbnails.
-  Source of truth for what's left: PARITY.md "Remaining work".
+  Source of truth for what's left: `Bridge/tools/parity-manifest.toml` ->
+  generated PARITY.md "Remaining work" (551 desktop items, 152 features,
+  21% parity at ABI v16).
 - [2026-10-07 USER] Order: (1) docs + cleanup, (2) programmatic parity
   checker (desktop features extracted from upstream vs implemented),
   (3) Klipper printer web UI in the Device tab + install on iPoke, then
