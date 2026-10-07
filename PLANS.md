@@ -54,8 +54,11 @@ Device, each tab a clean feature module over the same stores.
 - [x] C3: Preview v1 — upstream GCodeProcessor → compact toolpath (ABI v5),
       feature-colored Metal lines, layer scrubber, remaining-time estimate;
       real Thumbnails.cpp + jpeg adapter; brass interop fix (`78f9920`)
-- [ ] C4: Preview parity — dual layer range, in-layer move progress, legend,
-      color modes (feature / speed / height / width), extrusion-width ribbons
+- [x] C4: Preview parity — vertical dual layer-range slider, in-layer move
+      scrubber + tool marker, color schemes (line type / speed / layer height /
+      line width / fan / temperature), legend with feature toggles + per-feature
+      time share, travel toggle, width-true ribbons (budgeted), range drawing
+      without rebuilds; ABI v6 (`b0960d2`, `b5dc9c0`)
 - [x] C5: Prepare parity v1 — desktop page → optgroup layout EXTRACTED from
       pinned upstream Tab.cpp (`extract_settings_layout.py`), process pages
       inline, printer/filament settings screens, tooltips, units, range
