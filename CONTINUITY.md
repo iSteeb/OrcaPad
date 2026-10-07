@@ -10,8 +10,10 @@
 - Next: user device-verifies v8–v16 (nothing since `8d4cdaf` was on iPoke
   before this install); then unblocked list in PARITY.md (per-layer
   color change/pause, undo/redo, object list ops, multi-filament, multi-plate).
-- Blocked on user decisions: printer web UI (WebView ban), draco
-  (calibration), OCCT (STEP/SVG), CGAL/mcut (mesh boolean).
+- [2026-10-13 USER] Device tab may embed the printer's own web page
+  (scoped AGENTS.md exception); STEP/SVG deferred. Still open: draco
+  (calibration), mesh boolean (MCUT vendored — re-check), parity checker
+  script (proposed, awaiting go). v16 installed on iPoke 2026-10-13.
 
 ## DECISIONS
 

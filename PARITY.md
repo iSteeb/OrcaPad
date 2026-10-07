@@ -95,13 +95,13 @@ yet in `Bridge/engine-sources.sh`), **Client-reimpl** (desktop logic lives in
 
 | Feature | Desktop evidence | OrcaPad evidence | Status | Work |
 |---|---|---|---|---|
-| Device tab (printer web UI) | `PrinterWebView.hpp:37` | `DeviceTabView.swift`: native printer list + send; no embedded printer web page | 🟡 web UI pending your decision (AGENTS.md bans WebView UI) | — |
+| Device tab (printer web UI) | `PrinterWebView.hpp:37` | `DeviceTabView.swift`: native printer list + send; no embedded printer web page yet | 🟡 allowed by user 2026-10-13 (scoped AGENTS.md exception) — not built yet | UI (WKWebView of `print_host_webui`/host URL) |
 | Print hosts (OctoPrint, Moonraker, PrusaLink/Connect, Duet, Repetier, MKS, Elegoo, Flashforge, SimplyPrint, …) | `Utils/PrintHost.cpp:58-73`, `PrintConfig.hpp:80` | `PrintHostService.swift` (URLSession, mirrors desktop's GUI-layer libcurl): OctoPrint `/api/files/local` + Moonraker `/server/files/upload`, upload + optional start print | 🟡 2 of 16 host types; others are typed rejections | Client-reimpl per host |
 | Bambu cloud/LAN monitor | `Monitor.cpp` | — | ➖ proprietary network plugin | — |
 | OBJ / AMF import | `Plater.cpp` load_files | ABI v10 `orca_plater_import_model` → `Model::read_from_file` | ✅ | — |
 | 3MF project load/save | `Plater.cpp:12102,12234,15551` | ABI v11 `orca_project_open` (model + embedded presets + `load_config_model` + plate type, atomic) / `orca_project_save` (`store_bbs_3mf`, `full_config_secure`); Plate ▸ File menu | ✅ single plate incl. plate thumbnail (multi-plate projects rejected loudly) | — |
-| STEP | `Format/STEP.cpp` (OCCT) | stubbed in `format_stubs.cpp:47-58` | ❌ | Closure: OpenCASCADE (heavy) |
-| SVG import | `Format/svg.cpp` (OCCT + nanosvg) | stubbed in `format_stubs.cpp:87` | ❌ | Closure: OCCT |
+| STEP | `Format/STEP.cpp` (OCCT) | stubbed in `format_stubs.cpp:47-58` | ➖ deferred by user (2026-10-13) | Closure: OpenCASCADE (heavy) |
+| SVG import | `Format/svg.cpp` (OCCT + nanosvg) | stubbed in `format_stubs.cpp:87` | ➖ deferred by user (2026-10-13) | Closure: OCCT |
 | DRC | `Format/DRC.cpp` (draco) | stubbed in `format_stubs.cpp:84` | ❌ | Closure: draco (not vendored) |
 | Export plate STL/OBJ, printable 3MF | `Plater.cpp:15047` | none found | ❌ | Bridge (STL/OBJ store compiled); 3MF blocked as above |
 | Recent projects, auto-backup | `MainFrame.cpp`, `bbs_3mf.cpp` backup manager | projects saved to Files ▸ OrcaPad ▸ Projects; no recent list, backup manager compiled but unused | 🟡 | UI |
@@ -124,12 +124,12 @@ Plus ✅ G-code/3MF thumbnails (ABI v16).
 ## Remaining work (recommended order)
 
 **Needs a decision from you (blocked):**
-- Device tab printer web UI — embedding the printer's own page conflicts with AGENTS.md "no WebView UI".
 - Calibration menu — engine `calib.cpp` is compiled, but its models are Draco `.drc` (draco not vendored).
-- STEP / SVG import — OpenCASCADE (very large dependency).
-- Mesh boolean — CGAL PMP / libigl / mcut.
+- (STEP / SVG import deferred by user.)
+- Mesh boolean — CGAL PMP / libigl / mcut (MCUT is vendored in deps_src — feasibility to re-check).
 
 **Unblocked, highest value first:**
+0. Device tab printer web page (decision made 2026-10-13).
 1. Per-layer color change / pause / custom G-code (slider) — Bridge over compiled `CustomGCode.cpp`; unlocks ColorPrint scheme.
 2. Undo/redo — Bridge Model snapshot stack under the session revision.
 3. Object list: split, parts/modifiers/negative volumes, per-object settings, rename — Bridge over compiled `Model.cpp`.
