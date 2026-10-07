@@ -2180,10 +2180,9 @@ orca_result orca_project_save(orca_plater *plater, orca_presets *presets,
 
 static Slic3r::DynamicPrintConfig orcapad_arrange_config(orca_presets *presets) {
     if (presets) return presets->bundle->full_config();
-    Slic3r::DynamicPrintConfig config =
-        Slic3r::DynamicPrintConfig::full_print_config();
-    orcapad_config_overlays(config);
-    return config;
+    // preset-free fallback: raw defaults. (No overlay —
+    // those fix slice/gcode interop, which orient/arrange never touch.)
+    return Slic3r::DynamicPrintConfig::full_print_config();
 }
 
 /// Selected instance, or every instance when both ids are 0.
