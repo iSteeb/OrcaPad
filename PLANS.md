@@ -56,9 +56,15 @@ Device, each tab a clean feature module over the same stores.
       real Thumbnails.cpp + jpeg adapter; brass interop fix (`78f9920`)
 - [ ] C4: Preview parity — dual layer range, in-layer move progress, legend,
       color modes (feature / speed / height / width), extrusion-width ribbons
-- [ ] C5: Prepare parity — desktop page grouping (Quality/Strength/Speed/
-      Support/Others; machine & filament pages), option tooltips, enum labels,
-      per-type validation (min/max), persisted user overrides
+- [x] C5: Prepare parity v1 — desktop page → optgroup layout EXTRACTED from
+      pinned upstream Tab.cpp (`extract_settings_layout.py`), process pages
+      inline, printer/filament settings screens, tooltips, units, range
+      validation, single-element vectors edited as scalars, multiline G-code
+      editor (`f09d26b`)
+- [ ] C5b: desktop "Save preset" — persist edits as user presets through the
+      engine (`PresetCollection::save_current_preset` into the writable data
+      dir) and list user presets alongside system ones (edits are session-only
+      until then, like desktop unsaved changes)
 - [ ] C6: Plate — gizmo-style move/rotate/scale with correct pivots, numeric
       transform panel, lay-flat/arrange via engine, support-paint stub
 - [ ] Device tab: printer web UI (later)
