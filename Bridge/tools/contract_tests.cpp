@@ -273,7 +273,7 @@ static void test_md5_shim() {
 
 static void test_abi_version() {
     CHECK_EQ(orca_bridge_abi_version(), ORCA_BRIDGE_ABI_VERSION);
-    CHECK_EQ(ORCA_BRIDGE_ABI_VERSION, 18);
+    CHECK_EQ(ORCA_BRIDGE_ABI_VERSION, 19);
 }
 
 static std::string snapshot_label(const orca_owned_string &label) {
@@ -735,6 +735,213 @@ static double instance_min_z(const orca_scene_object &object, const double *m) {
         if (z < lowest) lowest = z;
     }
     return lowest;
+}
+
+// ABI v19: volumes (parts / modifiers / negative volumes), split to
+// objects / parts, shape objects and shape volumes.
+static void test_volumes(const std::string &dir) {
+    orca_plater *plater = nullptr;
+    GUARD(g0, orca_plater_new(&plater));
+    expect_ok(g0, "plater_new");
+    orca_revision revision = 0;
+
+    const std::string cube = write_cube_stl(dir, "vol_cube.stl");
+    orca_object_id object_id = 0;
+    GUARD(g1, import_one(plater, cube.c_str(), 100, 100, &object_id, &revision));
+    expect_ok(g1, "import cube");
+    orca_scene_snapshot snap = take_snapshot(plater);
+    CHECK_EQ(snap.objects[0].volume_count, 1);
+    CHECK_EQ(snap.objects[0].volumes[0].type, ORCA_VOLUME_PART);
+    CHECK_EQ(snap.objects[0].volumes[0].positions, nullptr);
+    CHECK_EQ(snap.objects[0].volumes[0].indices, nullptr);
+    CHECK(snap.objects[0].volumes[0].id != 0);
+    CHECK(snap.objects[0].volumes[0].bbox_max[2] > snap.objects[0].volumes[0].bbox_min[2]);
+    const orca_instance_id instance_id = snap.objects[0].instances[0].id;
+    const uint64_t base_mesh_revision = snap.objects[0].mesh_revision;
+    const double base_z = snap.objects[0].instances[0].transform.offset_z;
+    orca_scene_snapshot_dispose(&snap);
+
+    // --- shape object (desktop Add Primitive) -----------------------------
+    orca_object_id shape_id = 0;
+    GUARD(e1, orca_plater_add_shape_object(plater, ORCA_SHAPE_SLAB, 20, 100, 100,
+                                           &shape_id, &revision));
+    expect_code(e1, ORCA_STATUS_INVALID_ARGUMENT, "slab is not an object shape");
+    GUARD(e2, orca_plater_add_shape_object(plater, 99, 20, 100, 100, &shape_id, &revision));
+    expect_code(e2, ORCA_STATUS_INVALID_ARGUMENT, "bogus shape");
+    GUARD(g2, orca_plater_add_shape_object(plater, ORCA_SHAPE_CYLINDER, 25, 60, 60,
+                                           &shape_id, &revision));
+    expect_ok(g2, "add shape object");
+    snap = take_snapshot(plater);
+    CHECK_EQ(snap.object_count, 2);
+    const orca_scene_object *shape = find_object(snap, shape_id);
+    CHECK(shape != nullptr);
+    if (shape) {
+        CHECK(snapshot_label(shape->name) == "Cylinder");
+        CHECK_EQ(shape->instances[0].transform.offset_x, 60.0);
+        CHECK_EQ(shape->instances[0].transform.offset_y, 60.0);
+        // rest on bed: transformed bbox touches z = 0
+        CHECK_NEAR(instance_min_z(*shape, shape->instances[0].matrix), 0.0, 1e-6);
+        CHECK_EQ(shape->volume_count, 1);
+    }
+    orca_scene_snapshot_dispose(&snap);
+    GUARD(g3, orca_plater_object_delete(plater, shape_id, &revision));
+    expect_ok(g3, "delete shape object");
+
+    // --- shape volume (desktop Add Modifier / Part / Negative volume) -----
+    orca_volume_id modifier_id = 0;
+    GUARD(e3, orca_plater_volume_add_shape(plater, 0x7fffffff, instance_id,
+                                           ORCA_VOLUME_MODIFIER, ORCA_SHAPE_CUBE, 20,
+                                           &modifier_id, &revision));
+    expect_code(e3, ORCA_STATUS_NOT_FOUND, "add volume to bogus object");
+    GUARD(e4, orca_plater_volume_add_shape(plater, object_id, instance_id, 99,
+                                           ORCA_SHAPE_CUBE, 20, &modifier_id, &revision));
+    expect_code(e4, ORCA_STATUS_INVALID_ARGUMENT, "add volume with bogus type");
+    GUARD(g4, orca_plater_volume_add_shape(plater, object_id, instance_id,
+                                           ORCA_VOLUME_MODIFIER, ORCA_SHAPE_CUBE, 20,
+                                           &modifier_id, &revision));
+    expect_ok(g4, "add modifier cube");
+    snap = take_snapshot(plater);
+    const orca_scene_object *host = find_object(snap, object_id);
+    CHECK(host != nullptr);
+    if (host) {
+        CHECK_EQ(host->volume_count, 2);
+        CHECK_EQ(host->volumes[1].type, ORCA_VOLUME_MODIFIER);
+        CHECK(modifier_id != 0);
+        CHECK(host->volumes[1].id == modifier_id);
+        CHECK(snapshot_label(host->volumes[1].name) == "Generic-Cube");
+        CHECK(host->volumes[1].positions != nullptr);
+        CHECK(host->volumes[1].indices != nullptr);
+        CHECK(host->volumes[1].index_count >= 36); // 12 faces x 3
+        CHECK(host->mesh_revision != base_mesh_revision);
+        // merged part mesh unchanged: same object bounds
+        CHECK_NEAR(host->instances[0].transform.offset_z, base_z, 1e-9);
+    }
+    orca_scene_snapshot_dispose(&snap);
+
+    // undo restores the single-part object (mesh revision goes back)
+    GUARD(g5, orca_plater_undo(plater, &revision));
+    expect_ok(g5, "undo add modifier");
+    snap = take_snapshot(plater);
+    host = find_object(snap, object_id);
+    if (host) {
+        CHECK_EQ(host->volume_count, 1);
+        CHECK_EQ(host->mesh_revision, base_mesh_revision);
+    }
+    orca_scene_snapshot_dispose(&snap);
+    GUARD(g6, orca_plater_redo(plater, &revision));
+    expect_ok(g6, "redo add modifier");
+
+    // --- volume rename / type / delete ------------------------------------
+    GUARD(e5, orca_plater_volume_rename(plater, object_id, modifier_id, "  ", &revision));
+    expect_code(e5, ORCA_STATUS_INVALID_ARGUMENT, "blank volume rename");
+    GUARD(g7, orca_plater_volume_rename(plater, object_id, modifier_id, "My modifier", &revision));
+    expect_ok(g7, "volume rename");
+    snap = take_snapshot(plater);
+    host = find_object(snap, object_id);
+    if (host) CHECK(snapshot_label(host->volumes[1].name) == "My modifier");
+    orca_scene_snapshot_dispose(&snap);
+
+    GUARD(g8, orca_plater_volume_set_type(plater, object_id, modifier_id,
+                                          ORCA_VOLUME_NEGATIVE, &revision));
+    expect_ok(g8, "modifier -> negative volume");
+    snap = take_snapshot(plater);
+    host = find_object(snap, object_id);
+    if (host) CHECK_EQ(host->volumes[1].type, ORCA_VOLUME_NEGATIVE);
+    orca_scene_snapshot_dispose(&snap);
+
+    // last solid part may not be retyped or deleted
+    orca_volume_id part_id = 0;
+    snap = take_snapshot(plater);
+    host = find_object(snap, object_id);
+    if (host) part_id = host->volumes[0].id;
+    orca_scene_snapshot_dispose(&snap);
+    GUARD(e6, orca_plater_volume_set_type(plater, object_id, part_id,
+                                          ORCA_VOLUME_MODIFIER, &revision));
+    expect_code(e6, ORCA_STATUS_INVALID_ARGUMENT, "retype last solid part");
+    GUARD(e7, orca_plater_volume_delete(plater, object_id, part_id, &revision));
+    expect_code(e7, ORCA_STATUS_INVALID_ARGUMENT, "delete last solid part");
+    GUARD(g9, orca_plater_volume_delete(plater, object_id, modifier_id, &revision));
+    expect_ok(g9, "delete modifier");
+    snap = take_snapshot(plater);
+    host = find_object(snap, object_id);
+    if (host) CHECK_EQ(host->volume_count, 1);
+    orca_scene_snapshot_dispose(&snap);
+
+    // --- volume from file (desktop Load... part) ---------------------------
+    write_garbage_file(dir);
+    const std::string two_cubes = write_two_cube_amf(dir, "vol_two.amf");
+    orca_volume_id file_part = 0;
+    GUARD(e8, orca_plater_volume_add_file(plater, object_id, ORCA_VOLUME_PART,
+                                          (dir + "/garbage.stl").c_str(),
+                                          &file_part, &revision));
+    expect_code(e8, ORCA_STATUS_ENGINE_FAILURE, "garbage part file");
+    GUARD(g10, orca_plater_volume_add_file(plater, object_id, ORCA_VOLUME_PART,
+                                           two_cubes.c_str(), &file_part, &revision));
+    expect_ok(g10, "add two-cube part");
+    snap = take_snapshot(plater);
+    host = find_object(snap, object_id);
+    CHECK(host != nullptr);
+    if (host) {
+        CHECK_EQ(host->volume_count, 2);
+        CHECK_EQ(host->volumes[1].type, ORCA_VOLUME_PART);
+        // merged object mesh now covers both disjoint cubes: wide bounds
+        CHECK(host->bbox_max[0] - host->bbox_min[0] > 60.0);
+    }
+    orca_scene_snapshot_dispose(&snap);
+
+    // --- split to objects (two disjoint bodies) ----------------------------
+    GUARD(e9, orca_plater_split_objects(plater, object_id, &shape_id, nullptr, &revision));
+    expect_code(e9, ORCA_STATUS_INVALID_ARGUMENT, "split with null count");
+    uint32_t split_count = 0;
+    orca_object_id first_split = 0;
+    GUARD(g11, orca_plater_split_objects(plater, object_id, &first_split,
+                                         &split_count, &revision));
+    expect_ok(g11, "split two-body object");
+    CHECK_EQ(split_count, 2u);
+    snap = take_snapshot(plater);
+    CHECK_EQ(snap.object_count, 2);
+    CHECK(find_object(snap, object_id) == nullptr);
+    if (const orca_scene_object *split_obj = find_object(snap, first_split))
+        CHECK_NEAR(instance_min_z(*split_obj, split_obj->instances[0].matrix), 0.0, 1e-6);
+    orca_scene_snapshot_dispose(&snap);
+    // undo split: original object with 2 volumes returns
+    GUARD(g12, orca_plater_undo(plater, &revision));
+    expect_ok(g12, "undo split to objects");
+    snap = take_snapshot(plater);
+    CHECK_EQ(snap.object_count, 1);
+    host = find_object(snap, object_id);
+    if (host) CHECK_EQ(host->volume_count, 2);
+    orca_scene_snapshot_dispose(&snap);
+
+    // --- split to parts -----------------------------------------------------
+    uint32_t parts = 0;
+    GUARD(g13, orca_plater_split_parts(plater, object_id, file_part, &parts, &revision));
+    expect_ok(g13, "split part to parts");
+    CHECK_EQ(parts, 2u);
+    snap = take_snapshot(plater);
+    host = find_object(snap, object_id);
+    if (host) {
+        CHECK_EQ(host->volume_count, 3);
+        // both new parts are solid
+        int solid = 0;
+        for (int i = 0; i < host->volume_count; ++i)
+            if (host->volumes[i].type == ORCA_VOLUME_PART) ++solid;
+        CHECK_EQ(solid, 3);
+    }
+    orca_scene_snapshot_dispose(&snap);
+
+    // single-body object cannot be split
+    GUARD(g14, orca_plater_object_delete(plater, object_id, &revision));
+    expect_ok(g14, "delete object");
+    GUARD(g15, import_one(plater, cube.c_str(), 90, 90, &object_id, &revision));
+    expect_ok(g15, "reimport single cube");
+    GUARD(e10, orca_plater_split_objects(plater, object_id, &first_split,
+                                         &split_count, &revision));
+    expect_code(e10, ORCA_STATUS_INVALID_MODEL, "single body cannot split to objects");
+    GUARD(e11, orca_plater_split_parts(plater, object_id, 0, &parts, &revision));
+    expect_code(e11, ORCA_STATUS_INVALID_MODEL, "single body cannot split to parts");
+
+    orca_plater_free(plater);
 }
 
 static void test_multi_object_import(const std::string &dir) {
@@ -2304,6 +2511,7 @@ int main() {
     test_abi_version();
     test_document_lifecycle(dir);
     test_history(dir);
+    test_volumes(dir);
     test_add_failures(dir);
     test_stable_ids_and_revisions(dir);
     test_not_found_and_validation(dir);

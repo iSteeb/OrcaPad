@@ -238,6 +238,116 @@ final class DocumentStore {
         }
     }
 
+    // MARK: Shapes and volumes (desktop Add Primitive / object list)
+
+    /// Desktop "Add Primitive" as a new object at the bed center.
+    func addShapeObject(shape: PrimitiveShape, sizeMM: Double, bedCenter: SIMD2<Double>) async {
+        if let mutation = await applyMutation(
+            .addShapeObject(shape: shape, sizeMM: sizeMM, bedCenter: bedCenter),
+            operation: "add shape object"
+        ), let objectID = mutation.createdObjectID,
+            let instanceID = mutation.snapshot.object(id: objectID)?.instances.first?.id {
+            selection = InstanceSelection(objectID: objectID, instanceID: instanceID)
+            frameRequest += 1
+        }
+    }
+
+    /// Desktop load_generic_subobject: a shape volume for the selected
+    /// instance (part / modifier / negative / blocker / enforcer).
+    func addVolume(
+        role: VolumeRole, shape: PrimitiveShape, sizeMM: Double,
+        objectID: ObjectID, instanceID: InstanceID
+    ) async {
+        _ = await applyMutation(
+            .volumeAddShape(
+                objectID: objectID,
+                instanceID: instanceID,
+                role: role,
+                shape: shape,
+                sizeMM: sizeMM
+            ),
+            operation: "add volume"
+        )
+    }
+
+    /// Desktop "Load...": a file as one volume of `role` on the selected
+    /// object (the file is copied into the sandbox first, like imports).
+    func addVolume(from source: URL, role: VolumeRole, objectID: ObjectID) async {
+        guard let plater, !isBusy else {
+            status.report(.document, "add part blocked: document is busy")
+            return
+        }
+        isMutating = true
+        let result = await BackgroundWork.run(operation: "load volume from file") {
+            let sandboxURL = try EnginePaths.copyImportIntoSandbox(source, kind: "model")
+            return try plater.apply(
+                .volumeAddFile(
+                    objectID: objectID,
+                    role: role,
+                    path: sandboxURL.path
+                )
+            )
+        }
+        isMutating = false
+        switch result {
+        case .success(let mutation):
+            install(mutation.snapshot)
+            status.report(.document, "\(source.lastPathComponent): added as \(role.label.lowercased())")
+        case .failure(let failure):
+            status.report(.document, failure: failure)
+        }
+    }
+
+    func setVolumeType(_ role: VolumeRole, volumeID: VolumeID, objectID: ObjectID) async {
+        _ = await applyMutation(
+            .volumeSetType(objectID: objectID, volumeID: volumeID, role: role),
+            operation: "change volume type"
+        )
+    }
+
+    func deleteVolume(_ volumeID: VolumeID, objectID: ObjectID) async {
+        _ = await applyMutation(
+            .volumeDelete(objectID: objectID, volumeID: volumeID),
+            operation: "delete volume"
+        )
+    }
+
+    func renameVolume(_ volumeID: VolumeID, to name: String, objectID: ObjectID) async {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            status.report(.document, failure: .invariant(
+                operation: "rename volume", diagnostic: "the name is empty"))
+            return
+        }
+        _ = await applyMutation(
+            .volumeRename(objectID: objectID, volumeID: volumeID, name: trimmed),
+            operation: "rename volume"
+        )
+    }
+
+    // MARK: Split (desktop Split to objects / parts)
+
+    func splitToObjects(_ objectID: ObjectID) async {
+        if let mutation = await applyMutation(
+            .splitObjects(objectID: objectID),
+            operation: "split to objects"
+        ), let first = mutation.createdObjectID,
+            let instanceID = mutation.snapshot.object(id: first)?.instances.first?.id {
+            selection = InstanceSelection(objectID: first, instanceID: instanceID)
+            frameRequest += 1
+            status.report(.document, "split into \(mutation.createdObjectCount) objects")
+        }
+    }
+
+    func splitToParts(_ objectID: ObjectID, volumeID: VolumeID?) async {
+        if let mutation = await applyMutation(
+            .splitParts(objectID: objectID, volumeID: volumeID),
+            operation: "split to parts"
+        ) {
+            status.report(.document, "split into \(mutation.createdPartCount) parts")
+        }
+    }
+
     func deleteObjects(_ objectIDs: [ObjectID]) async {
         guard let plater, !isBusy else {
             status.report(.document, "delete objects blocked: document is busy")

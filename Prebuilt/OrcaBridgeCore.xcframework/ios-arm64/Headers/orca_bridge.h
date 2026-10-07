@@ -7,7 +7,7 @@ extern "C" {
 #endif
 
 /// Version of the C ABI contract in this header. Callers verify it at runtime.
-#define ORCA_BRIDGE_ABI_VERSION ((uint32_t)18)
+#define ORCA_BRIDGE_ABI_VERSION ((uint32_t)19)
 
 typedef int32_t orca_status_code;
 #define ORCA_STATUS_OK                     ((orca_status_code)0)
@@ -26,6 +26,7 @@ typedef int32_t orca_status_code;
 typedef uint64_t orca_document_id;
 typedef uint64_t orca_object_id;
 typedef uint64_t orca_instance_id;
+typedef uint64_t orca_volume_id;
 typedef uint64_t orca_revision;
 
 /// Bridge-allocated UTF-8. The caller owns `data` and must call
@@ -69,8 +70,35 @@ typedef struct {
     double matrix[16];
 } orca_scene_instance;
 
+/// Volume roles: desktop ModelVolumeType (object list parts / modifiers).
+#define ORCA_VOLUME_PART             ((uint8_t)0)
+#define ORCA_VOLUME_NEGATIVE         ((uint8_t)1)
+#define ORCA_VOLUME_MODIFIER         ((uint8_t)2)
+#define ORCA_VOLUME_SUPPORT_BLOCKER  ((uint8_t)3)
+#define ORCA_VOLUME_SUPPORT_ENFORCER ((uint8_t)4)
+
+/// One ModelVolume of an object, in document order. Bounds and positions
+/// are OBJECT space (the volume's own transform applied), engine z-up mm.
+/// Model parts render through the object's merged mesh and carry no
+/// positions; every other role carries its own mesh (desktop draws
+/// modifiers / negative volumes / blockers / enforcers separately).
+typedef struct {
+    orca_volume_id id;            // engine ObjectID of the volume (stable)
+    orca_owned_string name;
+    uint8_t type;                 // ORCA_VOLUME_*
+    uint8_t reserved[3];
+    int32_t extruder;             // volume "extruder" option (0 = object's)
+    float bbox_min[3];
+    float bbox_max[3];
+    float *positions;             // xyz triples; NULL for model parts
+    int32_t position_count;
+    uint32_t *indices;
+    int32_t index_count;
+} orca_scene_volume;
+
 typedef struct {
     orca_object_id id;
+    /// Changes whenever ANY volume's geometry, role or composition changes.
     uint64_t mesh_revision;
     orca_owned_string name;
     float *positions;             // xyz triples, position_count entries
@@ -82,6 +110,8 @@ typedef struct {
     float pivot[3];               // object-space packing pivot
     orca_scene_instance *instances;
     int32_t instance_count;
+    orca_scene_volume *volumes;   // >= 1, document order
+    int32_t volume_count;
 } orca_scene_object;
 
 typedef struct {
@@ -170,6 +200,67 @@ orca_result orca_plater_object_rename(orca_plater *plater, orca_object_id object
 /// Desktop "Delete all": removes every object (one undo step).
 /// ORCA_STATUS_INVALID_MODEL when the document is already empty.
 orca_result orca_plater_clear(orca_plater *plater, orca_revision *out_revision);
+
+/// Built-in shapes (desktop GUI_ObjectList create_mesh). `size_mm` is the
+/// desktop side length (10% of the largest bed dimension). SLAB is only
+/// valid for volumes: 1.5x the instance footprint, half its height.
+#define ORCA_SHAPE_CUBE     ((int32_t)0)
+#define ORCA_SHAPE_CYLINDER ((int32_t)1)
+#define ORCA_SHAPE_SPHERE   ((int32_t)2)
+#define ORCA_SHAPE_CONE     ((int32_t)3)
+#define ORCA_SHAPE_DISC     ((int32_t)4)
+#define ORCA_SHAPE_TORUS    ((int32_t)5)
+#define ORCA_SHAPE_SLAB     ((int32_t)6)
+
+/// Desktop "Add Primitive" (new object): the shape placed at the bed
+/// center, resting on the bed.
+orca_result orca_plater_add_shape_object(orca_plater *plater, int32_t shape,
+                                         double size_mm, double bed_center_x,
+                                         double bed_center_y,
+                                         orca_object_id *out_object_id,
+                                         orca_revision *out_revision);
+/// Desktop ObjectList::load_generic_subobject: adds a shape volume of role
+/// `type` to `object_id`, aligned with the bed for `instance_id` and placed
+/// at that instance's front-right bounding-box corner (slab: centered).
+orca_result orca_plater_volume_add_shape(orca_plater *plater, orca_object_id object_id,
+                                         orca_instance_id instance_id, uint8_t type,
+                                         int32_t shape, double size_mm,
+                                         orca_volume_id *out_volume_id,
+                                         orca_revision *out_revision);
+/// Desktop ObjectList::load_modifier ("Load..."): the file's merged mesh
+/// becomes one volume of role `type`, keeping its position relative to the
+/// object's first volume in the source coordinates.
+orca_result orca_plater_volume_add_file(orca_plater *plater, orca_object_id object_id,
+                                        uint8_t type, const char *path,
+                                        orca_volume_id *out_volume_id,
+                                        orca_revision *out_revision);
+/// Changes a volume's role. Turning the last model part into anything
+/// else is ORCA_STATUS_INVALID_ARGUMENT (an object keeps a solid part).
+orca_result orca_plater_volume_set_type(orca_plater *plater, orca_object_id object_id,
+                                        orca_volume_id volume_id, uint8_t type,
+                                        orca_revision *out_revision);
+/// Deletes a volume; the last model part cannot be deleted
+/// (ORCA_STATUS_INVALID_ARGUMENT: delete the object instead).
+orca_result orca_plater_volume_delete(orca_plater *plater, orca_object_id object_id,
+                                      orca_volume_id volume_id,
+                                      orca_revision *out_revision);
+orca_result orca_plater_volume_rename(orca_plater *plater, orca_object_id object_id,
+                                      orca_volume_id volume_id, const char *name,
+                                      orca_revision *out_revision);
+/// Desktop "Split to objects" (ModelObject::split): replaces the object by
+/// one object per connected mesh (or per part of a multi-part object),
+/// each dropped onto the bed. A single-body object is ORCA_STATUS_INVALID_MODEL.
+orca_result orca_plater_split_objects(orca_plater *plater, orca_object_id object_id,
+                                      orca_object_id *out_first_object_id,
+                                      uint32_t *out_object_count,
+                                      orca_revision *out_revision);
+/// Desktop "Split to parts" (ModelVolume::split) of model part `volume_id`
+/// (0 = the object's only model part). A single-body part is
+/// ORCA_STATUS_INVALID_MODEL.
+orca_result orca_plater_split_parts(orca_plater *plater, orca_object_id object_id,
+                                    orca_volume_id volume_id,
+                                    uint32_t *out_part_count,
+                                    orca_revision *out_revision);
 
 /// Produces a deep copy at one authoritative document revision. The caller
 /// owns every nested allocation and must call orca_scene_snapshot_dispose().

@@ -37,14 +37,34 @@ public final class EnginePlater: @unchecked Sendable {
         case rename(objectID: ObjectID, name: String)
         /// Desktop "Delete all".
         case clear
+        /// Desktop "Add Primitive" (new object).
+        case addShapeObject(shape: PrimitiveShape, sizeMM: Double, bedCenter: SIMD2<Double>)
+        /// Desktop load_generic_subobject (part / modifier / negative /
+        /// blocker / enforcer from a shape).
+        case volumeAddShape(
+            objectID: ObjectID, instanceID: InstanceID, role: VolumeRole,
+            shape: PrimitiveShape, sizeMM: Double)
+        /// Desktop "Load..." (a file as one volume).
+        case volumeAddFile(objectID: ObjectID, role: VolumeRole, path: String)
+        case volumeSetType(objectID: ObjectID, volumeID: VolumeID, role: VolumeRole)
+        case volumeDelete(objectID: ObjectID, volumeID: VolumeID)
+        case volumeRename(objectID: ObjectID, volumeID: VolumeID, name: String)
+        /// Desktop "Split to objects".
+        case splitObjects(objectID: ObjectID)
+        /// Desktop "Split to parts" (nil = the object's only model part).
+        case splitParts(objectID: ObjectID, volumeID: VolumeID?)
     }
 
     public struct MutationResult: Sendable {
         public let snapshot: SceneSnapshot
         public let createdObjectID: ObjectID?
         public let createdInstanceID: InstanceID?
-        /// Objects created by an import (first is `createdObjectID`).
+        /// Objects created by an import or a split (first is `createdObjectID`).
         public let createdObjectCount: Int
+
+        /// Volumes created by `volumeAdd*` / parts created by `splitParts`.
+        public let createdVolumeID: VolumeID?
+        public let createdPartCount: Int
 
         /// Instances that did not fit the bed after `arrange` (0 otherwise).
         public let unprintableCount: Int
@@ -54,13 +74,17 @@ public final class EnginePlater: @unchecked Sendable {
             createdObjectID: ObjectID? = nil,
             createdInstanceID: InstanceID? = nil,
             createdObjectCount: Int = 0,
-            unprintableCount: Int = 0
+            unprintableCount: Int = 0,
+            createdVolumeID: VolumeID? = nil,
+            createdPartCount: Int = 0
         ) {
             self.snapshot = snapshot
             self.createdObjectID = createdObjectID
             self.createdInstanceID = createdInstanceID
             self.createdObjectCount = createdObjectCount
             self.unprintableCount = unprintableCount
+            self.createdVolumeID = createdVolumeID
+            self.createdPartCount = createdPartCount
         }
     }
 
@@ -100,6 +124,8 @@ public final class EnginePlater: @unchecked Sendable {
             var createdInstanceID: InstanceID?
             var createdObjectCount = 0
             var arrangeUnprintableCount = 0
+            var createdVolumeID: VolumeID?
+            var createdPartCount = 0
             let presetHandle: OpaquePointer? = presets?.withUnsafeHandle { $0 }
 
             switch mutation {
@@ -268,6 +294,94 @@ public final class EnginePlater: @unchecked Sendable {
                     orca_plater_clear(handle, &mutationRevision),
                     operation: "delete all objects"
                 )
+
+            case .addShapeObject(let shape, let size, let bedCenter):
+                var rawObjectID: UInt64 = 0
+                try BridgeResult.consume(
+                    orca_plater_add_shape_object(
+                        handle, shape.rawValue, size, bedCenter.x, bedCenter.y,
+                        &rawObjectID, &mutationRevision
+                    ),
+                    operation: "add shape object"
+                )
+                createdObjectCount = 1
+                createdObjectID = try Self.objectID(rawObjectID, operation: "add shape object")
+
+            case .volumeAddShape(let objectID, let instanceID, let role, let shape, let size):
+                var rawVolumeID: UInt64 = 0
+                try BridgeResult.consume(
+                    orca_plater_volume_add_shape(
+                        handle, objectID.rawValue, instanceID.rawValue, role.rawValue,
+                        shape.rawValue, size, &rawVolumeID, &mutationRevision
+                    ),
+                    operation: "add volume to object \(objectID)"
+                )
+                createdVolumeID = try Self.volumeID(rawVolumeID, operation: "add volume")
+
+            case .volumeAddFile(let objectID, let role, let path):
+                var rawVolumeID: UInt64 = 0
+                try BridgeResult.consume(
+                    path.withCString { pointer in
+                        orca_plater_volume_add_file(
+                            handle, objectID.rawValue, role.rawValue, pointer,
+                            &rawVolumeID, &mutationRevision
+                        )
+                    },
+                    operation: "load volume from file"
+                )
+                createdVolumeID = try Self.volumeID(rawVolumeID, operation: "add volume")
+
+            case .volumeSetType(let objectID, let volumeID, let role):
+                try BridgeResult.consume(
+                    orca_plater_volume_set_type(
+                        handle, objectID.rawValue, volumeID.rawValue, role.rawValue,
+                        &mutationRevision
+                    ),
+                    operation: "change volume type"
+                )
+
+            case .volumeDelete(let objectID, let volumeID):
+                try BridgeResult.consume(
+                    orca_plater_volume_delete(
+                        handle, objectID.rawValue, volumeID.rawValue, &mutationRevision
+                    ),
+                    operation: "delete volume"
+                )
+
+            case .volumeRename(let objectID, let volumeID, let name):
+                try BridgeResult.consume(
+                    name.withCString { pointer in
+                        orca_plater_volume_rename(
+                            handle, objectID.rawValue, volumeID.rawValue, pointer,
+                            &mutationRevision
+                        )
+                    },
+                    operation: "rename volume"
+                )
+
+            case .splitObjects(let objectID):
+                var rawObjectID: UInt64 = 0
+                var objectCount: UInt32 = 0
+                try BridgeResult.consume(
+                    orca_plater_split_objects(
+                        handle, objectID.rawValue, &rawObjectID, &objectCount,
+                        &mutationRevision
+                    ),
+                    operation: "split object \(objectID) to objects"
+                )
+                createdObjectCount = Int(objectCount)
+                createdObjectID = try Self.objectID(rawObjectID, operation: "split to objects")
+
+            case .splitParts(let objectID, let volumeID):
+                var partCount: UInt32 = 0
+                try BridgeResult.consume(
+                    orca_plater_split_parts(
+                        handle, objectID.rawValue, volumeID?.rawValue ?? 0,
+                        &partCount, &mutationRevision
+                    ),
+                    operation: "split object \(objectID) to parts"
+                )
+                createdPartCount = Int(partCount)
             }
 
             let scene = try snapshotLocked()
@@ -283,7 +397,9 @@ public final class EnginePlater: @unchecked Sendable {
                 createdObjectID: createdObjectID,
                 createdInstanceID: createdInstanceID,
                 createdObjectCount: createdObjectCount,
-                unprintableCount: arrangeUnprintableCount
+                unprintableCount: arrangeUnprintableCount,
+                createdVolumeID: createdVolumeID,
+                createdPartCount: createdPartCount
             )
         }
     }
@@ -547,7 +663,14 @@ public final class EnginePlater: @unchecked Sendable {
                             rawObject.pivot.2
                         )
                     ),
-                    instances: instances
+                    instances: instances,
+                    volumes: try Self.decodeVolumes(
+                        rawObject, meshRevision: rawObject.mesh_revision,
+                        pivot: SIMD3(
+                            rawObject.pivot.0, rawObject.pivot.1, rawObject.pivot.2
+                        ),
+                        objectID: objectID
+                    )
                 ))
             }
         }
@@ -621,6 +744,99 @@ public final class EnginePlater: @unchecked Sendable {
             throw invariant(operation: operation, "Bridge returned an invalid instance ID")
         }
         return InstanceID(rawValue: rawValue)
+    }
+
+    private static func volumeID(
+        _ rawValue: UInt64,
+        operation: String
+    ) throws -> VolumeID {
+        guard rawValue != 0 else {
+            throw invariant(operation: operation, "Bridge returned an invalid volume ID")
+        }
+        return VolumeID(rawValue: rawValue)
+    }
+
+    /// Decodes one object's volumes. Parts carry no own mesh (they render
+    /// through the merged object mesh); other roles carry their object-space
+    /// mesh keyed by the object's mesh revision and pivot.
+    private static func decodeVolumes(
+        _ rawObject: orca_scene_object,
+        meshRevision: UInt64,
+        pivot: SIMD3<Float>,
+        objectID: ObjectID
+    ) throws -> [SceneVolume] {
+        let count = Int(rawObject.volume_count)
+        guard count >= 0 else {
+            throw invariant(
+                operation: "read scene snapshot",
+                "Object \(objectID) has a negative volume count"
+            )
+        }
+        guard count > 0 else {
+            throw invariant(
+                operation: "read scene snapshot",
+                "Object \(objectID) has no volumes"
+            )
+        }
+        guard let volumePointer = rawObject.volumes else {
+            throw invariant(
+                operation: "read scene snapshot",
+                "Object \(objectID) has volumes without storage"
+            )
+        }
+        var volumes: [SceneVolume] = []
+        volumes.reserveCapacity(count)
+        for index in 0..<count {
+            let raw = volumePointer[index]
+            let volumeID = try volumeID(raw.id, operation: "read scene snapshot")
+            let name = try borrowedString(
+                raw.name, operation: "read name for volume \(volumeID)"
+            )
+            guard let role = VolumeRole(rawValue: raw.type) else {
+                throw invariant(
+                    operation: "read scene snapshot",
+                    "Volume \(volumeID) has an unknown role \(raw.type)"
+                )
+            }
+            var mesh: SceneMesh?
+            if role != .part {
+                guard raw.position_count > 0, let positions = raw.positions,
+                      raw.index_count > 0, let indices = raw.indices else {
+                    throw invariant(
+                        operation: "read scene snapshot",
+                        "Volume \(volumeID) has incomplete mesh storage"
+                    )
+                }
+                var points: [SIMD3<Float>] = []
+                points.reserveCapacity(Int(raw.position_count))
+                for vertex in 0..<Int(raw.position_count) {
+                    let base = vertex * 3
+                    points.append(SIMD3(
+                        positions[base], positions[base + 1], positions[base + 2]
+                    ))
+                }
+                mesh = SceneMesh(
+                    revision: meshRevision,
+                    positions: points,
+                    indices: Array(UnsafeBufferPointer(
+                        start: indices, count: Int(raw.index_count)
+                    )),
+                    bounds: EngineBounds(
+                        minimum: SIMD3(raw.bbox_min.0, raw.bbox_min.1, raw.bbox_min.2),
+                        maximum: SIMD3(raw.bbox_max.0, raw.bbox_max.1, raw.bbox_max.2)
+                    ),
+                    pivot: pivot
+                )
+            }
+            volumes.append(SceneVolume(
+                id: volumeID,
+                name: name,
+                role: role,
+                extruder: Int(raw.extruder),
+                mesh: mesh
+            ))
+        }
+        return volumes
     }
 
     private static func invariant(operation: String, _ diagnostic: String) -> BridgeError {

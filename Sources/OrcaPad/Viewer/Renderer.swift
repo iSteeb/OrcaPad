@@ -22,6 +22,16 @@ private struct InstanceDraw {
     let selected: Bool
 }
 
+/// A translucent non-part volume (desktop color_from_model_volume) drawn
+/// per instance after the opaque parts.
+private struct VolumeDraw {
+    let volumeID: VolumeID
+    let vb: MTLBuffer
+    let ib: MTLBuffer
+    let indexCount: Int
+    let color: SIMD4<Float>
+}
+
 /// Owns all Metal state and draws one frame per display-link tick.
 /// Scene = bed grid + N objects × M instances (per-instance model matrices).
 /// @MainActor: MTKView is main-actor isolated in the SDK; its delegate is
@@ -42,8 +52,10 @@ final class Renderer: NSObject, MTKViewDelegate {
 
     private var commandQueue: MTLCommandQueue!
     private var litPipeline: MTLRenderPipelineState!
+    private var litBlendPipeline: MTLRenderPipelineState!
     private var linePipeline: MTLRenderPipelineState!
     private var depthState: MTLDepthStencilState!
+    private var translucentDepthState: MTLDepthStencilState!
     private var overlayDepthState: MTLDepthStencilState!
 
     // Bed grid
@@ -62,6 +74,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         let pickPositions: [SIMD3<Float>]  // packed viewer-space (pre-instance)
         let pickIndices: [UInt32]
         var instances: [InstanceDraw]
+        var volumes: [VolumeDraw]
     }
     private var objects: [RenderObject] = []
     private var documentID: DocumentID?
@@ -70,6 +83,17 @@ final class Renderer: NSObject, MTKViewDelegate {
 
     private static let objectColor = SIMD4<Float>(0.96, 0.52, 0.11, 1)
     private static let selectedColor = SIMD4<Float>(0.16, 0.80, 0.95, 1)
+
+    /// Desktop GLVolume colors for non-part volumes (3DScene.cpp).
+    static func volumeColor(_ role: VolumeRole) -> SIMD4<Float> {
+        switch role {
+        case .part: return SIMD4(0.96, 0.52, 0.11, 1)
+        case .modifier: return SIMD4(1.0, 1.0, 0.0, 0.6)
+        case .negative: return SIMD4(0.3, 0.3, 0.3, 0.4)
+        case .supportBlocker: return SIMD4(1.0, 0.3, 0.3, 0.4)
+        case .supportEnforcer: return SIMD4(0.3, 0.3, 1.0, 0.4)
+        }
+    }
 
     // Frame uniforms
     private var cubeUniforms = CubeUniforms(
@@ -142,6 +166,19 @@ final class Renderer: NSObject, MTKViewDelegate {
         lineDesc.depthAttachmentPixelFormat = view.depthStencilPixelFormat
 
         litPipeline = try device.makeRenderPipelineState(descriptor: litDesc)
+
+        // Same lit pipeline with blending: desktop draws modifiers /
+        // negative volumes / support blockers / enforcers translucently on
+        // top of the solid parts (color_from_model_volume).
+        let blendDesc = litDesc.copy() as! MTLRenderPipelineDescriptor
+        blendDesc.colorAttachments[0].isBlendingEnabled = true
+        blendDesc.colorAttachments[0].rgbBlendOperation = .add
+        blendDesc.colorAttachments[0].sourceRGBBlendFactor = .sourceAlpha
+        blendDesc.colorAttachments[0].destinationRGBBlendFactor = .oneMinusSourceAlpha
+        blendDesc.colorAttachments[0].sourceAlphaBlendFactor = .one
+        blendDesc.colorAttachments[0].destinationAlphaBlendFactor = .oneMinusSourceAlpha
+        litBlendPipeline = try device.makeRenderPipelineState(descriptor: blendDesc)
+
         linePipeline = try device.makeRenderPipelineState(descriptor: lineDesc)
 
         let depthDesc = MTLDepthStencilDescriptor()
@@ -151,6 +188,14 @@ final class Renderer: NSObject, MTKViewDelegate {
             throw MetalError.missing("depth stencil state")
         }
         depthState = ds
+
+        let translucentDesc = MTLDepthStencilDescriptor()
+        translucentDesc.depthCompareFunction = .less
+        translucentDesc.isDepthWriteEnabled = false
+        guard let translucent = device.makeDepthStencilState(descriptor: translucentDesc) else {
+            throw MetalError.missing("translucent depth stencil state")
+        }
+        translucentDepthState = translucent
 
         let overlayDesc = MTLDepthStencilDescriptor()
         overlayDesc.depthCompareFunction = .always
@@ -272,6 +317,41 @@ final class Renderer: NSObject, MTKViewDelegate {
                 continue
             }
 
+            // Translucent non-part volumes share the object mesh revision,
+            // so they are rebuilt with it (desktop modifier rendering).
+            var volumeDraws: [VolumeDraw] = []
+            for volume in sceneObject.nonPartVolumes {
+                guard let volumeMesh = volume.mesh else {
+                    throw MetalError.invalidScene(
+                        "volume \(volume.id) of object \(sceneObject.id) has no mesh"
+                    )
+                }
+                let geometry = Geometry.expandFlat(mesh: volumeMesh)
+                guard !geometry.verts.isEmpty else {
+                    throw MetalError.invalidScene(
+                        "volume \(volume.id) of object \(sceneObject.id) has empty geometry"
+                    )
+                }
+                guard let vertexBuffer = device.makeBuffer(
+                    bytes: geometry.verts,
+                    length: MemoryLayout<VertexPNC>.stride * geometry.verts.count,
+                    options: .storageModeShared
+                ), let indexBuffer = device.makeBuffer(
+                    bytes: geometry.idx,
+                    length: MemoryLayout<UInt32>.stride * geometry.idx.count,
+                    options: .storageModeShared
+                ) else {
+                    throw MetalError.missing("mesh buffers for volume \(volume.id)")
+                }
+                volumeDraws.append(VolumeDraw(
+                    volumeID: volume.id,
+                    vb: vertexBuffer,
+                    ib: indexBuffer,
+                    indexCount: geometry.idx.count,
+                    color: Renderer.volumeColor(volume.role)
+                ))
+            }
+
             let geometry = Geometry.expandFlat(mesh: sceneObject.mesh)
             guard !geometry.verts.isEmpty, !geometry.idx.isEmpty else {
                 throw MetalError.invalidScene(
@@ -312,7 +392,8 @@ final class Renderer: NSObject, MTKViewDelegate {
                 bboxMax: bounds.maximum,
                 pickPositions: positions,
                 pickIndices: geometry.idx,
-                instances: instances
+                instances: instances,
+                volumes: volumeDraws
             ))
         }
 
@@ -828,6 +909,30 @@ final class Renderer: NSObject, MTKViewDelegate {
                 encoder.drawIndexedPrimitives(
                     type: .triangle, indexCount: obj.indexCount, indexType: .uint32,
                     indexBuffer: obj.ib, indexBufferOffset: 0, instanceCount: 1)
+            }
+        }
+        encoder.popDebugGroup()
+
+        // Translucent volumes (modifiers / negatives / blockers / enforcers)
+        // over the opaque parts: depth-tested, not depth-writing.
+        encoder.pushDebugGroup("volumes")
+        encoder.setRenderPipelineState(litBlendPipeline)
+        encoder.setDepthStencilState(translucentDepthState)
+        encoder.setCullMode(.none)
+        for obj in objects {
+            for draw in obj.volumes where draw.indexCount > 0 {
+                encoder.setVertexBuffer(draw.vb, offset: 0, index: 0)
+                for inst in obj.instances {
+                    cubeUniforms.mvp = viewProj * inst.model
+                    cubeUniforms.model = inst.model
+                    cubeUniforms.color = draw.color
+                    var cu = cubeUniforms
+                    encoder.setVertexBytes(&cu, length: MemoryLayout<CubeUniforms>.stride, index: 1)
+                    encoder.setFragmentBytes(&cu, length: MemoryLayout<CubeUniforms>.stride, index: 1)
+                    encoder.drawIndexedPrimitives(
+                        type: .triangle, indexCount: draw.indexCount, indexType: .uint32,
+                        indexBuffer: draw.ib, indexBufferOffset: 0)
+                }
             }
         }
         encoder.popDebugGroup()

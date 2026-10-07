@@ -17,7 +17,7 @@ struct PlateTabView: View {
     @State private var objectsPresented = false
     @State private var gizmoMode: GizmoMode = .move
     @State private var rotationAxis: EngineAxis = .z
-    @State private var renameTarget: ObjectID?
+    @State private var renameTarget: RenameTarget?
     @State private var renameText = ""
     @State private var deleteAllConfirmation = false
 
@@ -86,7 +86,7 @@ struct PlateTabView: View {
         }
         .fileImporter(
             isPresented: $importPresented,
-            allowedContentTypes: importMode == .model ? ImportTypes.models : ImportTypes.projects,
+            allowedContentTypes: importMode == .project ? ImportTypes.projects : ImportTypes.models,
             onCompletion: handleImport
         )
         .sheet(isPresented: $objectsPresented) { objectsList }
@@ -119,7 +119,12 @@ struct PlateTabView: View {
         }
     }
 
-    private enum ImportMode { case model, project }
+    private enum ImportMode: Equatable {
+        case model
+        case project
+        /// Desktop "Load..." subobject: a file added as one volume.
+        case volume(role: VolumeRole, objectID: ObjectID)
+    }
 
     // MARK: Canvas
 
@@ -196,6 +201,24 @@ struct PlateTabView: View {
                 } label: {
                     Label("Import model…", systemImage: "plus.square")
                 }
+                Menu {
+                    ForEach(
+                        PrimitiveShape.allCases.filter(\.isObjectShape),
+                        id: \.self
+                    ) { shape in
+                        Button(shape.label) {
+                            Task {
+                                await document.addShapeObject(
+                                    shape: shape,
+                                    sizeMM: shapeSize,
+                                    bedCenter: bedCenter
+                                )
+                            }
+                        }
+                    }
+                } label: {
+                    Label("Add shape", systemImage: "cube")
+                }
                 Divider()
                 Button {
                     importMode = .project
@@ -270,6 +293,15 @@ struct PlateTabView: View {
         }
     }
 
+    private var bedCenter: SIMD2<Double> {
+        SIMD2(Double(bed.center.x), Double(bed.center.y))
+    }
+
+    /// Desktop get_size_proportional_to_max_bed_size(0.1).
+    private var shapeSize: Double {
+        max(Double(bed.size.x), Double(bed.size.y)) * 0.1
+    }
+
     private var defaultProjectName: String {
         let first = document.scene?.objects.first?.name ?? ""
         let base = (first as NSString).deletingPathExtension
@@ -277,6 +309,11 @@ struct PlateTabView: View {
     }
 
     private func handleImport(_ result: Result<URL, any Error>) {
+        if case .volume(let role, let objectID) = importMode,
+            case .success(let url) = result {
+            Task { await document.addVolume(from: url, role: role, objectID: objectID) }
+            return
+        }
         if importMode == .project, case .success(let url) = result {
             if document.scene?.objects.isEmpty == false {
                 replaceConfirmation = url
@@ -317,43 +354,7 @@ struct PlateTabView: View {
                 } else {
                     List {
                         ForEach(objects) { object in
-                            HStack {
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(object.name).lineLimit(1)
-                                    Text("\(object.instances.count) instance(s)")
-                                        .font(.caption2)
-                                        .foregroundStyle(.secondary)
-                                }
-                                Spacer()
-                                Button {
-                                    renameText = object.name
-                                    renameTarget = object.id
-                                } label: {
-                                    Image(systemName: "pencil")
-                                }
-                                .buttonStyle(.borderless)
-                                .accessibilityLabel("Rename \(object.name)")
-                                Button {
-                                    Task { await document.addInstance(to: object.id) }
-                                } label: {
-                                    Image(systemName: "plus.square.on.square")
-                                }
-                                .buttonStyle(.borderless)
-                                Button {
-                                    Task { await document.deleteObject(object.id) }
-                                } label: {
-                                    Image(systemName: "trash").foregroundStyle(.red)
-                                }
-                                .buttonStyle(.borderless)
-                            }
-                            .contentShape(Rectangle())
-                            .onTapGesture {
-                                document.select(
-                                    objectID: object.id,
-                                    instanceID: object.instances.first?.id
-                                )
-                                objectsPresented = false
-                            }
+                            objectRow(object)
                         }
                         .onDelete { indexSet in
                             let objectIDs = indexSet.map { objects[$0].id }
@@ -376,7 +377,7 @@ struct PlateTabView: View {
                     .disabled(objects.isEmpty || document.isBusy)
                 }
             }
-            .alert("Rename object", isPresented: Binding(
+            .alert("Rename", isPresented: Binding(
                 get: { renameTarget != nil },
                 set: { if !$0 { renameTarget = nil } }
             )) {
@@ -384,7 +385,16 @@ struct PlateTabView: View {
                 Button("Rename") {
                     if let target = renameTarget {
                         let name = renameText
-                        Task { await document.rename(target, to: name) }
+                        Task {
+                            switch target {
+                            case .object(let objectID):
+                                await document.rename(objectID, to: name)
+                            case .volume(let objectID, let volumeID):
+                                await document.renameVolume(
+                                    volumeID, to: name, objectID: objectID
+                                )
+                            }
+                        }
                     }
                     renameTarget = nil
                 }
@@ -401,6 +411,211 @@ struct PlateTabView: View {
             } message: {
                 Text("Removes every object from the plate. You can undo this.")
             }
+        }
+    }
+}
+
+extension PlateTabView {
+    /// One object row: identity, instances, per-object actions (desktop
+    /// object-list context menu) and, when composed of several volumes,
+    /// the volume rows.
+    @ViewBuilder
+    private func objectRow(_ object: SceneObject) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(object.name).lineLimit(1)
+                    Text(object.volumes.count > 1
+                         ? "\(object.volumes.count) volumes · \(object.instances.count) instance(s)"
+                         : "\(object.instances.count) instance(s)")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                if object.nonPartVolumes.isEmpty == false {
+                    Circle()
+                        .fill(roleColor(object.nonPartVolumes[0].role))
+                        .frame(width: 8, height: 8)
+                        .accessibilityLabel("Has modifiers")
+                }
+                Button {
+                    Task { await document.addInstance(to: object.id) }
+                } label: {
+                    Image(systemName: "plus.square.on.square")
+                }
+                .buttonStyle(.borderless)
+                Button {
+                    Task { await document.deleteObject(object.id) }
+                } label: {
+                    Image(systemName: "trash").foregroundStyle(.red)
+                }
+                .buttonStyle(.borderless)
+                objectMenu(object)
+            }
+            if object.volumes.count > 1 || object.nonPartVolumes.isEmpty == false {
+                ForEach(object.volumes) { volume in
+                    volumeRow(volume, objectID: object.id)
+                }
+            }
+        }
+        .contentShape(Rectangle())
+        .onTapGesture {
+            document.select(
+                objectID: object.id,
+                instanceID: object.instances.first?.id
+            )
+            objectsPresented = false
+        }
+    }
+
+    /// Desktop object context menu: split, add volumes, rename.
+    private func objectMenu(_ object: SceneObject) -> some View {
+        Menu {
+            Button {
+                Task { await document.splitToObjects(object.id) }
+            } label: {
+                Label("Split to objects", systemImage: "arrow.triangle.branch")
+            }
+            .disabled(object.volumes.isEmpty)
+            Button {
+                let partID = object.modelParts.count == 1
+                    ? object.modelParts.first?.id : nil
+                Task { await document.splitToParts(object.id, volumeID: partID) }
+            } label: {
+                Label("Split to parts", systemImage: "square.split.2x1")
+            }
+            .disabled(object.modelParts.isEmpty)
+            Divider()
+            ForEach([VolumeRole.part, .negative, .modifier, .supportBlocker, .supportEnforcer], id: \.self) { role in
+                volumeAddMenu(role: role, object: object)
+            }
+            Divider()
+            Button {
+                renameText = object.name
+                renameTarget = .object(object.id)
+            } label: {
+                Label("Rename", systemImage: "pencil")
+            }
+        } label: {
+            Image(systemName: "ellipsis.circle")
+        }
+        .disabled(document.isBusy)
+    }
+
+    /// Desktop "Add Part / Modifier / Negative volume / Support blocker /
+    /// Support enforcer": from a shape or from a file.
+    private func volumeAddMenu(role: VolumeRole, object: SceneObject) -> some View {
+        Menu {
+            ForEach(PrimitiveShape.allCases, id: \.self) { shape in
+                Button("\(shape.label)\(shape == .slab ? " (modifier)" : "")") {
+                    guard let instanceID = object.instances.first?.id else {
+                        environment.status.report(
+                            .document,
+                            failure: .invariant(
+                                operation: "add volume",
+                                diagnostic: "object \(object.name) has no instance"
+                            )
+                        )
+                        return
+                    }
+                    Task {
+                        await document.addVolume(
+                            role: role,
+                            shape: shape,
+                            sizeMM: shapeSize,
+                            objectID: object.id,
+                            instanceID: instanceID
+                        )
+                    }
+                }
+            }
+            Divider()
+            Button("From file…") {
+                importMode = .volume(role: role, objectID: object.id)
+                importPresented = true
+            }
+        } label: {
+            Label("Add \(role.label.lowercased())", systemImage: "plus.square.on.square")
+        }
+    }
+
+    private func roleColor(_ role: VolumeRole) -> Color {
+        let c = Renderer.volumeColor(role)
+        return Color(
+            red: Double(c.x), green: Double(c.y), blue: Double(c.z),
+            opacity: Double(c.w)
+        )
+    }
+
+    /// One volume row: role color, name, type and per-volume actions.
+    private func volumeRow(_ volume: SceneVolume, objectID: ObjectID) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: volume.role.symbol)
+                .foregroundStyle(roleColor(volume.role))
+                .font(.caption)
+            Text(volume.name)
+                .font(.caption)
+                .lineLimit(1)
+            if volume.extruder > 0 {
+                Text("T\(volume.extruder)")
+                    .font(.caption2.monospaced())
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+            Menu {
+                Button {
+                    renameText = volume.name
+                    renameTarget = .volume(objectID, volume.id)
+                } label: {
+                    Label("Rename", systemImage: "pencil")
+                }
+                if volume.role != .part {
+                    Menu {
+                        ForEach(VolumeRole.allCases, id: \.self) { role in
+                            Button(role.label) {
+                                Task {
+                                    await document.setVolumeType(
+                                        role, volumeID: volume.id, objectID: objectID
+                                    )
+                                }
+                            }
+                        }
+                    } label: {
+                        Label("Change type", systemImage: "arrow.triangle.2.circlepath")
+                    }
+                }
+                Button(role: .destructive) {
+                    Task {
+                        await document.deleteVolume(volume.id, objectID: objectID)
+                    }
+                } label: {
+                    Label("Delete", systemImage: "trash")
+                }
+            } label: {
+                Image(systemName: "ellipsis.circle")
+                    .font(.caption)
+            }
+            .disabled(document.isBusy)
+        }
+        .padding(.leading, 16)
+    }
+}
+
+/// Rename routing: object or volume.
+private enum RenameTarget {
+    case object(ObjectID)
+    case volume(ObjectID, VolumeID)
+}
+
+/// SF Symbol + role iconography for the object list (desktop parity).
+private extension VolumeRole {
+    var symbol: String {
+        switch self {
+        case .part: return "cube.fill"
+        case .negative: return "minus.square.dashed"
+        case .modifier: return "slider.horizontal.3"
+        case .supportBlocker: return "hand.raised.fill"
+        case .supportEnforcer: return "hand.thumbsup.fill"
         }
     }
 }

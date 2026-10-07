@@ -978,6 +978,71 @@ static Slic3r::ModelInstance *plater_instance(Slic3r::ModelObject *object,
     return nullptr;
 }
 
+/// Volume role mapping between the ABI constants and the engine's own
+/// ModelVolumeType (never an implicit int cast: the ABI owns its values).
+static uint8_t orcapad_volume_role(Slic3r::ModelVolumeType type) {
+    switch (type) {
+    case Slic3r::ModelVolumeType::MODEL_PART: return ORCA_VOLUME_PART;
+    case Slic3r::ModelVolumeType::NEGATIVE_VOLUME: return ORCA_VOLUME_NEGATIVE;
+    case Slic3r::ModelVolumeType::PARAMETER_MODIFIER: return ORCA_VOLUME_MODIFIER;
+    case Slic3r::ModelVolumeType::SUPPORT_BLOCKER: return ORCA_VOLUME_SUPPORT_BLOCKER;
+    case Slic3r::ModelVolumeType::SUPPORT_ENFORCER: return ORCA_VOLUME_SUPPORT_ENFORCER;
+    default: return 0xFF; // INVALID never occurs on live objects
+    }
+}
+
+static bool orcapad_volume_type(uint8_t role, Slic3r::ModelVolumeType *out) {
+    switch (role) {
+    case ORCA_VOLUME_PART: *out = Slic3r::ModelVolumeType::MODEL_PART; return true;
+    case ORCA_VOLUME_NEGATIVE: *out = Slic3r::ModelVolumeType::NEGATIVE_VOLUME; return true;
+    case ORCA_VOLUME_MODIFIER: *out = Slic3r::ModelVolumeType::PARAMETER_MODIFIER; return true;
+    case ORCA_VOLUME_SUPPORT_BLOCKER: *out = Slic3r::ModelVolumeType::SUPPORT_BLOCKER; return true;
+    case ORCA_VOLUME_SUPPORT_ENFORCER: *out = Slic3r::ModelVolumeType::SUPPORT_ENFORCER; return true;
+    default: return false;
+    }
+}
+
+static Slic3r::ModelVolume *plater_volume(Slic3r::ModelObject *object,
+                                          orca_volume_id id,
+                                          size_t *out_index = nullptr) {
+    if (!object || id == 0 || id > std::numeric_limits<size_t>::max())
+        return nullptr;
+    for (size_t index = 0; index < object->volumes.size(); ++index) {
+        Slic3r::ModelVolume *volume = object->volumes[index];
+        if (volume->id().id == static_cast<size_t>(id)) {
+            if (out_index) *out_index = index;
+            return volume;
+        }
+    }
+    return nullptr;
+}
+
+/// Marks an object's volume composition as changed (client caches key on
+/// the object mesh revision).
+static void orcapad_touch_object(orca_plater &plater, orca_object_id object_id) {
+    plater.mesh_revisions[object_id] = plater.next_mesh_revision++;
+}
+
+/// Desktop GUI_ObjectList::create_mesh (shape -> mesh; SLAB uses the
+/// instance bbox footprint).
+static Slic3r::TriangleMesh orcapad_shape_mesh(int32_t shape, double size_mm,
+                                               const Slic3r::BoundingBoxf3 &instance_bb) {
+    using Slic3r::TriangleMesh;
+    switch (shape) {
+    case ORCA_SHAPE_CUBE: return TriangleMesh(Slic3r::its_make_cube(size_mm, size_mm, size_mm));
+    case ORCA_SHAPE_CYLINDER: return TriangleMesh(Slic3r::its_make_cylinder(0.5 * size_mm, size_mm));
+    case ORCA_SHAPE_SPHERE: return TriangleMesh(Slic3r::its_make_sphere(0.5 * size_mm, PI / 90.0));
+    case ORCA_SHAPE_CONE: return TriangleMesh(Slic3r::its_make_cone(0.5 * size_mm, size_mm));
+    case ORCA_SHAPE_DISC: return TriangleMesh(Slic3r::its_make_cylinder(0.5 * size_mm, 0.2));
+    case ORCA_SHAPE_TORUS: return TriangleMesh(Slic3r::its_make_torus(0.5 * size_mm, 0.125 * size_mm, PI / 60.0));
+    case ORCA_SHAPE_SLAB:
+        return TriangleMesh(Slic3r::its_make_cube(
+            instance_bb.size().x() * 1.5, instance_bb.size().y() * 1.5,
+            instance_bb.size().z() * 0.5));
+    default: return TriangleMesh();
+    }
+}
+
 static bool orcapad_revision_available(const orca_plater &plater) {
     return plater.revision < std::numeric_limits<orca_revision>::max();
 }
@@ -1404,6 +1469,452 @@ orca_result orca_plater_clear(orca_plater *plater, orca_revision *out_revision) 
     });
 }
 
+static const char *orcapad_shape_name(int32_t shape) {
+    switch (shape) {
+    case ORCA_SHAPE_CUBE: return "Cube";
+    case ORCA_SHAPE_CYLINDER: return "Cylinder";
+    case ORCA_SHAPE_SPHERE: return "Sphere";
+    case ORCA_SHAPE_CONE: return "Cone";
+    case ORCA_SHAPE_DISC: return "Disc";
+    case ORCA_SHAPE_TORUS: return "Torus";
+    case ORCA_SHAPE_SLAB: return "Slab";
+    default: return nullptr;
+    }
+}
+
+static bool orcapad_valid_shape(int32_t shape) {
+    return shape >= ORCA_SHAPE_CUBE && shape <= ORCA_SHAPE_SLAB;
+}
+
+static const char *orcapad_volume_add_label(uint8_t role) {
+    switch (role) {
+    case ORCA_VOLUME_NEGATIVE: return "Add Negative Volume";
+    case ORCA_VOLUME_MODIFIER: return "Add Modifier";
+    case ORCA_VOLUME_SUPPORT_BLOCKER: return "Add Support Blocker";
+    case ORCA_VOLUME_SUPPORT_ENFORCER: return "Add Support Enforcer";
+    default: return "Add Part";
+    }
+}
+
+/// Desktop volume extruder default: the object's extruder for model parts,
+/// 0 (inherit) otherwise.
+static int orcapad_volume_default_extruder(const Slic3r::ModelObject &object,
+                                           uint8_t role) {
+    if (role == ORCA_VOLUME_PART && object.config.has("extruder"))
+        return object.config.opt_int("extruder");
+    return 0;
+}
+
+orca_result orca_plater_add_shape_object(orca_plater *plater, int32_t shape,
+                                         double size_mm, double bed_center_x,
+                                         double bed_center_y,
+                                         orca_object_id *out_object_id,
+                                         orca_revision *out_revision) {
+    constexpr const char *operation = "orca_plater_add_shape_object";
+    if (out_object_id) *out_object_id = 0;
+    if (out_revision) *out_revision = 0;
+    if (!plater)
+        return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation, "plater handle is null");
+    if (!out_object_id || !out_revision)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation, "output pointer is null");
+    if (!orcapad_valid_shape(shape) || shape == ORCA_SHAPE_SLAB)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "shape must be cube, cylinder, sphere, cone, disc or torus");
+    if (!std::isfinite(size_mm) || size_mm <= 0.0)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation, "size must be positive");
+    if (!std::isfinite(bed_center_x) || !std::isfinite(bed_center_y))
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "bed center contains a non-finite value");
+    return orcapad_guard(operation, [&]() -> orca_result {
+        if (!orcapad_revision_available(*plater))
+            return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
+                                "document revision is exhausted");
+        OrcapadMutation mutation(*plater, "Add Primitive");
+        Slic3r::TriangleMesh mesh = orcapad_shape_mesh(shape, size_mm, {});
+        if (mesh.empty())
+            return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
+                                "shape generator returned an empty mesh");
+        const char *name = orcapad_shape_name(shape);
+        // desktop load_mesh_object: object + one volume, extruder 1,
+        // mesh centered, instance at the bed center, resting on the bed.
+        Slic3r::ModelObject *object = plater->model.add_object();
+        object->name = name;
+        Slic3r::ModelVolume *volume = object->add_volume(std::move(mesh));
+        volume->name = name;
+        object->config.set_key_value("extruder", new Slic3r::ConfigOptionInt(1));
+        volume->config.set_key_value("extruder", new Slic3r::ConfigOptionInt(1));
+        volume->source.is_from_builtin_objects = true;
+        Slic3r::ModelInstance *instance = object->add_instance();
+        if (!instance || !volume)
+            return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
+                                "engine did not create the shape object");
+        object->center_around_origin();
+        instance->set_offset(Slic3r::Vec3d(bed_center_x, bed_center_y, 0.0));
+        object->ensure_on_bed(false);
+        if (!orcapad_register_object(*plater, *object))
+            return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
+                                "engine returned an invalid or reused object ID");
+        const orca_object_id id = static_cast<orca_object_id>(object->id().id);
+        *out_revision = mutation.commit();
+        *out_object_id = id;
+        return orcapad_ok();
+    });
+}
+
+orca_result orca_plater_volume_add_shape(orca_plater *plater, orca_object_id object_id,
+                                         orca_instance_id instance_id, uint8_t type,
+                                         int32_t shape, double size_mm,
+                                         orca_volume_id *out_volume_id,
+                                         orca_revision *out_revision) {
+    constexpr const char *operation = "orca_plater_volume_add_shape";
+    if (out_volume_id) *out_volume_id = 0;
+    if (out_revision) *out_revision = 0;
+    if (!plater)
+        return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation, "plater handle is null");
+    if (!out_volume_id || !out_revision)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation, "output pointer is null");
+    Slic3r::ModelVolumeType role;
+    if (!orcapad_volume_type(type, &role))
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation, "unknown volume type");
+    if (!orcapad_valid_shape(shape))
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation, "unknown shape");
+    if (!std::isfinite(size_mm) || size_mm <= 0.0)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation, "size must be positive");
+    return orcapad_guard(operation, [&]() -> orca_result {
+        Slic3r::ModelObject *object = plater_obj(plater, object_id);
+        if (!object)
+            return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation, "object was not found");
+        Slic3r::ModelInstance *instance = plater_instance(object, instance_id);
+        if (!instance)
+            return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation, "instance was not found");
+        if (!orcapad_revision_available(*plater))
+            return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
+                                "document revision is exhausted");
+        OrcapadMutation mutation(*plater, orcapad_volume_add_label(type));
+        object->invalidate_bounding_box();
+        const Slic3r::BoundingBoxf3 instance_bb =
+            object->instance_bounding_box(*instance);
+        Slic3r::TriangleMesh mesh = orcapad_shape_mesh(shape, size_mm, instance_bb);
+        if (mesh.empty())
+            return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
+                                "shape generator returned an empty mesh");
+        // desktop load_generic_subobject: aligned with the bed through the
+        // inverse instance rotation/scale, placed at the instance bbox corner.
+        Slic3r::ModelVolume *volume = object->add_volume(std::move(mesh), role);
+        if (!volume)
+            return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
+                                "engine did not create the volume");
+        volume->name = std::string("Generic-") + orcapad_shape_name(shape);
+        volume->config.set_key_value(
+            "extruder", new Slic3r::ConfigOptionInt(
+                             orcapad_volume_default_extruder(*object, type)));
+        volume->source.is_from_builtin_objects = true;
+        const Slic3r::Transform3d instance_no_offset =
+            instance->get_transformation().get_matrix_no_offset();
+        const Slic3r::Transform3d to_object = instance_no_offset.inverse();
+        volume->set_transformation(Slic3r::Geometry::Transformation(to_object));
+        const Slic3r::BoundingBoxf3 mesh_bb = volume->mesh().bounding_box();
+        const Slic3r::Vec3d world =
+            shape == ORCA_SHAPE_SLAB
+                ? Slic3r::Vec3d(0.0, 0.0,
+                                0.5 * mesh_bb.size().z() + instance_bb.min.z())
+                : Slic3r::Vec3d(instance_bb.max.x(), instance_bb.min.y(),
+                                instance_bb.min.z()) +
+                      0.5 * mesh_bb.size();
+        volume->set_offset(to_object * (world - instance->get_offset()));
+        object->invalidate_bounding_box();
+        const orca_volume_id id = static_cast<orca_volume_id>(volume->id().id);
+        if (id == 0)
+            return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
+                                "engine returned an invalid volume ID");
+        orcapad_touch_object(*plater, object_id);
+        *out_revision = mutation.commit();
+        *out_volume_id = id;
+        return orcapad_ok();
+    });
+}
+
+orca_result orca_plater_volume_add_file(orca_plater *plater, orca_object_id object_id,
+                                        uint8_t type, const char *path,
+                                        orca_volume_id *out_volume_id,
+                                        orca_revision *out_revision) {
+    constexpr const char *operation = "orca_plater_volume_add_file";
+    if (out_volume_id) *out_volume_id = 0;
+    if (out_revision) *out_revision = 0;
+    if (!plater)
+        return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation, "plater handle is null");
+    if (!path || !path[0] || !out_volume_id || !out_revision)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "path or output pointer is null");
+    Slic3r::ModelVolumeType role;
+    if (!orcapad_volume_type(type, &role))
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation, "unknown volume type");
+    struct stat path_status;
+    if (stat(path, &path_status) != 0)
+        return orcapad_fail(ORCA_STATUS_IO_FAILURE, operation, "input file is not accessible");
+    return orcapad_guard(operation, [&]() -> orca_result {
+        Slic3r::ModelObject *object = plater_obj(plater, object_id);
+        if (!object)
+            return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation, "object was not found");
+        if (!orcapad_revision_available(*plater))
+            return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
+                                "document revision is exhausted");
+        // desktop load_modifier: read geometry only (mesh() transforms
+        // instances, so the default identity instances are required)
+        Slic3r::Model loaded = Slic3r::Model::read_from_file(
+            path, nullptr, nullptr, Slic3r::LoadStrategy::LoadModel);
+        if (loaded.objects.empty())
+            return orcapad_fail(ORCA_STATUS_INVALID_MODEL, operation,
+                                "input contains no model object");
+        loaded.add_default_instances();
+        OrcapadMutation mutation(*plater, orcapad_volume_add_label(type));
+        for (Slic3r::ModelObject *source : loaded.objects) {
+            if (object->origin_translation != Slic3r::Vec3d::Zero()) {
+                source->center_around_origin();
+                const Slic3r::Vec3d delta =
+                    object->origin_translation - source->origin_translation;
+                for (Slic3r::ModelVolume *volume : source->volumes)
+                    volume->translate(delta);
+            }
+        }
+        Slic3r::TriangleMesh mesh = loaded.mesh();
+        if (mesh.empty())
+            return orcapad_fail(ORCA_STATUS_INVALID_MODEL, operation,
+                                "input contains no mesh");
+        Slic3r::ModelVolume *volume = object->add_volume(std::move(mesh), role);
+        if (!volume)
+            return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
+                                "engine did not create the volume");
+        volume->name =
+            boost::filesystem::path(path).filename().string();
+        volume->config.set_key_value(
+            "extruder", new Slic3r::ConfigOptionInt(
+                             orcapad_volume_default_extruder(*object, type)));
+        volume->source.input_file = path;
+        // prusaslicer-style placement: keep the source-coordinate relation to
+        // the object's first volume (both carry their centering shift).
+        const Slic3r::Vec3d offset =
+            volume->source.mesh_offset - object->volumes.front()->source.mesh_offset;
+        volume->set_offset(offset);
+        const orca_volume_id id = static_cast<orca_volume_id>(volume->id().id);
+        if (id == 0)
+            return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
+                                "engine returned an invalid volume ID");
+        orcapad_touch_object(*plater, object_id);
+        *out_revision = mutation.commit();
+        *out_volume_id = id;
+        return orcapad_ok();
+    });
+}
+
+orca_result orca_plater_volume_set_type(orca_plater *plater, orca_object_id object_id,
+                                        orca_volume_id volume_id, uint8_t type,
+                                        orca_revision *out_revision) {
+    constexpr const char *operation = "orca_plater_volume_set_type";
+    if (out_revision) *out_revision = 0;
+    if (!plater)
+        return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation, "plater handle is null");
+    if (!out_revision)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation, "output pointer is null");
+    Slic3r::ModelVolumeType role;
+    if (!orcapad_volume_type(type, &role))
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation, "unknown volume type");
+    return orcapad_guard(operation, [&]() -> orca_result {
+        Slic3r::ModelObject *object = plater_obj(plater, object_id);
+        if (!object)
+            return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation, "object was not found");
+        Slic3r::ModelVolume *volume = plater_volume(object, volume_id);
+        if (!volume)
+            return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation, "volume was not found");
+        if (!orcapad_revision_available(*plater))
+            return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
+                                "document revision is exhausted");
+        if (volume->is_model_part() && role != Slic3r::ModelVolumeType::MODEL_PART) {
+            size_t parts = 0;
+            for (const Slic3r::ModelVolume *other : object->volumes)
+                if (other->is_model_part()) ++parts;
+            if (parts == 1)
+                return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                                    "an object keeps at least one solid part");
+        }
+        OrcapadMutation mutation(*plater, "Change type");
+        volume->set_type(role);
+        orcapad_touch_object(*plater, object_id);
+        *out_revision = mutation.commit();
+        return orcapad_ok();
+    });
+}
+
+orca_result orca_plater_volume_delete(orca_plater *plater, orca_object_id object_id,
+                                      orca_volume_id volume_id,
+                                      orca_revision *out_revision) {
+    constexpr const char *operation = "orca_plater_volume_delete";
+    if (out_revision) *out_revision = 0;
+    if (!plater)
+        return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation, "plater handle is null");
+    if (!out_revision)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation, "output pointer is null");
+    return orcapad_guard(operation, [&]() -> orca_result {
+        Slic3r::ModelObject *object = plater_obj(plater, object_id);
+        if (!object)
+            return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation, "object was not found");
+        size_t index = 0;
+        Slic3r::ModelVolume *volume = plater_volume(object, volume_id, &index);
+        if (!volume)
+            return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation, "volume was not found");
+        if (volume->is_model_part()) {
+            size_t parts = 0;
+            for (const Slic3r::ModelVolume *other : object->volumes)
+                if (other->is_model_part()) ++parts;
+            if (parts == 1)
+                return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                                    "delete the object instead of its last solid part");
+        }
+        if (!orcapad_revision_available(*plater))
+            return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
+                                "document revision is exhausted");
+        OrcapadMutation mutation(*plater, "Delete part");
+        object->delete_volume(index);
+        orcapad_touch_object(*plater, object_id);
+        *out_revision = mutation.commit();
+        return orcapad_ok();
+    });
+}
+
+orca_result orca_plater_volume_rename(orca_plater *plater, orca_object_id object_id,
+                                      orca_volume_id volume_id, const char *name,
+                                      orca_revision *out_revision) {
+    constexpr const char *operation = "orca_plater_volume_rename";
+    if (out_revision) *out_revision = 0;
+    if (!plater)
+        return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation, "plater handle is null");
+    if (!name || !name[0] || !out_revision)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "name or output pointer is null");
+    const std::string value(name);
+    if (value.find_first_not_of(" \t\r\n") == std::string::npos)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation, "name is empty");
+    return orcapad_guard(operation, [&]() -> orca_result {
+        Slic3r::ModelObject *object = plater_obj(plater, object_id);
+        if (!object)
+            return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation, "object was not found");
+        Slic3r::ModelVolume *volume = plater_volume(object, volume_id);
+        if (!volume)
+            return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation, "volume was not found");
+        if (!orcapad_revision_available(*plater))
+            return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
+                                "document revision is exhausted");
+        OrcapadMutation mutation(*plater, "Rename");
+        volume->name = value;
+        *out_revision = mutation.commit();
+        return orcapad_ok();
+    });
+}
+
+orca_result orca_plater_split_objects(orca_plater *plater, orca_object_id object_id,
+                                      orca_object_id *out_first_object_id,
+                                      uint32_t *out_object_count,
+                                      orca_revision *out_revision) {
+    constexpr const char *operation = "orca_plater_split_objects";
+    if (out_first_object_id) *out_first_object_id = 0;
+    if (out_object_count) *out_object_count = 0;
+    if (out_revision) *out_revision = 0;
+    if (!plater)
+        return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation, "plater handle is null");
+    if (!out_first_object_id || !out_object_count || !out_revision)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "output pointer is null");
+    return orcapad_guard(operation, [&]() -> orca_result {
+        Slic3r::ModelObject *object = plater_obj(plater, object_id);
+        if (!object)
+            return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation, "object was not found");
+        if (object->volumes.empty())
+            return orcapad_fail(ORCA_STATUS_INVALID_MODEL, operation,
+                                "object has no volume to split");
+        if (!orcapad_revision_available(*plater))
+            return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
+                                "document revision is exhausted");
+        OrcapadMutation mutation(*plater, "Split to Objects");
+        Slic3r::ModelObjectPtrs split;
+        object->split(&split, false);
+        if (split.size() <= 1)
+            return orcapad_fail(ORCA_STATUS_INVALID_MODEL, operation,
+                                "the object could not be split (a single body)");
+        // the split registered the new objects in the document already
+        for (Slic3r::ModelObject *part : split) {
+            if (!orcapad_register_object(*plater, *part))
+                return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
+                                    "engine returned an invalid or reused object ID");
+            part->invalidate_bounding_box();
+            part->ensure_on_bed(false);
+        }
+        const orca_object_id first =
+            static_cast<orca_object_id>(split.front()->id().id);
+        plater->mesh_revisions.erase(object_id);
+        plater->model.delete_object(
+            Slic3r::ObjectID(static_cast<size_t>(object_id)));
+        const uint32_t count = static_cast<uint32_t>(split.size());
+        *out_revision = mutation.commit();
+        *out_first_object_id = first;
+        *out_object_count = count;
+        return orcapad_ok();
+    });
+}
+
+orca_result orca_plater_split_parts(orca_plater *plater, orca_object_id object_id,
+                                    orca_volume_id volume_id,
+                                    uint32_t *out_part_count,
+                                    orca_revision *out_revision) {
+    constexpr const char *operation = "orca_plater_split_parts";
+    if (out_part_count) *out_part_count = 0;
+    if (out_revision) *out_revision = 0;
+    if (!plater)
+        return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation, "plater handle is null");
+    if (!out_part_count || !out_revision)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "output pointer is null");
+    return orcapad_guard(operation, [&]() -> orca_result {
+        Slic3r::ModelObject *object = plater_obj(plater, object_id);
+        if (!object)
+            return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation, "object was not found");
+        Slic3r::ModelVolume *volume = nullptr;
+        if (volume_id == 0) {
+            for (Slic3r::ModelVolume *candidate : object->volumes)
+                if (candidate->is_model_part()) {
+                    if (volume)
+                        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                                            "the object has several parts: name the part to split");
+                    volume = candidate;
+                }
+            if (!volume)
+                return orcapad_fail(ORCA_STATUS_INVALID_MODEL, operation,
+                                    "object has no solid part");
+        } else {
+            volume = plater_volume(object, volume_id);
+            if (!volume)
+                return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation, "volume was not found");
+            if (!volume->is_model_part())
+                return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                                    "only solid parts can be split");
+        }
+        if (!volume->is_splittable())
+            return orcapad_fail(ORCA_STATUS_INVALID_MODEL, operation,
+                                "the part contains only one body and cannot be split");
+        if (!orcapad_revision_available(*plater))
+            return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
+                                "document revision is exhausted");
+        OrcapadMutation mutation(*plater, "Split to Parts");
+        const size_t parts = volume->split(1, false);
+        if (parts <= 1)
+            return orcapad_fail(ORCA_STATUS_INVALID_MODEL, operation,
+                                "the part could not be split (a single body)");
+        orcapad_touch_object(*plater, object_id);
+        *out_part_count = static_cast<uint32_t>(parts);
+        *out_revision = mutation.commit();
+        return orcapad_ok();
+    });
+}
+
 static orca_scene_snapshot orcapad_empty_snapshot() noexcept {
     return orca_scene_snapshot{};
 }
@@ -1414,6 +1925,14 @@ void orca_scene_snapshot_dispose(orca_scene_snapshot *snapshot) {
         for (int32_t index = 0; index < snapshot->object_count; ++index) {
             orca_scene_object &object = snapshot->objects[index];
             orca_owned_string_dispose(&object.name);
+            if (object.volumes) {
+                for (int32_t v = 0; v < object.volume_count; ++v) {
+                    orca_owned_string_dispose(&object.volumes[v].name);
+                    std::free(object.volumes[v].positions);
+                    std::free(object.volumes[v].indices);
+                }
+            }
+            std::free(object.volumes);
             std::free(object.positions);
             std::free(object.indices);
             std::free(object.instances);
@@ -1608,6 +2127,104 @@ orca_result orca_plater_snapshot(orca_plater *plater,
                 if (!orcapad_valid_transform(instance.transform))
                     return fail_snapshot(ORCA_STATUS_INTERNAL_INVARIANT,
                                          "engine returned an invalid transform");
+            }
+
+            // Volumes (desktop object list), document order. Model parts
+            // render through the merged object mesh above; every other
+            // role carries its own object-space mesh.
+            object.volume_count =
+                static_cast<int32_t>(model_object->volumes.size());
+            object.volumes = static_cast<orca_scene_volume *>(std::calloc(
+                static_cast<size_t>(object.volume_count),
+                sizeof(orca_scene_volume)));
+            if (!object.volumes)
+                return fail_snapshot(ORCA_STATUS_OUT_OF_MEMORY,
+                                     "could not allocate snapshot volumes");
+            for (int32_t volume_index = 0;
+                 volume_index < object.volume_count; ++volume_index) {
+                const Slic3r::ModelVolume *model_volume =
+                    model_object->volumes[static_cast<size_t>(volume_index)];
+                orca_scene_volume &volume = object.volumes[volume_index];
+                volume.id = static_cast<orca_volume_id>(model_volume->id().id);
+                const uint8_t role = orcapad_volume_role(model_volume->type());
+                if (volume.id == 0 || role == 0xFF)
+                    return fail_snapshot(ORCA_STATUS_INTERNAL_INVARIANT,
+                                         "engine returned an invalid volume");
+                volume.type = role;
+                volume.extruder = model_volume->config.has("extruder")
+                    ? model_volume->config.opt_int("extruder") : 0;
+                if (!orcapad_copy_string(model_volume->name.c_str(), &volume.name))
+                    return fail_snapshot(ORCA_STATUS_OUT_OF_MEMORY,
+                                         "could not allocate volume name");
+
+                if (role == ORCA_VOLUME_PART) {
+                    const Slic3r::BoundingBoxf3 box =
+                        model_volume->mesh().transformed_bounding_box(
+                            model_volume->get_matrix());
+                    if (!box.defined)
+                        return fail_snapshot(ORCA_STATUS_INVALID_MODEL,
+                                             "volume mesh is empty");
+                    for (int axis = 0; axis < 3; ++axis) {
+                        volume.bbox_min[axis] = static_cast<float>(box.min(axis));
+                        volume.bbox_max[axis] = static_cast<float>(box.max(axis));
+                    }
+                    continue;
+                }
+
+                Slic3r::TriangleMesh object_space(model_volume->mesh());
+                object_space.transform(model_volume->get_matrix());
+                const indexed_triangle_set &indexed = object_space.its;
+                if (indexed.vertices.empty() || indexed.indices.empty())
+                    return fail_snapshot(ORCA_STATUS_INVALID_MODEL,
+                                         "volume mesh is empty");
+                if (indexed.vertices.size() >
+                        static_cast<size_t>(std::numeric_limits<int32_t>::max()) ||
+                    indexed.indices.size() >
+                        static_cast<size_t>(std::numeric_limits<int32_t>::max() / 3))
+                    return fail_snapshot(ORCA_STATUS_INTERNAL_INVARIANT,
+                                         "volume mesh exceeds ABI count range");
+                volume.position_count =
+                    static_cast<int32_t>(indexed.vertices.size());
+                volume.index_count =
+                    static_cast<int32_t>(indexed.indices.size() * 3);
+                volume.positions = static_cast<float *>(std::malloc(
+                    static_cast<size_t>(volume.position_count) * 3 * sizeof(float)));
+                volume.indices = static_cast<uint32_t *>(std::malloc(
+                    static_cast<size_t>(volume.index_count) * sizeof(uint32_t)));
+                if (!volume.positions || !volume.indices)
+                    return fail_snapshot(ORCA_STATUS_OUT_OF_MEMORY,
+                                         "could not allocate volume mesh");
+                for (int axis = 0; axis < 3; ++axis) {
+                    volume.bbox_min[axis] = std::numeric_limits<float>::max();
+                    volume.bbox_max[axis] = std::numeric_limits<float>::lowest();
+                }
+                for (int32_t vertex_index = 0;
+                     vertex_index < volume.position_count; ++vertex_index) {
+                    const auto &vertex =
+                        indexed.vertices[static_cast<size_t>(vertex_index)];
+                    for (int axis = 0; axis < 3; ++axis) {
+                        const float coordinate = vertex(axis);
+                        if (!std::isfinite(coordinate))
+                            return fail_snapshot(ORCA_STATUS_INVALID_MODEL,
+                                                 "volume mesh contains a non-finite vertex");
+                        volume.positions[static_cast<size_t>(vertex_index) * 3 + axis] =
+                            coordinate;
+                        volume.bbox_min[axis] =
+                            std::min(volume.bbox_min[axis], coordinate);
+                        volume.bbox_max[axis] =
+                            std::max(volume.bbox_max[axis], coordinate);
+                    }
+                }
+                size_t flat_index = 0;
+                for (const auto &triangle : indexed.indices)
+                    for (int corner = 0; corner < 3; ++corner) {
+                        if (triangle(corner) < 0 ||
+                            triangle(corner) >= volume.position_count)
+                            return fail_snapshot(ORCA_STATUS_INVALID_MODEL,
+                                                 "volume mesh index is out of range");
+                        volume.indices[flat_index++] =
+                            static_cast<uint32_t>(triangle(corner));
+                    }
             }
         }
 

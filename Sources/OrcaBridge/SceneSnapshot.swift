@@ -34,6 +34,17 @@ public struct InstanceID: RawRepresentable, Hashable, Sendable, CustomStringConv
     public var description: String { String(rawValue) }
 }
 
+public struct VolumeID: RawRepresentable, Hashable, Sendable, CustomStringConvertible {
+    public let rawValue: UInt64
+
+    public init(rawValue: UInt64) {
+        precondition(rawValue != 0, "VolumeID must be nonzero")
+        self.rawValue = rawValue
+    }
+
+    public var description: String { String(rawValue) }
+}
+
 public struct DocumentRevision: RawRepresentable, Hashable, Comparable, Sendable {
     public let rawValue: UInt64
 
@@ -51,6 +62,33 @@ public enum EngineAxis: Int32, CaseIterable, Sendable {
     case x = 0
     case y = 1
     case z = 2
+}
+
+/// Built-in primitive shapes (desktop Add Primitive).
+public enum PrimitiveShape: Int32, CaseIterable, Sendable {
+    case cube = 0
+    case cylinder = 1
+    case sphere = 2
+    case cone = 3
+    case disc = 4
+    case torus = 5
+    /// Modifier-sized slab over an instance footprint (volumes only).
+    case slab = 6
+
+    public var label: String {
+        switch self {
+        case .cube: return "Cube"
+        case .cylinder: return "Cylinder"
+        case .sphere: return "Sphere"
+        case .cone: return "Cone"
+        case .disc: return "Disc"
+        case .torus: return "Torus"
+        case .slab: return "Slab"
+        }
+    }
+
+    /// Valid as a standalone object (desktop add-shape menu).
+    public var isObjectShape: Bool { self != .slab }
 }
 
 /// Canonical engine-space transform: z-up, millimetres, radians. Rotation is
@@ -155,17 +193,29 @@ public struct SceneObject: Identifiable, Sendable {
     public let name: String
     public let mesh: SceneMesh
     public let instances: [SceneInstance]
+    /// Object volumes, document order (desktop object list).
+    public let volumes: [SceneVolume]
 
     public init(
         id: ObjectID,
         name: String,
         mesh: SceneMesh,
-        instances: [SceneInstance]
+        instances: [SceneInstance],
+        volumes: [SceneVolume]
     ) {
         self.id = id
         self.name = name
         self.mesh = mesh
         self.instances = instances
+        self.volumes = volumes
+    }
+
+    public var modelParts: [SceneVolume] {
+        volumes.filter { $0.role == .part }
+    }
+
+    public var nonPartVolumes: [SceneVolume] {
+        volumes.filter { $0.role != .part }
     }
 }
 
@@ -187,6 +237,45 @@ public struct DocumentHistory: Equatable, Sendable {
 
     public var canUndo: Bool { undoCount > 0 }
     public var canRedo: Bool { redoCount > 0 }
+}
+
+/// Object volume roles (desktop ModelVolumeType / object list).
+public enum VolumeRole: UInt8, Sendable, CaseIterable {
+    case part = 0
+    case negative = 1
+    case modifier = 2
+    case supportBlocker = 3
+    case supportEnforcer = 4
+
+    public var label: String {
+        switch self {
+        case .part: return "Part"
+        case .negative: return "Negative volume"
+        case .modifier: return "Modifier"
+        case .supportBlocker: return "Support blocker"
+        case .supportEnforcer: return "Support enforcer"
+        }
+    }
+}
+
+/// One volume of an object. Parts render through the object's merged mesh
+/// (`mesh == nil`); other roles carry their own object-space mesh.
+public struct SceneVolume: Identifiable, Sendable {
+    public let id: VolumeID
+    public let name: String
+    public let role: VolumeRole
+    /// Volume "extruder" option (0 = the object's).
+    public let extruder: Int
+    /// Own object-space mesh for non-part roles; nil for parts.
+    public let mesh: SceneMesh?
+
+    public init(id: VolumeID, name: String, role: VolumeRole, extruder: Int, mesh: SceneMesh?) {
+        self.id = id
+        self.name = name
+        self.role = role
+        self.extruder = extruder
+        self.mesh = mesh
+    }
 }
 
 /// A coherent, immutable read of one authoritative C++ document revision.

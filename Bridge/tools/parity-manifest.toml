@@ -201,12 +201,9 @@ priority = 31
 id = "plate.split"
 area = "plate"
 title = "Split to objects / parts"
-status = "missing"
+status = "done"
 desktop = ["toolbar:splitobjects", "toolbar:splitvolumes", "context:Split", "context:To objects", "context:To parts"]
-work = "Bridge + UI"
-priority = 2
-note = "ModelObject::split / ModelVolume::split are compiled"
-
+evidence = ["abi:orca_plater_split_objects", "abi:orca_plater_split_parts", 'client:func splitToObjects']
 [[feature]]
 id = "plate.merge"
 area = "plate"
@@ -249,12 +246,11 @@ id = "plate.object-list"
 area = "plate"
 title = "Object list"
 status = "partial"
-source = "src/slic3r/GUI/GUI_ObjectList.hpp:class ObjectList\\b"
-evidence = ["client:private var objectsList"]
-gap = "objects only: no parts/modifiers tree, per-object settings or rename"
+source = 'src/slic3r/GUI/GUI_ObjectList.hpp:class ObjectList\b'
+evidence = ["client:private var objectsList", "client:func objectRow", "client:func volumeRow"]
+gap = "objects and their volumes are listed; per-object settings and canvas part selection are missing"
 work = "UI + Bridge"
 priority = 3
-
 [[feature]]
 id = "plate.rename"
 area = "plate"
@@ -266,23 +262,24 @@ evidence = ["abi:orca_plater_object_rename", 'client:func rename\(']
 id = "plate.parts-modifiers"
 area = "plate"
 title = "Parts, modifiers, negative volumes, support blockers/enforcers"
-status = "missing"
+status = "partial"
 desktop = ["context:{_(item.first)}@append_menu_items_add_volume", "context:Load...", "context:Change type",
            "context:{info.label}@append_menu_item_change_type", "kb:Select a part"]
+evidence = ["abi:orca_plater_volume_add_shape", "abi:orca_plater_volume_add_file",
+            "abi:orca_plater_volume_set_type", "abi:orca_plater_volume_delete",
+            "client:func volumeRow", "client:litBlendPipeline"]
+gap = "no per-volume settings and no canvas part selection (list-driven only)"
 work = "Bridge + UI"
 priority = 4
-note = "ModelVolumeType is engine data; multi-volume rendering needed"
-
 [[feature]]
 id = "plate.primitives"
 area = "plate"
 title = "Add primitive (cube, cylinder, sphere, cone, disc, torus)"
-status = "missing"
+status = "done"
 desktop = ["context:Add Primitive", "context:Cube", "context:Cylinder", "context:Sphere", "context:Cone",
            "context:Disc", "context:Torus"]
-work = "Bridge + UI"
-priority = 19
-
+evidence = ["abi:orca_plater_add_shape_object", "abi:orca_plater_volume_add_shape",
+            'client:func addShapeObject']
 [[feature]]
 id = "plate.handy-models"
 area = "plate"

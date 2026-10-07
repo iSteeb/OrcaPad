@@ -43,7 +43,7 @@ enum Shaders {
         float3 l = -normalize(u.lightDir);
         float lambert = saturate(dot(n, l));
         float shade = 0.30 + 0.70 * lambert;
-        return float4(u.color.rgb * shade, 1.0);
+        return float4(u.color.rgb * shade, u.color.a);
     }
 
     // --- Flat (lines) ---

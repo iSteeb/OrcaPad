@@ -41,6 +41,14 @@
 
 ## PROGRESS
 
+- [2026-10-07 CODE][TOOL] ABI v19: volumes in snapshots (per-volume id/name/
+  role/extruder + own meshes for non-parts), split to objects/parts,
+  shape objects + shape/file volumes, volume type/delete/rename; renderer
+  translucent volume pass (desktop GLVolume colors); object list with
+  volume rows + Add shape menu. Host tests 50,841 PASS. Parity 25%.
+  [TOOL] xtool darwin SDK record (~/.swiftpm/swift-sdks) got lost during
+  a crashed concurrent build; restored by symlinking the artifactbundle
+  (xtool then skips its NIO-based generator, which cannot epoll here).
 - [2026-10-07 CODE][TOOL] ABI v18: transactional mutations (OrcapadMutation),
   64-step undo/redo with labels in the snapshot, rename, delete all,
   session-unique mesh revisions; Plate undo/redo buttons (cmd-Z), object

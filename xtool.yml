@@ -1,3 +1,4 @@
 version: 1
 bundleID: ie.duz.OrcaPad
 infoPath: App-Info.plist
+skipLSP: true
