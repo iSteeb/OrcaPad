@@ -3,6 +3,15 @@ import OrcaBridge
 import os
 import simd
 
+/// Which manipulation the Plate's one-finger drag performs on the selected
+/// instance (desktop gizmo parity). Drags that start away from the selection
+/// always orbit the camera.
+enum GizmoMode: String, CaseIterable, Sendable {
+    case move
+    case rotate
+    case scale
+}
+
 /// One immutable instance draw derived from a revisioned scene snapshot.
 private struct InstanceDraw {
     let instanceID: InstanceID
@@ -32,6 +41,7 @@ final class Renderer: NSObject, MTKViewDelegate {
     private var litPipeline: MTLRenderPipelineState!
     private var linePipeline: MTLRenderPipelineState!
     private var depthState: MTLDepthStencilState!
+    private var overlayDepthState: MTLDepthStencilState!
 
     // Bed grid
     private var gridVB: MTLBuffer!
@@ -138,6 +148,14 @@ final class Renderer: NSObject, MTKViewDelegate {
             throw MetalError.missing("depth stencil state")
         }
         depthState = ds
+
+        let overlayDesc = MTLDepthStencilDescriptor()
+        overlayDesc.depthCompareFunction = .always
+        overlayDesc.isDepthWriteEnabled = false
+        guard let overlay = device.makeDepthStencilState(descriptor: overlayDesc) else {
+            throw MetalError.missing("overlay depth stencil state")
+        }
+        overlayDepthState = overlay
     }
 
     private func function(_ library: MTLLibrary, _ name: String) throws -> MTLFunction {
@@ -352,7 +370,10 @@ final class Renderer: NSObject, MTKViewDelegate {
     /// Screen point → world-space ray. `point` is in UIKit coordinates of
     /// the MTKView's coordinate space.
     func screenRay(at point: CGPoint, in view: MTKView) -> (origin: SIMD3<Float>, dir: SIMD3<Float>) {
-        let size = view.drawableSize
+        // Gesture locations are UIKit POINTS; normalize by the view's bounds,
+        // never by drawableSize (PIXELS) — on 3x displays that cast every
+        // pick/drag ray toward a third of the touch coordinates.
+        let size = view.bounds.size
         let ndcX = Float(point.x / max(size.width, 1)) * 2 - 1
         let ndcY = 1 - Float(point.y / max(size.height, 1)) * 2
         let aspect = Float(size.width / max(size.height, 1))
@@ -460,6 +481,121 @@ final class Renderer: NSObject, MTKViewDelegate {
 
     // MARK: MTKViewDelegate (invoked on the main thread)
 
+    /// Viewer-space point → UIKit point in the view (nil behind the camera).
+    func projectToScreen(_ point: SIMD3<Float>, in view: MTKView) -> CGPoint? {
+        let size = view.bounds.size
+        let aspect = Float(size.width / max(size.height, 1))
+        let clip = camera.projection(aspect: aspect) * camera.viewMatrix
+            * SIMD4(point.x, point.y, point.z, 1)
+        guard clip.w > 1e-5 else { return nil }
+        let ndc = SIMD2(clip.x, clip.y) / clip.w
+        return CGPoint(
+            x: CGFloat((ndc.x + 1) * 0.5) * size.width,
+            y: CGFloat((1 - ndc.y) * 0.5) * size.height
+        )
+    }
+
+    // MARK: Gizmos (selected instance manipulation feedback)
+
+    private(set) var gizmoMode: GizmoMode = .move
+
+    func setGizmoMode(_ mode: GizmoMode) { gizmoMode = mode }
+
+    /// Geometry of the selected instance's gizmo in viewer space: center on
+    /// the bed plane, ring radius, current rotation direction, and model.
+    struct SelectedGizmo {
+        let center: SIMD3<Float>
+        let radius: Float
+        let rotationDirection: SIMD3<Float>
+        let model: simd_float4x4
+        let localMin: SIMD3<Float>
+        let localMax: SIMD3<Float>
+    }
+
+    func selectedGizmo() -> SelectedGizmo? {
+        gizmo { _, instance in instance.selected }
+    }
+
+    /// Gizmo geometry for a specific instance (used when a drag selects and
+    /// manipulates in one gesture, before the scene re-applies selection).
+    func gizmo(objectID: ObjectID, instanceID: InstanceID) -> SelectedGizmo? {
+        gizmo { object, instance in
+            object.objectID == objectID && instance.instanceID == instanceID
+        }
+    }
+
+    private func gizmo(
+        matching predicate: (RenderObject, InstanceDraw) -> Bool
+    ) -> SelectedGizmo? {
+        for object in objects {
+            guard let instance = object.instances.first(where: { predicate(object, $0) }) else { continue }
+            let model = instance.model
+            let column0 = SIMD3(model.columns.0.x, model.columns.0.y, model.columns.0.z)
+            let scale = simd_length(column0)
+            let origin = model * SIMD4<Float>(0, 0, 0, 1)
+            let extent = object.bboxMax - object.bboxMin
+            let halfDiagonal = 0.5 * simd_length(SIMD2(extent.x, extent.z)) * scale
+            let flat = SIMD3(column0.x, 0, column0.z)
+            let direction = simd_length(flat) > 1e-6 ? simd_normalize(flat) : SIMD3(1, 0, 0)
+            return SelectedGizmo(
+                center: SIMD3(origin.x, 0.15, origin.z),
+                radius: halfDiagonal + 4,
+                rotationDirection: direction,
+                model: model,
+                localMin: object.bboxMin,
+                localMax: object.bboxMax
+            )
+        }
+        return nil
+    }
+
+    private func gizmoVertices(_ gizmo: SelectedGizmo) -> [VertexPC] {
+        var vertices: [VertexPC] = []
+        let accent = SIMD4<Float>(0.16, 0.80, 0.95, 1)
+        switch gizmoMode {
+        case .move:
+            // Engine +X → viewer +X (red); engine +Y → viewer -Z (green).
+            let red = SIMD4<Float>(0.95, 0.30, 0.25, 1)
+            let green = SIMD4<Float>(0.35, 0.85, 0.35, 1)
+            for (axis, color) in [(SIMD3<Float>(1, 0, 0), red), (SIMD3<Float>(0, 0, -1), green)] {
+                let tip = gizmo.center + axis * gizmo.radius
+                let tail = gizmo.center - axis * gizmo.radius
+                let side = SIMD3(-axis.z, 0, axis.x) * 3
+                vertices += [
+                    VertexPC(position: tail, color: color), VertexPC(position: tip, color: color),
+                    VertexPC(position: tip, color: color), VertexPC(position: tip - axis * 5 + side, color: color),
+                    VertexPC(position: tip, color: color), VertexPC(position: tip - axis * 5 - side, color: color),
+                ]
+            }
+        case .rotate:
+            let segments = 48
+            for index in 0..<segments {
+                let a0 = Float(index) / Float(segments) * 2 * .pi
+                let a1 = Float(index + 1) / Float(segments) * 2 * .pi
+                vertices.append(VertexPC(position: gizmo.center + SIMD3(cos(a0), 0, sin(a0)) * gizmo.radius, color: accent))
+                vertices.append(VertexPC(position: gizmo.center + SIMD3(cos(a1), 0, sin(a1)) * gizmo.radius, color: accent))
+            }
+            let white = SIMD4<Float>(1, 1, 1, 1)
+            vertices.append(VertexPC(position: gizmo.center, color: white))
+            vertices.append(VertexPC(position: gizmo.center + gizmo.rotationDirection * gizmo.radius, color: white))
+        case .scale:
+            let lo = gizmo.localMin, hi = gizmo.localMax
+            let corners: [SIMD3<Float>] = [
+                SIMD3(lo.x, lo.y, lo.z), SIMD3(hi.x, lo.y, lo.z), SIMD3(hi.x, lo.y, hi.z), SIMD3(lo.x, lo.y, hi.z),
+                SIMD3(lo.x, hi.y, lo.z), SIMD3(hi.x, hi.y, lo.z), SIMD3(hi.x, hi.y, hi.z), SIMD3(lo.x, hi.y, hi.z),
+            ].map { corner in
+                let world = gizmo.model * SIMD4(corner.x, corner.y, corner.z, 1)
+                return SIMD3(world.x, world.y, world.z)
+            }
+            let edges = [(0, 1), (1, 2), (2, 3), (3, 0), (4, 5), (5, 6), (6, 7), (7, 4), (0, 4), (1, 5), (2, 6), (3, 7)]
+            for (a, b) in edges {
+                vertices.append(VertexPC(position: corners[a], color: accent))
+                vertices.append(VertexPC(position: corners[b], color: accent))
+            }
+        }
+        return vertices
+    }
+
     func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {
         // Aspect is derived per-frame from view.drawableSize; nothing to do.
     }
@@ -511,6 +647,25 @@ final class Renderer: NSObject, MTKViewDelegate {
             }
         }
         encoder.popDebugGroup()
+
+        // Gizmo overlay: always on top so it stays readable inside meshes.
+        if let gizmo = selectedGizmo() {
+            var vertices = gizmoVertices(gizmo)
+            if !vertices.isEmpty {
+                encoder.pushDebugGroup("gizmo")
+                encoder.setRenderPipelineState(linePipeline)
+                encoder.setDepthStencilState(overlayDepthState)
+                var gizmoUniforms = LineUniforms(mvp: viewProj)
+                encoder.setVertexBytes(&gizmoUniforms, length: MemoryLayout<LineUniforms>.stride, index: 1)
+                encoder.setVertexBytes(
+                    &vertices,
+                    length: MemoryLayout<VertexPC>.stride * vertices.count,
+                    index: 0
+                )
+                encoder.drawPrimitives(type: .line, vertexStart: 0, vertexCount: vertices.count)
+                encoder.popDebugGroup()
+            }
+        }
 
         encoder.endEncoding()
         commandBuffer.present(drawable)

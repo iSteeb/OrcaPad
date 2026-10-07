@@ -36,6 +36,10 @@ in ~/xtool-cheatsheet.md — link, don't duplicate.)
 - The status/debug overlay is hidden by default [USER]; pressing the Device
   tab button 5x within 3 s toggles it (RootView counts selection-binding
   setter calls, which fire on re-presses). Never surface it by default.
+- UIKit gesture locations are POINTS; `MTKView.drawableSize` is PIXELS.
+  Normalize picks/projections by `view.bounds.size` — using drawableSize
+  cast every ray toward 1/3 of the touch on 3x screens (broken tap-select
+  and drag-move until C6).
 - Build output always redirected to a file: `xtool dev build > /tmp/orcapad-build.log 2>&1`
 - Test/build policy lives in AGENTS.md's "Builds, tests, and audits" matrix.
   The engine compile list is shared (`Bridge/engine-sources.sh`) — never fork

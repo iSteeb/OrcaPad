@@ -13,22 +13,36 @@ struct SceneSync {
     var previewTransform: InstanceTransform?
     var presentationRevision: UInt64
     var frameRequest: UInt64
+    var gizmoMode: GizmoMode
+}
+
+/// Manipulation callbacks from the canvas gestures (engine-space units).
+struct CanvasManipulation {
+    let onSelect: (ObjectID?, InstanceID?) -> Void
+    /// Incremental bed-plane translation in engine millimetres.
+    let onMove: (SIMD2<Float>) -> Void
+    let onBegin: () -> Void
+    /// Total rotation since gesture start, radians (engine +Z = CCW from above).
+    let onRotate: (Double) -> Void
+    /// Total uniform scale factor since gesture start.
+    let onScale: (Double) -> Void
+    let onEnd: () -> Void
 }
 
 /// SwiftUI wrapper around MTKView + gesture recognizers.
 ///
-/// Gesture model:
+/// Gesture model (desktop gizmo parity, touch-first):
 /// - tap: select instance (nearest ray hit); tap empty space deselects
-/// - one-finger drag on the selected instance: move it on the bed plane
+/// - one-finger drag starting on an instance (or the rotate/scale gizmo
+///   ring of the selection): manipulate per gizmo mode — move on the bed
+///   plane, rotate around the ring (screen-space angle), or scale (vertical)
 /// - one-finger drag elsewhere: orbit
-/// - two-finger drag: pan; pinch: zoom
+/// - two-finger drag: pan; pinch: zoom; double-tap: frame scene
 @MainActor
 struct MetalCanvas: UIViewRepresentable {
     let onStatus: (String) -> Void
     var scene: SceneSync
-    let onSelect: (ObjectID?, InstanceID?) -> Void
-    let onMoveSelected: (SIMD2<Float>) -> Void
-    let onMoveEnded: () -> Void
+    let manipulation: CanvasManipulation
 
     func makeCoordinator() -> Coordinator {
         Coordinator()
@@ -47,18 +61,15 @@ struct MetalCanvas: UIViewRepresentable {
         view.isPaused = false
         view.enableSetNeedsDisplay = false
         view.preferredFramesPerSecond = 60
-        context.coordinator.attach(
-            view: view,
-            onStatus: onStatus,
-            onSelect: onSelect,
-            onMoveSelected: onMoveSelected,
-            onMoveEnded: onMoveEnded
-        )
+        context.coordinator.attach(view: view, onStatus: onStatus)
+        context.coordinator.manipulation = manipulation
         return view
     }
 
     func updateUIView(_ view: MTKView, context: Context) {
         let coordinator = context.coordinator
+        coordinator.manipulation = manipulation
+        coordinator.renderer?.setGizmoMode(scene.gizmoMode)
         let needsSceneApply =
             scene.snapshot.documentID != coordinator.lastDocumentID ||
             scene.snapshot.revision != coordinator.lastDocumentRevision ||
@@ -104,51 +115,40 @@ struct MetalCanvas: UIViewRepresentable {
         var lastSelectedInstanceID: InstanceID?
         var lastFrameRequest: UInt64?
 
+        var manipulation: CanvasManipulation?
         private var onStatus: ((String) -> Void)?
-        private var onSelect: ((ObjectID?, InstanceID?) -> Void)?
-        private var onMoveSelected: ((SIMD2<Float>) -> Void)?
-        private var onMoveEnded: (() -> Void)?
-        private var moveState: (bedOrigin: SIMD3<Float>, active: Bool)?
 
-        func attach(
-            view: MTKView,
-            onStatus: @escaping (String) -> Void,
-            onSelect: @escaping (ObjectID?, InstanceID?) -> Void,
-            onMoveSelected: @escaping (SIMD2<Float>) -> Void,
-            onMoveEnded: @escaping () -> Void
-        ) {
+        private enum DragState {
+            case orbit
+            case move(bedOrigin: SIMD3<Float>)
+            case rotate(center: CGPoint, startAngle: Double)
+            case scale(startY: CGFloat)
+        }
+        private var dragState: DragState?
+
+        func attach(view: MTKView, onStatus: @escaping (String) -> Void) {
             renderer = Renderer(view: view, onStatus: onStatus)
             self.onStatus = onStatus
-            self.onSelect = onSelect
-            self.onMoveSelected = onMoveSelected
-            self.onMoveEnded = onMoveEnded
 
-            let tap = UITapGestureRecognizer(
-                target: self,
-                action: #selector(onTap(_:))
-            )
+            let doubleTap = UITapGestureRecognizer(target: self, action: #selector(onDoubleTap(_:)))
+            doubleTap.numberOfTapsRequired = 2
+            view.addGestureRecognizer(doubleTap)
+
+            let tap = UITapGestureRecognizer(target: self, action: #selector(onTap(_:)))
+            tap.require(toFail: doubleTap)
             view.addGestureRecognizer(tap)
 
-            let orbit = UIPanGestureRecognizer(
-                target: self,
-                action: #selector(onOrbitOrMove(_:))
-            )
-            orbit.minimumNumberOfTouches = 1
-            orbit.maximumNumberOfTouches = 1
-            view.addGestureRecognizer(orbit)
+            let drag = UIPanGestureRecognizer(target: self, action: #selector(onDrag(_:)))
+            drag.minimumNumberOfTouches = 1
+            drag.maximumNumberOfTouches = 1
+            view.addGestureRecognizer(drag)
 
-            let pan = UIPanGestureRecognizer(
-                target: self,
-                action: #selector(onPan(_:))
-            )
+            let pan = UIPanGestureRecognizer(target: self, action: #selector(onPan(_:)))
             pan.minimumNumberOfTouches = 2
             pan.maximumNumberOfTouches = 2
             view.addGestureRecognizer(pan)
 
-            let pinch = UIPinchGestureRecognizer(
-                target: self,
-                action: #selector(onPinch(_:))
-            )
+            let pinch = UIPinchGestureRecognizer(target: self, action: #selector(onPinch(_:)))
             view.addGestureRecognizer(pinch)
         }
 
@@ -157,63 +157,113 @@ struct MetalCanvas: UIViewRepresentable {
         }
 
         @objc private func onTap(_ gesture: UITapGestureRecognizer) {
-            guard let view = gesture.view as? MTKView,
-                  let renderer else { return }
+            guard let view = gesture.view as? MTKView, let renderer else { return }
             let location = gesture.location(in: view)
             if let hit = renderer.pickInstance(at: location, in: view) {
-                onSelect?(hit.objectID, hit.instanceID)
+                manipulation?.onSelect(hit.objectID, hit.instanceID)
             } else {
-                onSelect?(nil, nil)
+                manipulation?.onSelect(nil, nil)
             }
         }
 
-        @objc private func onOrbitOrMove(_ gesture: UIPanGestureRecognizer) {
-            guard let view = gesture.view as? MTKView,
-                  let renderer else { return }
+        @objc private func onDoubleTap(_ gesture: UITapGestureRecognizer) {
+            renderer?.frameScene()
+        }
+
+        /// Screen-space hit on the selection's gizmo ring (rotate/scale): a
+        /// generous band around the projected ring so fingers needn't cover
+        /// the object itself.
+        private func gizmoRingHit(at location: CGPoint, in view: MTKView) -> CGPoint? {
+            guard let renderer, let gizmo = renderer.selectedGizmo(),
+                  let center = renderer.projectToScreen(gizmo.center, in: view),
+                  let rim = renderer.projectToScreen(
+                      gizmo.center + SIMD3(gizmo.radius, 0, 0), in: view
+                  ) else { return nil }
+            let radius = hypot(rim.x - center.x, rim.y - center.y)
+            let distance = hypot(location.x - center.x, location.y - center.y)
+            return distance <= radius * 1.35 + 24 ? center : nil
+        }
+
+        @objc private func onDrag(_ gesture: UIPanGestureRecognizer) {
+            guard let view = gesture.view as? MTKView, let renderer else { return }
             let location = gesture.location(in: view)
             switch gesture.state {
             case .began:
-                if let hit = renderer.pickInstance(at: location, in: view),
-                   let bed = renderer.bedPlaneHit(at: location, in: view) {
-                    // Desktop-like touch flow: dragging an unselected instance
-                    // selects it AND starts the move in one gesture.
-                    if !isSelected(hit) {
-                        onSelect?(hit.objectID, hit.instanceID)
-                    }
-                    moveState = (bed, true)
-                } else {
-                    moveState = nil
-                }
+                dragState = beginDrag(at: location, in: view, renderer: renderer)
             case .changed:
-                if moveState != nil,
-                   let bed = renderer.bedPlaneHit(at: location, in: view),
-                   let origin = moveState?.bedOrigin {
-                    let engineDelta = CoordinateMapper.engineDelta(
-                        fromViewer: bed - origin
-                    )
-                    onMoveSelected?(SIMD2(engineDelta.x, engineDelta.y))
-                    moveState = (bed, true)
-                } else {
+                switch dragState {
+                case .move(let origin):
+                    if let bed = renderer.bedPlaneHit(at: location, in: view) {
+                        let delta = CoordinateMapper.engineDelta(fromViewer: bed - origin)
+                        manipulation?.onMove(SIMD2(delta.x, delta.y))
+                        dragState = .move(bedOrigin: bed)
+                    }
+                case .rotate(let center, let startAngle):
+                    let angle = Double(atan2(location.y - center.y, location.x - center.x))
+                    // Screen y points down: visually CCW motion decreases the
+                    // angle; engine +Z rotation is CCW seen from above.
+                    let delta = atan2(sin(startAngle - angle), cos(startAngle - angle))
+                    manipulation?.onRotate(delta)
+                case .scale(let startY):
+                    manipulation?.onScale(exp(Double(startY - location.y) / 220))
+                case .orbit, .none:
                     let translation = gesture.translation(in: gesture.view)
-                    renderer.camera.orbit(
-                        dx: Float(translation.x),
-                        dy: Float(translation.y)
-                    )
+                    renderer.camera.orbit(dx: Float(translation.x), dy: Float(translation.y))
                     gesture.setTranslation(.zero, in: gesture.view)
                 }
-            case .ended, .cancelled:
-                if moveState != nil {
-                    moveState = nil
-                    onMoveEnded?()
+            case .ended, .cancelled, .failed:
+                switch dragState {
+                case .move, .rotate, .scale:
+                    manipulation?.onEnd()
+                case .orbit, .none:
+                    break
                 }
+                dragState = nil
             default:
                 break
             }
         }
 
-        private func isSelected(
-            _ hit: (objectID: ObjectID, instanceID: InstanceID)
-        ) -> Bool {
+        private func beginDrag(
+            at location: CGPoint,
+            in view: MTKView,
+            renderer: Renderer
+        ) -> DragState {
+            let hit = renderer.pickInstance(at: location, in: view)
+            let mode = renderer.gizmoMode
+            if mode != .move, hit == nil, let center = gizmoRingHit(at: location, in: view) {
+                manipulation?.onBegin()
+                return mode == .rotate
+                    ? .rotate(center: center, startAngle: Double(atan2(location.y - center.y, location.x - center.x)))
+                    : .scale(startY: location.y)
+            }
+            guard let hit else { return .orbit }
+            if !isSelected(hit) {
+                manipulation?.onSelect(hit.objectID, hit.instanceID)
+            }
+            switch mode {
+            case .move:
+                guard let bed = renderer.bedPlaneHit(at: location, in: view) else { return .orbit }
+                return .move(bedOrigin: bed)
+            case .rotate:
+                // Center from the hit instance itself (selection may not be
+                // re-applied to the renderer yet).
+                guard let center = renderer.gizmo(objectID: hit.objectID, instanceID: hit.instanceID)
+                    .flatMap({ renderer.projectToScreen($0.center, in: view) }) else {
+                    return .orbit
+                }
+                manipulation?.onBegin()
+                return .rotate(
+                    center: center,
+                    startAngle: Double(atan2(location.y - center.y, location.x - center.x))
+                )
+            case .scale:
+                manipulation?.onBegin()
+                return .scale(startY: location.y)
+            }
+        }
+
+        private func isSelected(_ hit: (objectID: ObjectID, instanceID: InstanceID)) -> Bool {
             renderer?.selectedInstanceIDs.contains {
                 $0.objectID == hit.objectID && $0.instanceID == hit.instanceID
             } ?? false

@@ -214,12 +214,15 @@ final class DocumentStore {
     }
 
     func commitSelectedTransform() async {
+        manipulationBase = nil
         guard let selection,
-              let authoritative = scene?.instance(
-                  objectID: selection.objectID,
-                  instanceID: selection.instanceID
-              )?.transform else { return }
-        let transform = previewTransform ?? authoritative
+              let authoritative = selectedAuthoritativeTransform else { return }
+        let transform = onBed(previewTransform ?? authoritative)
+        guard transform != authoritative else {
+            previewTransform = nil
+            presentationRevision += 1
+            return
+        }
         _ = await applyMutation(
             .setTransform(
                 objectID: selection.objectID,
@@ -230,18 +233,87 @@ final class DocumentStore {
         )
     }
 
-    func rotateSelected(by degrees: Double) async {
-        guard !isBusy,
-              let selection,
-              let authoritative = scene?.instance(
-                  objectID: selection.objectID,
-                  instanceID: selection.instanceID
-              )?.transform else { return }
-        var transform = previewTransform ?? authoritative
-        transform.rotationZ += degrees * .pi / 180
+    // MARK: Gizmo manipulation (rotate / scale relative to a gesture base)
+
+    /// Snap step for gesture rotation (desktop rotate gizmo snaps too).
+    static let rotationSnapDegrees = 5.0
+
+    private var manipulationBase: InstanceTransform?
+
+    var selectedAuthoritativeTransform: InstanceTransform? {
+        guard let selection else { return nil }
+        return scene?.instance(
+            objectID: selection.objectID,
+            instanceID: selection.instanceID
+        )?.transform
+    }
+
+    /// The transform the UI should display: the live preview while a gesture
+    /// runs, otherwise the authoritative engine value.
+    var selectedDisplayTransform: InstanceTransform? {
+        previewTransform ?? selectedAuthoritativeTransform
+    }
+
+    /// Engine-space size of the selected instance (snapshot bounds × scale).
+    var selectedSize: SIMD3<Float>? {
+        guard let selection,
+              let object = scene?.object(id: selection.objectID),
+              let transform = selectedDisplayTransform else { return nil }
+        return object.mesh.bounds.size * Float(transform.scale)
+    }
+
+    func beginManipulation() {
+        guard !isBusy else { return }
+        manipulationBase = selectedDisplayTransform
+    }
+
+    /// Live rotation preview: base rotation + gesture delta, snapped.
+    func previewRotation(deltaRadians: Double) {
+        guard !isBusy, let base = manipulationBase else { return }
+        let step = Self.rotationSnapDegrees * .pi / 180
+        var transform = base
+        transform.rotationZ = Self.normalizedAngle(
+            base.rotationZ + (deltaRadians / step).rounded() * step
+        )
         previewTransform = transform
         presentationRevision += 1
+    }
+
+    /// Live uniform-scale preview: base scale × gesture factor, kept on bed.
+    func previewScale(factor: Double) {
+        guard !isBusy, let base = manipulationBase, factor.isFinite, factor > 0 else { return }
+        var transform = base
+        transform.scale = min(max(base.scale * factor, 0.01), 100)
+        previewTransform = onBed(transform)
+        presentationRevision += 1
+    }
+
+    /// Numeric entry (Object manipulation panel): commits immediately.
+    func setSelectedTransform(_ transform: InstanceTransform) async {
+        guard !isBusy else {
+            status.report(.document, "transform blocked: document is busy")
+            return
+        }
+        var normalized = transform
+        normalized.rotationZ = Self.normalizedAngle(transform.rotationZ)
+        previewTransform = onBed(normalized)
+        presentationRevision += 1
         await commitSelectedTransform()
+    }
+
+    /// Keeps the instance resting on the bed: meshes are centered on import
+    /// and only z-rotation is supported, so the lowest point is the snapshot
+    /// bound's min z scaled — engine truth, no client geometry.
+    private func onBed(_ transform: InstanceTransform) -> InstanceTransform {
+        guard let selection,
+              let object = scene?.object(id: selection.objectID) else { return transform }
+        var lifted = transform
+        lifted.offsetZ = -Double(object.mesh.bounds.minimum.z) * transform.scale
+        return lifted
+    }
+
+    private static func normalizedAngle(_ radians: Double) -> Double {
+        atan2(sin(radians), cos(radians))
     }
 
     func beginSlicing() -> SliceInput? {
