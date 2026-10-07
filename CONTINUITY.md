@@ -10,8 +10,10 @@
 - Done: C1 shell, C2/C5 Prepare (extracted desktop layout, ABI v4
   overrides), C3/C4 Preview (ABI v6 toolpath, range/move scrubbing, schemes,
   legend), C6 Plate gizmos + numeric panel; debug overlay hidden (5x Device).
-- Next (needs user choice): C6b engine Arrange (NLopt closure), C6c lay flat
-  (transform contract), C5b user presets, Device tab, immutable slice jobs.
+- [2026-10-13] C6c-1 done (ABI v7 full transforms + mode panels + Preview
+  dock, `8d4cdaf`); on-device check of it by user PENDING.
+- Next (needs user choice): rank from PARITY.md — #1 curr_bed_type bug,
+  #2 export/open G-code, #3 cancel+warnings, #4 3MF, #5 C5b presets.
 
 ## DECISIONS
 
@@ -35,17 +37,11 @@
 
 ## PROGRESS
 
-- [2026-10-06 CODE][TOOL] C4–C6 + overlay: Preview parity (`b0960d2`,
-  `b5dc9c0` ABI v6), Prepare desktop layout from Tab.cpp (`f09d26b`), Plate
-  gizmos + panel + picking fix (`cc85933`), overlay toggle (`97c16c2`). Host
-  contract tests 29,767 checks green; installed on iPoke.
-
-- [2026-10-06 CODE][TOOL] GATE C1–C3: RootView TabView + Features/ modules;
-  Prepare editor (schema `mode` filter, engine-derived kind membership,
-  accordions, typed editors, overrides via ABI v4 edited presets); Preview
-  (ABI v5 GCodeProcessor toolpath, feature-colored Metal lines, layer
-  scrubber). Real Thumbnails.cpp compiled (jpeg adapter); brass overlay bug
-  fixed (enum keys_map). Host contract tests 29,762 checks green.
+- [2026-10-13 CODE][TOOL] ABI v7 (`8d4cdaf`): host contract 29,837 checks
+  green; audit PASS; installed on iPoke. PARITY.md written.
+- [2026-10-06 CODE][TOOL] Gate C1–C6 (compressed): tab shell; Prepare editor
+  (Tab.cpp layout, ABI v4 overrides); Preview (ABI v5/v6 toolpath, schemes,
+  legend, scrubbers); Plate gizmos + picking fix (`cc85933`); overlay toggle.
 
 - [2026-10-06 CODE][TOOL] Gate A/B infrastructure (compressed): shared
   `engine-sources.sh` list; host contract suite + archive-style link;
@@ -54,6 +50,11 @@
   machine bed, vendor/compat preset metadata, resolved config (`72892e6`).
 
 ## DISCOVERIES
+
+- [2026-10-13 CODE] Bridge never sets project `curr_bed_type`; GCode.cpp:2154
+  picks bed temps by it, default btPC → all slices use Cool Plate temps.
+  Desktop calib models are .drc (draco not vendored); 3MF needs only vendored
+  miniz+expat. Subagent tool returns empty output — don't use it [USER].
 
 - [2026-10-06 CODE] Upstream `ObjectBase::s_last_id` is not thread safe, so the
   Bridge process-serializes guarded engine entry. Moving a `ModelObject*`

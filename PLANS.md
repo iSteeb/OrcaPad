@@ -76,8 +76,13 @@ Device, each tab a clean feature module over the same stores.
 - [ ] C6b: engine Arrange — bring Arrange.cpp + libnest2d + NLopt 2.5 into
       the closure (configured nlopt_config.h, generated nlopt.hpp), bridge
       `orca_plater_arrange` over ModelInstance arrange polygons + bed polygon
-- [ ] C6c: Lay flat / free rotation — extend the transform contract beyond
-      z-rotation (snapshot + set ABI), then the face-pick gizmo
+- [x] C6c-1: ABI v7 full transforms — XYZ Euler + per-axis scale in the
+      snapshot/set contract, engine matrix in snapshots, world-axis
+      `orca_plater_instance_rotate` (wraps through 360°), engine rest-on-bed;
+      mode panels (Move X/Y/center, Rotate axis picker + ±15° + reset, Scale
+      per-axis + uniform lock); Preview controls in a left dock (`8d4cdaf`)
+- [ ] C6c-2: Lay flat face-pick gizmo on top of the v7 rotate
+- [ ] Parity backlog: see PARITY.md (audited 2026-10-13, ranked list)
 - [ ] Device tab: printer web UI (later)
 
 **Accept:** device walkthrough of all four tabs; edits in Prepare change the
