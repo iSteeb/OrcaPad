@@ -25,7 +25,7 @@ yet in `Bridge/engine-sources.sh`), **Client-reimpl** (desktop logic lives in
 | Split to objects / parts | `GLCanvas3D.cpp:6836,6848`, `Plater.cpp:17251` | none found | ❌ | Bridge (`ModelObject::split` is compiled) |
 | Mirror | `Plater.cpp:7605` | snapshot rejects left-handed instances | ❌ | Bridge + renderer (winding flip) |
 | Cut | `GLGizmosManager.cpp:210` | none found | ❌ | Closure: `CutUtils.cpp` (no exotic dependencies) |
-| Mesh boolean | `GLGizmosManager.cpp:211` | stubbed in `format_stubs.cpp:97` | ❌ | Closure: CGAL PMP + libigl / mcut (heavy) |
+| Mesh boolean | `GLGizmosManager.cpp:211` | stubbed in `format_stubs.cpp:97` | ➖ deferred by user (2026-10-13) | Closure: CGAL PMP + libigl / mcut (heavy) |
 | Support / seam / fuzzy-skin / MMU paint | `GLGizmosManager.cpp:212-215` | `PlateTabView.swift:258` placeholder | ❌ (deferred by AGENTS.md) | Bridge: `TriangleSelector.cpp` is compiled; brush UI is needed |
 | Text emboss / SVG | `GLGizmosManager.cpp:216-217` | none found (engine `Emboss.cpp`/`NSVGUtils.cpp` now compiled for 3MF) | ❌ | Bridge + UI + iOS font access |
 | Measure / Assembly / Simplify / Brim ears | `GLGizmosManager.cpp:218-221` | none found | ❌ | Closure: `Measure.cpp`, `QuadricEdgeCollapse.cpp`; brim ears are Client-reimpl |
@@ -102,10 +102,10 @@ yet in `Bridge/engine-sources.sh`), **Client-reimpl** (desktop logic lives in
 | 3MF project load/save | `Plater.cpp:12102,12234,15551` | ABI v11 `orca_project_open` (model + embedded presets + `load_config_model` + plate type, atomic) / `orca_project_save` (`store_bbs_3mf`, `full_config_secure`); Plate ▸ File menu | ✅ single plate incl. plate thumbnail (multi-plate projects rejected loudly) | — |
 | STEP | `Format/STEP.cpp` (OCCT) | stubbed in `format_stubs.cpp:47-58` | ➖ deferred by user (2026-10-13) | Closure: OpenCASCADE (heavy) |
 | SVG import | `Format/svg.cpp` (OCCT + nanosvg) | stubbed in `format_stubs.cpp:87` | ➖ deferred by user (2026-10-13) | Closure: OCCT |
-| DRC | `Format/DRC.cpp` (draco) | stubbed in `format_stubs.cpp:84` | ❌ | Closure: draco (not vendored) |
+| DRC | `Format/DRC.cpp` (draco) | stubbed in `format_stubs.cpp:84` | ➖ deferred by user (2026-10-13) | Closure: draco (not vendored) |
 | Export plate STL/OBJ, printable 3MF | `Plater.cpp:15047` | none found | ❌ | Bridge (STL/OBJ store compiled); 3MF blocked as above |
 | Recent projects, auto-backup | `MainFrame.cpp`, `bbs_3mf.cpp` backup manager | projects saved to Files ▸ OrcaPad ▸ Projects; no recent list, backup manager compiled but unused | 🟡 | UI |
-| Calibration menu (temp, max flow, PA, flow, retraction, VFA, cornering, input shaping) | `MainFrame.cpp:3328-3478`, `Plater.cpp:12622-13396` | none found | ❌ | Engine `calib.cpp` is compiled, but the models are `.drc` (`Plater.cpp:12634-13359`), so draco is required first |
+| Calibration menu (temp, max flow, PA, flow, retraction, VFA, cornering, input shaping) | `MainFrame.cpp:3328-3478`, `Plater.cpp:12622-13396` | none found | ➖ deferred by user (2026-10-13) | Engine `calib.cpp` is compiled, but the models are `.drc` (`Plater.cpp:12634-13359`), so draco is required first |
 | Preferences | `Preferences.hpp:31` | none found | ❌ | UI |
 | Setup wizard (vendor/printer picking) | `ConfigWizard.cpp` | all system printers are listed | 🟡 | UI |
 
@@ -123,10 +123,8 @@ Plus ✅ G-code/3MF thumbnails (ABI v16).
 
 ## Remaining work (recommended order)
 
-**Needs a decision from you (blocked):**
-- Calibration menu — engine `calib.cpp` is compiled, but its models are Draco `.drc` (draco not vendored).
-- (STEP / SVG import deferred by user.)
-- Mesh boolean — CGAL PMP / libigl / mcut (MCUT is vendored in deps_src — feasibility to re-check).
+**Deferred by user (2026-10-13):** STEP/SVG import, Draco/DRC, Calibration
+menu, mesh boolean.
 
 **Unblocked, highest value first:**
 0. Device tab printer web page (decision made 2026-10-13).

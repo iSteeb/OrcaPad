@@ -11,9 +11,9 @@
   before this install); then unblocked list in PARITY.md (per-layer
   color change/pause, undo/redo, object list ops, multi-filament, multi-plate).
 - [2026-10-13 USER] Device tab may embed the printer's own web page
-  (scoped AGENTS.md exception); STEP/SVG deferred. Still open: draco
-  (calibration), mesh boolean (MCUT vendored — re-check), parity checker
-  script (proposed, awaiting go). v16 installed on iPoke 2026-10-13.
+  (scoped AGENTS.md exception). Deferred by user: STEP/SVG, Draco,
+  Calibration menu, mesh boolean. Awaiting go: parity checker script.
+  v16 installed on iPoke 2026-10-13.
 
 ## DECISIONS
 
