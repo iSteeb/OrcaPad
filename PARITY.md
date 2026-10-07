@@ -1,6 +1,6 @@
 # OrcaPad ↔ OrcaSlicer desktop parity report
 
-Audited 2026-10-13 at commit `8d4cdaf` against `upstream/orcaslicer` (pinned).
+Audited 2026-10-13 at `8d4cdaf`; updated through `8edb8a6` (ABI v16) against `upstream/orcaslicer` v2.4.2 (pinned, unmodified).
 Status: ✅ done · 🟡 partial · ❌ missing · ➖ N/A on iOS / deliberate.
 "Work" says what closing the gap needs: **UI** (Swift only), **Bridge** (new
 ABI over engine code already compiled), **Closure** (engine TU/dependency not
@@ -27,7 +27,7 @@ yet in `Bridge/engine-sources.sh`), **Client-reimpl** (desktop logic lives in
 | Cut | `GLGizmosManager.cpp:210` | none found | ❌ | Closure: `CutUtils.cpp` (no exotic dependencies) |
 | Mesh boolean | `GLGizmosManager.cpp:211` | stubbed in `format_stubs.cpp:97` | ❌ | Closure: CGAL PMP + libigl / mcut (heavy) |
 | Support / seam / fuzzy-skin / MMU paint | `GLGizmosManager.cpp:212-215` | `PlateTabView.swift:258` placeholder | ❌ (deferred by AGENTS.md) | Bridge: `TriangleSelector.cpp` is compiled; brush UI is needed |
-| Text emboss / SVG | `GLGizmosManager.cpp:216-217` | none found | ❌ | Closure: `Emboss.cpp` (imstb_truetype, nanosvg vendored) + font access |
+| Text emboss / SVG | `GLGizmosManager.cpp:216-217` | none found (engine `Emboss.cpp`/`NSVGUtils.cpp` now compiled for 3MF) | ❌ | Bridge + UI + iOS font access |
 | Measure / Assembly / Simplify / Brim ears | `GLGizmosManager.cpp:218-221` | none found | ❌ | Closure: `Measure.cpp`, `QuadricEdgeCollapse.cpp`; brim ears are Client-reimpl |
 | Variable layer height | `GLCanvas3D.cpp:6858` | none found | ❌ | Bridge (`SlicingAdaptive.cpp` compiled) |
 | Object list: parts / modifiers / negative volumes / blockers | `GUI_ObjectList.cpp:2153,2271,2441` | object sheet `PlateTabView.swift:182` lists objects only | ❌ | Bridge (`ModelVolumeType`) + multi-volume renderer |
@@ -71,8 +71,7 @@ yet in `Bridge/engine-sources.sh`), **Client-reimpl** (desktop logic lives in
 |---|---|---|---|---|
 | Schemes: FeatureType, Speed, Height, Width, Fan, Temperature | `libvgcode/include/Types.hpp:80-102` | `GcodePreviewStore.swift:8-13` | ✅ | — |
 | VolumetricFlowRate, ActualSpeed/Volumetric, LayerTime lin/log, PA, Accel, Jerk, Tool | `Types.hpp:80-102` | ABI v14 fields; all schemes in `GcodePreviewStore.swift` color modes | ✅ ColorPrint/Summary ➖ | — |
-| ~~ActualSpeed etc~~ | | | ✅ (see row above) | |
-| Tool / ColorPrint / Summary | same | none found | ❌ | UI for Tool (`extruder` exported); ColorPrint needs color changes |
+| ColorPrint / Summary | same | none found (Tool scheme ✅ above) | ❌ | ColorPrint needs per-layer color changes (see slider row) |
 | Travel toggle | `Types.hpp:168` | `PreviewTabView.swift:225` dock | ✅ | — |
 | Wipes, retractions, unretractions, seams, tool/color changes, pauses, custom G-code | `Types.hpp:169-176` | ABI v14 marker segments (point moves) + Seams/Retract dock toggles; markers rendered as crosses | 🟡 tool/color changes, pauses, custom G-code exported but not yet drawn | UI |
 | Center of gravity, shells | `Types.hpp:177-179`, `GCodeViewer.cpp:2476` | none found | ❌ | UI (shells can reuse Plate meshes) |
@@ -100,7 +99,7 @@ yet in `Bridge/engine-sources.sh`), **Client-reimpl** (desktop logic lives in
 | Print hosts (OctoPrint, Moonraker, PrusaLink/Connect, Duet, Repetier, MKS, Elegoo, Flashforge, SimplyPrint, …) | `Utils/PrintHost.cpp:58-73`, `PrintConfig.hpp:80` | `PrintHostService.swift` (URLSession, mirrors desktop's GUI-layer libcurl): OctoPrint `/api/files/local` + Moonraker `/server/files/upload`, upload + optional start print | 🟡 2 of 16 host types; others are typed rejections | Client-reimpl per host |
 | Bambu cloud/LAN monitor | `Monitor.cpp` | — | ➖ proprietary network plugin | — |
 | OBJ / AMF import | `Plater.cpp` load_files | ABI v10 `orca_plater_import_model` → `Model::read_from_file` | ✅ | — |
-| 3MF project load/save | `Plater.cpp:12102,12234,15551` | ABI v11 `orca_project_open` (model + embedded presets + `load_config_model` + plate type, atomic) / `orca_project_save` (`store_bbs_3mf`, `full_config_secure`); Plate ▸ File menu | ✅ single plate (multi-plate projects rejected loudly; no thumbnails yet) | — |
+| 3MF project load/save | `Plater.cpp:12102,12234,15551` | ABI v11 `orca_project_open` (model + embedded presets + `load_config_model` + plate type, atomic) / `orca_project_save` (`store_bbs_3mf`, `full_config_secure`); Plate ▸ File menu | ✅ single plate incl. plate thumbnail (multi-plate projects rejected loudly) | — |
 | STEP | `Format/STEP.cpp` (OCCT) | stubbed in `format_stubs.cpp:47-58` | ❌ | Closure: OpenCASCADE (heavy) |
 | SVG import | `Format/svg.cpp` (OCCT + nanosvg) | stubbed in `format_stubs.cpp:87` | ❌ | Closure: OCCT |
 | DRC | `Format/DRC.cpp` (draco) | stubbed in `format_stubs.cpp:84` | ❌ | Closure: draco (not vendored) |
@@ -110,14 +109,31 @@ yet in `Bridge/engine-sources.sh`), **Client-reimpl** (desktop logic lives in
 | Preferences | `Preferences.hpp:31` | none found | ❌ | UI |
 | Setup wizard (vendor/printer picking) | `ConfigWizard.cpp` | all system printers are listed | 🟡 | UI |
 
-## Highest-value outstanding items (recommended order)
+## Status of the original ranked list (all eight done)
 
-1. ~~**Bed type (`curr_bed_type`)**~~ ✅ done (ABI v8).
-2. ~~Export / share G-code and open external G-code~~ ✅ done (also fixed: re-slicing to the same path never refreshed Preview; imported objects were named "orcapad-import").
-3. ~~Slice cancel + warnings list~~ ✅ done (ABI v9; slices now run `Print::validate` like desktop — previously OrcaPad exported G-code desktop would refuse).
-4. ~~3MF load/save~~ ✅ done (ABI v10 import of STL/OBJ/AMF/3MF geometry; ABI v11 single-plate project open/save incl. presets + plate type). Follow-ups: multi-plate, project thumbnails.
-5. ~~User presets (C5b) + unsaved-changes prompt~~ ✅ done (ABI v12). Physical printers move to item 7 (print hosts).
-6. **Arrange / orient / lay-flat**: needs NLopt for Arrange; `Orient.cpp` is a small closure step; lay-flat is client logic on the v7 rotate.
-7. ~~Print host upload~~ ✅ OctoPrint + Moonraker done (ABI v15 physical printers via the engine collection; other host types are typed rejections).
-8. **Preview ABI v8**: retract/seam/wipe markers, `actual_feedrate`/`layer_duration`/PA/accel/jerk, stealth time and filament statistics. These complete the Types.hpp scheme list.
-9. Object list volumes/modifiers, per-object settings, undo/redo, multi-plate: larger Bridge and client-reimpl work.
+1. ✅ Plate type `curr_bed_type` (ABI v8) — was a correctness bug.
+2. ✅ Export/share + open external G-code (also fixed stale Preview on re-slice, object naming).
+3. ✅ Cancel + warnings (ABI v9) — slices now run `Print::validate` like desktop.
+4. ✅ 3MF: import of STL/OBJ/AMF/3MF (ABI v10); single-plate project open/save with presets, plate type and thumbnail (ABI v11/v16).
+5. ✅ User presets save/delete + unsaved-changes prompt (ABI v12).
+6. ✅ Arrange (libnest2d + NLopt 2.5.0), Orient, Lay flat (ABI v13).
+7. ✅ Physical printers (engine collection, ABI v15) + OctoPrint/Moonraker upload.
+8. ✅ Preview ABI v14: markers, every remaining color scheme, stealth time, filament/cost totals.
+Plus ✅ G-code/3MF thumbnails (ABI v16).
+
+## Remaining work (recommended order)
+
+**Needs a decision from you (blocked):**
+- Device tab printer web UI — embedding the printer's own page conflicts with AGENTS.md "no WebView UI".
+- Calibration menu — engine `calib.cpp` is compiled, but its models are Draco `.drc` (draco not vendored).
+- STEP / SVG import — OpenCASCADE (very large dependency).
+- Mesh boolean — CGAL PMP / libigl / mcut.
+
+**Unblocked, highest value first:**
+1. Per-layer color change / pause / custom G-code (slider) — Bridge over compiled `CustomGCode.cpp`; unlocks ColorPrint scheme.
+2. Undo/redo — Bridge Model snapshot stack under the session revision.
+3. Object list: split, parts/modifiers/negative volumes, per-object settings, rename — Bridge over compiled `Model.cpp`.
+4. Multiple filaments/extruders + color widget — Bridge (`filament_presets` vector) + UI.
+5. Multi-plate — client reimplementation of GUI `PartPlate` (also completes Arrange overflow and multi-plate 3MF).
+6. Option dependency greying (`ConfigManipulation`), compare presets, global search — client.
+7. More print host types (PrusaLink, Duet, …), camera view presets, scale gizmo per-axis handles, rotate free-angle entry, lay-flat hull planes, cut/simplify/measure.

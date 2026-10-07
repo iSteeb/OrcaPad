@@ -64,26 +64,31 @@ Device, each tab a clean feature module over the same stores.
       inline, printer/filament settings screens, tooltips, units, range
       validation, single-element vectors edited as scalars, multiline G-code
       editor (`f09d26b`)
-- [ ] C5b: desktop "Save preset" — persist edits as user presets through the
-      engine (`PresetCollection::save_current_preset` into the writable data
-      dir) and list user presets alongside system ones (edits are session-only
-      until then, like desktop unsaved changes)
+- [x] C5b: user presets — save (desktop SavePresetDialog rules, detach) /
+      delete via `PresetCollection`, persisted + reloaded; unsaved-changes
+      prompt; user/project groups in pickers (ABI v12, `343eed2`)
 - [x] C6: Plate v1 — left gizmo toolbar (Move/Rotate/Scale) with on-canvas
       gizmos (axes, ring + angle tick, bounding box), ring-drag rotation with
       5° snap, vertical-drag scale kept on bed, desktop Object manipulation
       panel (X/Y/RotZ/Scale/size, quick actions), copy/delete; FIXED picking
       (points vs pixels) that broke tap-select and drag-move (`cc85933`)
-- [ ] C6b: engine Arrange — bring Arrange.cpp + libnest2d + NLopt 2.5 into
-      the closure (configured nlopt_config.h, generated nlopt.hpp), bridge
-      `orca_plater_arrange` over ModelInstance arrange polygons + bed polygon
+- [x] C6b: engine Arrange — Arrange.cpp + libnest2d + NLopt 2.5.0 in the
+      closure (`gen_nlopt.py` headers verified vs CMake), ArrangeJob param
+      flow; plus Orient (ABI v13, `8277409`)
 - [x] C6c-1: ABI v7 full transforms — XYZ Euler + per-axis scale in the
       snapshot/set contract, engine matrix in snapshots, world-axis
       `orca_plater_instance_rotate` (wraps through 360°), engine rest-on-bed;
       mode panels (Move X/Y/center, Rotate axis picker + ±15° + reset, Scale
       per-axis + uniform lock); Preview controls in a left dock (`8d4cdaf`)
-- [ ] C6c-2: Lay flat face-pick gizmo on top of the v7 rotate
-- [ ] Parity backlog: see PARITY.md (audited 2026-10-13, ranked list)
-- [ ] Device tab: printer web UI (later)
+- [x] C6c-2: Lay flat — facet-pick tap → engine rotate-to-down + rest on bed
+      (ABI v13; hull-plane highlighting still missing)
+- [x] C7: plate type (v8), cancel/validate/warnings (v9), import of all
+      formats (v10), 3MF projects (v11), preview v14 (markers, all schemes,
+      filament totals), physical printers + OctoPrint/Moonraker upload (v15),
+      G-code/3MF thumbnails (v16) — see PARITY.md
+- [ ] Parity backlog: PARITY.md "Remaining work" (unblocked list + blocked
+      decisions)
+- [ ] Device tab: printer web UI (needs a decision — WebView ban)
 
 **Accept:** device walkthrough of all four tabs; edits in Prepare change the
 sliced gcode (verified in Preview + resolved config); Preview scrubs layers.
@@ -157,10 +162,11 @@ seconds — acceptable for Phase 1; parallelism is a Phase 2 perf item).
   bed-anchored, auto-framing) — DONE (cube fallback retired on import)
 - [x] Real slicing geometry on-device: slice_mesh_ex probe (8 z-levels,
   mid-layer islands+area in status chip) — DONE
-- [ ] 3MF import via engine (blocked on stub/dep decisions — see map)
+- [x] 3MF import via engine (real 3mf/bbs_3mf TUs, ABI v10/v11)
 - [x] Basic move/rotate controls, object list, multi-instance copy/delete,
   and CPU ray-cast picking implemented (device acceptance still required)
-- [ ] Snap, lay-flat, and auto-arrange (engine algorithms — never reimplement)
+- [x] Lay-flat and auto-arrange through engine algorithms (ABI v13); snap
+      still open
 - [x] Replace index-coupled scene state with stable snapshot identity
 - [ ] Replace O(triangle × instance) picking before treating large plates as
   production-ready

@@ -228,3 +228,15 @@ in ~/xtool-cheatsheet.md — link, don't duplicate.)
 - Entity snapshots must validate raw ABI values BEFORE calling a Swift
   initializer with preconditions, or a bad engine value traps instead of
   surfacing a typed BridgeFailure.
+- All-or-nothing edit scripts lose EVERY edit when one anchor no longer
+  matches (e.g. an edit that already landed on a previous run). Make each
+  scripted edit idempotent (skip when the new text is present) or apply one
+  edit per script, and verify the file afterwards — never assume it landed.
+- The Swift ABI literal, the header macro and the contract-test literal must
+  move together; only a RUNTIME check compared Swift vs header, so the Swift
+  value drifted silently (8 vs 14). The audit now enforces the match.
+- Before exposing an engine option, read its real key in PrintConfig.cpp
+  (physical-printer host is `host_type`, coEnum — not `print_host_type`).
+  Swift imports C fixed-size arrays as tuples — index them via byte offsets.
+- Never use `rm -rf ./*` style cleanup [USER 2026-10-13]: create a fresh
+  scratch dir instead of emptying one.
