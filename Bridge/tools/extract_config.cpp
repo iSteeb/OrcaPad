@@ -37,7 +37,10 @@ int main() {
         j["category"]    = def.category;
         j["tooltip"]     = def.tooltip;
         j["gui_flags"]   = def.gui_flags;
-        j["default"]     = def.default_value ? def.default_value->serialize() : nullptr;
+        if (def.default_value)
+            j["default"] = def.default_value->serialize();
+        else
+            j["default"] = nullptr;
         j["min"]         = def.min;
         j["max"]         = def.max;
         j["enum_values"] = def.enum_values;

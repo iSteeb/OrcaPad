@@ -44,6 +44,19 @@ struct SettingsView: View {
         machineSection
         filamentSection
         processSection
+        resolvedConfigSection
+    }
+
+    private var resolvedConfigSection: some View {
+        Section {
+            NavigationLink {
+                ConfigView(presets: presets)
+            } label: {
+                Label("Resolved configuration", systemImage: "doc.text.magnifyingglass")
+            }
+        } footer: {
+            Text("Every value the slicer will use, merged from the selected machine, filament, and process.")
+        }
     }
 
     private func entryRow(_ symbol: String, _ value: String) -> some View {
