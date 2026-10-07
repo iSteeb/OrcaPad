@@ -57,6 +57,8 @@ struct ToolpathBuildKey: Equatable {
     let colorMode: ToolpathColorMode
     let hiddenRoles: Set<UInt8>
     let showTravel: Bool
+    let showSeams: Bool
+    let showRetractions: Bool
     let bed: EngineBed
 }
 
@@ -96,6 +98,9 @@ final class ToolpathRenderer: NSObject, MTKViewDelegate {
     // Travels: lines, 2 vertices/segment.
     private var travelVB: MTLBuffer?
     private var travelPrefix: [UInt32] = [0]
+    // Marker moves (seams/retracts): 6-vertex crosses.
+    private var markerVB: MTLBuffer?
+    private var markerPrefix: [UInt32] = [0]
 
     private var layerFirstSegment: [Int] = []
     private var appliedKey: ToolpathBuildKey?
@@ -162,8 +167,8 @@ final class ToolpathRenderer: NSObject, MTKViewDelegate {
         )
 
         guard let toolpath = store.toolpath else {
-            extrusionVB = nil; extrusionIB = nil; travelVB = nil
-            extrusionPrefix = [0]; travelPrefix = [0]; layerFirstSegment = []
+            extrusionVB = nil; extrusionIB = nil; travelVB = nil; markerVB = nil
+            extrusionPrefix = [0]; travelPrefix = [0]; markerPrefix = [0]; layerFirstSegment = []
             return
         }
 
@@ -184,12 +189,15 @@ final class ToolpathRenderer: NSObject, MTKViewDelegate {
         var extrusionVertices: [VertexPC] = []
         var extrusionIndices: [UInt32] = []
         var travelVertices: [VertexPC] = []
+        var markerVertices: [VertexPC] = []
         extrusionVertices.reserveCapacity(extrusionCount * (extrusionsAsRibbons ? 6 : 2))
         if extrusionsAsRibbons { extrusionIndices.reserveCapacity(extrusionCount * 12) }
         var extrusionPrefix = [UInt32](repeating: 0, count: segments.count + 1)
         var travelPrefix = [UInt32](repeating: 0, count: segments.count + 1)
+        var markerPrefix = [UInt32](repeating: 0, count: segments.count + 1)
         var extruded: UInt32 = 0
         var travelled: UInt32 = 0
+        var markers: UInt32 = 0
 
         func viewer(_ point: SIMD3<Float>) -> SIMD3<Float> {
             CoordinateMapper.viewerPoint(fromEngine: point, bedCenter: center)
@@ -212,6 +220,29 @@ final class ToolpathRenderer: NSObject, MTKViewDelegate {
                         extruded += 1
                     }
                 }
+            } else if segment.isPoint {
+                // ABI v14 marker moves: world-space cross at the point
+                // (desktop seam/retraction visibility options).
+                let visible: Bool
+                switch segment.moveType {
+                case .seam: visible = key.showSeams
+                case .retract, .unretract: visible = key.showRetractions
+                default: visible = false
+                }
+                if visible {
+                    let p = viewer(segment.start)
+                    let color = Self.markerColor(segment.moveType)
+                    let s: Float = 0.5
+                    markerVertices.append(contentsOf: [
+                        VertexPC(position: p + SIMD3(-s, 0, 0), color: color),
+                        VertexPC(position: p + SIMD3(s, 0, 0), color: color),
+                        VertexPC(position: p + SIMD3(0, 0, -s), color: color),
+                        VertexPC(position: p + SIMD3(0, 0, s), color: color),
+                        VertexPC(position: p + SIMD3(0, -s, 0), color: color),
+                        VertexPC(position: p + SIMD3(0, s, 0), color: color),
+                    ])
+                    markers += 1
+                }
             } else if key.showTravel {
                 travelVertices.append(VertexPC(position: viewer(segment.start), color: ToolpathPalette.travel))
                 travelVertices.append(VertexPC(position: viewer(segment.end), color: ToolpathPalette.travel))
@@ -219,14 +250,17 @@ final class ToolpathRenderer: NSObject, MTKViewDelegate {
             }
             extrusionPrefix[index + 1] = extruded
             travelPrefix[index + 1] = travelled
+            markerPrefix[index + 1] = markers
         }
 
         self.extrusionPrefix = extrusionPrefix
         self.travelPrefix = travelPrefix
+        self.markerPrefix = markerPrefix
         extrusionVB = Self.buffer(device, extrusionVertices)
         extrusionIB = extrusionsAsRibbons ? Self.buffer(device, extrusionIndices) : nil
         travelVB = Self.buffer(device, travelVertices)
-        logger.notice("toolpath built: \(extruded) extrusions, \(travelled) travels")
+        markerVB = Self.buffer(device, markerVertices)
+        logger.notice("toolpath built: \(extruded) extrusions, \(travelled) travels, \(markers) markers")
     }
 
     private static func buffer<Element>(_ device: MTLDevice, _ elements: [Element]) -> MTLBuffer? {
@@ -234,6 +268,16 @@ final class ToolpathRenderer: NSObject, MTKViewDelegate {
         return elements.withUnsafeBytes { bytes in
             guard let base = bytes.baseAddress else { return nil }
             return device.makeBuffer(bytes: base, length: bytes.count, options: .storageModeShared)
+        }
+    }
+
+    /// Desktop marker colors: seams orange, retracts red/green.
+    private static func markerColor(_ type: ToolpathSegment.MoveType) -> SIMD4<Float> {
+        switch type {
+        case .seam: return SIMD4(1.0, 0.55, 0.0, 1)
+        case .retract: return SIMD4(0.95, 0.25, 0.25, 1)
+        case .unretract: return SIMD4(0.3, 0.85, 0.3, 1)
+        default: return SIMD4(0.4, 0.6, 1.0, 1)
         }
     }
 
@@ -245,6 +289,13 @@ final class ToolpathRenderer: NSObject, MTKViewDelegate {
         func normalized(_ value: Float, _ range: ClosedRange<Float>) -> Float {
             (value - range.lowerBound) / max(range.upperBound - range.lowerBound, 0.0001)
         }
+        func normalizedLog(_ value: Float, _ range: ClosedRange<Float>) -> Float {
+            // desktop LayerTimeLogarithmic: log scale (ms domain, clamped)
+            let lo = log2(max(range.lowerBound, 0.001) * 1000)
+            let hi = log2(max(range.upperBound, 0.001) * 1000)
+            let v = log2(max(value, 0.001) * 1000)
+            return (v - lo) / max(hi - lo, 0.0001)
+        }
         switch mode {
         case .feature: return ToolpathPalette.color(role: segment.role)
         case .speed: return ToolpathPalette.gradient(normalized(segment.feedrate, store.feedrateRange))
@@ -252,6 +303,14 @@ final class ToolpathRenderer: NSObject, MTKViewDelegate {
         case .lineWidth: return ToolpathPalette.gradient(normalized(segment.width, store.widthRange))
         case .fanSpeed: return ToolpathPalette.gradient(normalized(segment.fanSpeed, store.fanRange))
         case .temperature: return ToolpathPalette.gradient(normalized(segment.temperature, store.temperatureRange))
+        case .volumetricRate: return ToolpathPalette.gradient(normalized(segment.volumetricRate, store.volumetricRange))
+        case .actualSpeed: return ToolpathPalette.gradient(normalized(segment.actualFeedrate, store.actualSpeedRange))
+        case .layerTime: return ToolpathPalette.gradient(normalized(segment.layerDuration, store.layerTimeRange))
+        case .layerTimeLog: return ToolpathPalette.gradient(normalizedLog(segment.layerDuration, store.layerTimeRange))
+        case .pressureAdvance: return ToolpathPalette.gradient(normalized(segment.pressureAdvance, store.pressureAdvanceRange))
+        case .acceleration: return ToolpathPalette.gradient(normalized(segment.acceleration, store.accelerationRange))
+        case .jerk: return ToolpathPalette.gradient(normalized(segment.jerk, store.jerkRange))
+        case .tool: return ToolpathPalette.gradient(normalized(Float(segment.extruder), store.toolRange))
         }
     }
 
@@ -365,6 +424,16 @@ final class ToolpathRenderer: NSObject, MTKViewDelegate {
                     type: .line,
                     vertexStart: firstTravel * 2,
                     vertexCount: travelCount * 2
+                )
+            }
+            let firstMarker = Int(markerPrefix[window.lowerBound])
+            let markerCount = Int(markerPrefix[window.upperBound]) - firstMarker
+            if markerCount > 0, let markerVB {
+                encoder.setVertexBuffer(markerVB, offset: 0, index: 0)
+                encoder.drawPrimitives(
+                    type: .line,
+                    vertexStart: firstMarker * 6,
+                    vertexCount: markerCount * 6
                 )
             }
         }

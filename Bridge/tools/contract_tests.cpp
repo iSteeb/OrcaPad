@@ -272,7 +272,7 @@ static void test_md5_shim() {
 
 static void test_abi_version() {
     CHECK_EQ(orca_bridge_abi_version(), ORCA_BRIDGE_ABI_VERSION);
-    CHECK_EQ(ORCA_BRIDGE_ABI_VERSION, 13);
+    CHECK_EQ(ORCA_BRIDGE_ABI_VERSION, 14);
 }
 
 static void test_document_lifecycle(const std::string &dir) {

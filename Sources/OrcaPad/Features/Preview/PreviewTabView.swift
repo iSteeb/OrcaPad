@@ -94,6 +94,8 @@ struct PreviewTabView: View {
                     colorMode: store.colorMode,
                     hiddenRoles: store.hiddenRoles,
                     showTravel: store.showTravel,
+                    showSeams: store.showSeams,
+                    showRetractions: store.showRetractions,
                     bed: bed
                 ),
                 drawRange: ToolpathDrawRange(
@@ -111,6 +113,8 @@ struct PreviewTabView: View {
                 PreviewDock(
                     colorMode: $store.colorMode,
                     showTravel: $store.showTravel,
+                    showSeams: $store.showSeams,
+                    showRetractions: $store.showRetractions,
                     showLegend: $showLegend,
                     onFrame: { frameRequest += 1 }
                 )
@@ -250,13 +254,73 @@ struct PreviewTabView: View {
                 gradientLegend(store.fanRange, unit: store.colorMode.unit, digits: 0)
             case .temperature:
                 gradientLegend(store.temperatureRange, unit: store.colorMode.unit, digits: 0)
+            case .volumetricRate:
+                gradientLegend(store.volumetricRange, unit: store.colorMode.unit, digits: 1)
+            case .actualSpeed:
+                gradientLegend(store.actualSpeedRange, unit: store.colorMode.unit, digits: 0)
+            case .layerTime, .layerTimeLog:
+                gradientLegend(store.layerTimeRange, unit: store.colorMode.unit, digits: 0)
+            case .pressureAdvance:
+                gradientLegend(store.pressureAdvanceRange, unit: store.colorMode.unit, digits: 3)
+            case .acceleration:
+                gradientLegend(store.accelerationRange, unit: store.colorMode.unit, digits: 0)
+            case .jerk:
+                gradientLegend(store.jerkRange, unit: store.colorMode.unit, digits: 1)
+            case .tool:
+                ForEach(store.extruderStats.indices, id: \.self) { index in
+                    HStack(spacing: 6) {
+                        RoundedRectangle(cornerRadius: 2)
+                            .fill(swatch(ToolpathPalette.gradient(
+                                Float(index) / max(Float(store.extruderStats.count - 1), 1)
+                            )))
+                            .frame(width: 12, height: 12)
+                        Text("T\(index)")
+                            .font(.caption2)
+                        Spacer()
+                    }
+                }
             }
+            estimationTotals
         }
+
         .padding(10)
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 10))
         .frame(maxWidth: 240, alignment: .leading)
     }
 
+        /// Desktop Total Estimation: time (normal + silent), filament usage
+        /// per extruder (length / weight) and cost.
+        private var estimationTotals: some View {
+            VStack(alignment: .leading, spacing: 3) {
+                Divider()
+                if let toolpath = store.toolpath {
+                    Label(
+                        formatDuration(toolpath.estimatedSeconds) +
+                            (toolpath.estimatedStealthSeconds > 0
+                             ? "  ·  silent \(formatDuration(toolpath.estimatedStealthSeconds))" : ""),
+                        systemImage: "clock"
+                    )
+                    .font(.caption2.monospaced())
+                    ForEach(Array(store.extruderStats.enumerated()), id: \.offset) { index, stats in
+                        let length = String(format: "%.2f m", stats.lengthM)
+                        let weight = stats.densityGCm3 > 0
+                            ? String(format: " · %.1f g", stats.weightG) : ""
+                        let cost = stats.costPerKG > 0 && stats.weightG > 0
+                            ? String(format: " · %.2f €", stats.weightG / 1000 * Double(stats.costPerKG))
+                            : ""
+                        Text("T\(index): \(length)\(weight)\(cost)")
+                            .font(.caption2.monospaced())
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+        }
+
+        private func formatDuration(_ seconds: Float) -> String {
+            let total = Int(seconds.rounded())
+            let hours = total / 3600, minutes = (total % 3600) / 60
+            return hours > 0 ? "\(hours)h \(minutes)m" : "\(minutes)m \(total % 60)s"
+        }
     /// Desktop legend parity: per-feature time and share of extrusion time.
     private func roleTime(_ summary: GcodePreviewStore.RoleSummary) -> String {
         let minutes = Int((summary.timeSeconds / 60).rounded())
@@ -293,6 +357,8 @@ struct PreviewTabView: View {
 private struct PreviewDock: View {
     @Binding var colorMode: ToolpathColorMode
     @Binding var showTravel: Bool
+    @Binding var showSeams: Bool
+    @Binding var showRetractions: Bool
     @Binding var showLegend: Bool
     let onFrame: () -> Void
 
@@ -309,6 +375,14 @@ private struct PreviewDock: View {
             }
             Button { showTravel.toggle() } label: {
                 dockLabel(symbol: "arrow.triangle.swap", label: "Travel", active: showTravel)
+            }
+            .buttonStyle(.plain)
+            Button { showSeams.toggle() } label: {
+                dockLabel(symbol: "smallcircle.filled.circle", label: "Seams", active: showSeams)
+            }
+            .buttonStyle(.plain)
+            Button { showRetractions.toggle() } label: {
+                dockLabel(symbol: "arrow.uturn.left.circle", label: "Retract", active: showRetractions)
             }
             .buttonStyle(.plain)
             Button { showLegend.toggle() } label: {
@@ -334,6 +408,14 @@ private struct PreviewDock: View {
         case .lineWidth: return "Width"
         case .fanSpeed: return "Fan"
         case .temperature: return "Temp"
+        case .volumetricRate: return "Flow"
+        case .actualSpeed: return "Actual"
+        case .layerTime: return "Time"
+        case .layerTimeLog: return "Log"
+        case .pressureAdvance: return "PA"
+        case .acceleration: return "Accel"
+        case .jerk: return "Jerk"
+        case .tool: return "Tool"
         }
     }
 

@@ -1550,6 +1550,30 @@ void orca_toolpath_dispose(orca_toolpath *toolpath) {
     *toolpath = orca_toolpath{};
 }
 
+/// Which moves become segments: extrusions/travels are LINES; engine
+/// marker moves (Seam, Retract, Unretract, Tool/Color change, Pause,
+/// Custom G-code, Wipe) are exported as POINT segments (start == end) for
+/// the desktop visibility options.
+static bool orcapad_keep_move(Slic3r::EMoveType type) {
+    switch (type) {
+    case Slic3r::EMoveType::Extrude:
+    case Slic3r::EMoveType::Travel:
+    case Slic3r::EMoveType::Seam:
+    case Slic3r::EMoveType::Retract:
+    case Slic3r::EMoveType::Unretract:
+    case Slic3r::EMoveType::Tool_change:
+    case Slic3r::EMoveType::Color_change:
+    case Slic3r::EMoveType::Pause_Print:
+    case Slic3r::EMoveType::Custom_GCode:
+    case Slic3r::EMoveType::Wipe:
+        return true;
+    case Slic3r::EMoveType::Noop:
+    case Slic3r::EMoveType::Count:
+        return false;
+    }
+    return false;
+}
+
 orca_result orca_gcode_toolpath(orca_gcode *gcode,
                                 orca_toolpath *out_toolpath) {
     constexpr const char *operation = "orca_gcode_toolpath";
@@ -1568,9 +1592,7 @@ orca_result orca_gcode_toolpath(orca_gcode *gcode,
         size_t layer_count = 0;
         uint32_t previous_layer = std::numeric_limits<uint32_t>::max();
         for (size_t i = 1; i < moves.size(); ++i) {
-            const auto type = moves[i].type;
-            if (type != Slic3r::EMoveType::Extrude &&
-                type != Slic3r::EMoveType::Travel)
+            if (!orcapad_keep_move(moves[i].type))
                 continue;
             ++segment_count;
             if (moves[i].layer_id != previous_layer) {
@@ -1605,8 +1627,7 @@ orca_result orca_gcode_toolpath(orca_gcode *gcode,
         uint32_t open_layer_id = 0;
         for (size_t i = 1; i < moves.size(); ++i) {
             const auto &move = moves[i];
-            if (move.type != Slic3r::EMoveType::Extrude &&
-                move.type != Slic3r::EMoveType::Travel)
+            if (!orcapad_keep_move(move.type))
                 continue;
             if (move.layer_id > std::numeric_limits<uint16_t>::max()) {
                 orca_toolpath_dispose(&toolpath);
@@ -1648,6 +1669,23 @@ orca_result orca_gcode_toolpath(orca_gcode *gcode,
                 Slic3r::PrintEstimatedStatistics::ETimeMode::Normal)];
             segment.fan_speed = move.fan_speed;
             segment.temperature = move.temperature;
+            segment.actual_feedrate = move.actual_feedrate;
+            segment.volumetric_rate = move.volumetric_rate();
+            segment.actual_volumetric_rate = move.actual_volumetric_rate();
+            segment.pressure_advance = move.pressure_advance;
+            segment.acceleration = move.acceleration;
+            segment.jerk = move.jerk;
+            segment.layer_duration = move.layer_duration;
+            segment.time_stealth = move.time[static_cast<size_t>(
+                Slic3r::PrintEstimatedStatistics::ETimeMode::Stealth)];
+            // marker moves (Seam, Retract, …) are points: start == end
+            if (move.type != Slic3r::EMoveType::Extrude &&
+                move.type != Slic3r::EMoveType::Travel &&
+                move.type != Slic3r::EMoveType::Wipe) {
+                segment.start[0] = segment.end[0] = move.position.x();
+                segment.start[1] = segment.end[1] = move.position.y();
+                segment.start[2] = segment.end[2] = move.position.z();
+            }
             ++out;
             orca_tp_layer &layer = toolpath.layers[layer_index];
             layer.segment_count += 1;
@@ -1661,7 +1699,41 @@ orca_result orca_gcode_toolpath(orca_gcode *gcode,
                     Slic3r::PrintEstimatedStatistics::ETimeMode::
                         Normal)]
                 .time;
+        const float stealth =
+            gcode->result.print_statistics
+                .modes[static_cast<size_t>(
+                    Slic3r::PrintEstimatedStatistics::ETimeMode::
+                        Stealth)]
+                .time;
+        toolpath.estimated_stealth_seconds =
+            stealth > 0.0f && std::abs(stealth - toolpath.estimated_time_seconds) > 0.5f
+                ? stealth : 0.0f;
         toolpath.printable_height = gcode->result.printable_height;
+
+        const size_t extruders = gcode->result.filaments_count;
+        if (extruders == 0 || extruders > ORCA_TP_MAX_EXTRUDERS)
+            return [&]() {
+                orca_toolpath_dispose(&toolpath);
+                return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
+                                    "extruder count is outside the ABI range");
+            }();
+        toolpath.extruder_count = static_cast<uint32_t>(extruders);
+        for (size_t e = 0; e < extruders; ++e) {
+            toolpath.filament_diameters[e] =
+                e < gcode->result.filament_diameters.size()
+                    ? gcode->result.filament_diameters[e] : 1.75f;
+            toolpath.filament_densities[e] =
+                e < gcode->result.filament_densities.size()
+                    ? gcode->result.filament_densities[e] : 0.0f;
+            toolpath.filament_costs[e] =
+                e < gcode->result.filament_costs.size()
+                    ? gcode->result.filament_costs[e] : 0.0f;
+            const auto found = gcode->result.print_statistics
+                .total_volumes_per_extruder.find(e);
+            toolpath.total_volumes[e] =
+                found != gcode->result.print_statistics.total_volumes_per_extruder.end()
+                    ? found->second : 0.0;
+        }
         *out_toolpath = toolpath;
         return orcapad_ok();
     });

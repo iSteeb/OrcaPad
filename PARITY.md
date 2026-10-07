@@ -70,16 +70,16 @@ yet in `Bridge/engine-sources.sh`), **Client-reimpl** (desktop logic lives in
 | Feature | Desktop evidence | OrcaPad evidence | Status | Work |
 |---|---|---|---|---|
 | Schemes: FeatureType, Speed, Height, Width, Fan, Temperature | `libvgcode/include/Types.hpp:80-102` | `GcodePreviewStore.swift:8-13` | ✅ | — |
-| VolumetricFlowRate | same | none found | ❌ | UI (`mm3_per_mm × feedrate` is already exported) |
-| ActualSpeed, ActualVolumetric, LayerTime lin/log, PA, Accel, Jerk | same | none found | ❌ | ABI: export `actual_feedrate`, `layer_duration`, `pressure_advance`, `acceleration`, `jerk` (`GCodeProcessor.hpp:194-208`) |
+| VolumetricFlowRate, ActualSpeed/Volumetric, LayerTime lin/log, PA, Accel, Jerk, Tool | `Types.hpp:80-102` | ABI v14 fields; all schemes in `GcodePreviewStore.swift` color modes | ✅ ColorPrint/Summary ➖ | — |
+| ~~ActualSpeed etc~~ | | | ✅ (see row above) | |
 | Tool / ColorPrint / Summary | same | none found | ❌ | UI for Tool (`extruder` exported); ColorPrint needs color changes |
 | Travel toggle | `Types.hpp:168` | `PreviewTabView.swift:225` dock | ✅ | — |
-| Wipes, retractions, unretractions, seams, tool/color changes, pauses, custom G-code | `Types.hpp:169-176` | the bridge filters to Extrude/Travel only (`orca_bridge.cpp:1336,1372`) | ❌ | ABI: keep the other `EMoveType`s as markers |
+| Wipes, retractions, unretractions, seams, tool/color changes, pauses, custom G-code | `Types.hpp:169-176` | ABI v14 marker segments (point moves) + Seams/Retract dock toggles; markers rendered as crosses | 🟡 tool/color changes, pauses, custom G-code exported but not yet drawn | UI |
 | Center of gravity, shells | `Types.hpp:177-179`, `GCodeViewer.cpp:2476` | none found | ❌ | UI (shells can reuse Plate meshes) |
 | Tool marker | `Types.hpp:179` | `ToolpathRenderer` marker | ✅ | — |
 | Legend with per-feature toggles, time, % | `GCodeViewer.cpp:3111` | `PreviewTabView.swift:148-200` | ✅ | — |
-| Legend filament usage (g/m per role/extruder), cost | `GCodeViewer.cpp:2718-2808` | none found | ❌ | ABI: `PrintEstimatedStatistics` |
-| Normal vs stealth time | `GCodeViewer.cpp:4569,4662` | normal only | ❌ | ABI: `time[Stealth]` |
+| Legend filament usage (g/m per role/extruder), cost | `GCodeViewer.cpp:2718-2808` | ABI v14 per-extruder volumes/densities/costs → Total Estimation block (time normal+silent, m/g/cost) | ✅ | — |
+| Normal vs stealth time | `GCodeViewer.cpp:4569,4662` | ABI v14 `estimated_stealth_seconds` in legend totals | ✅ | — |
 | Layer range slider | `IMSlider.hpp:55` | `LayerRangeSlider.swift` | ✅ | — |
 | One-layer mode, go-to-layer | `IMSlider.cpp:155`, `IMSlider.hpp:144` | none found | ❌ | UI |
 | Add color change / pause / custom G-code at layer | `IMSlider.cpp:79` | none found | ❌ | Bridge (`Model::custom_gcode_per_print_z`, `CustomGCode.cpp` compiled) |

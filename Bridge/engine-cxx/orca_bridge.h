@@ -7,7 +7,7 @@ extern "C" {
 #endif
 
 /// Version of the C ABI contract in this header. Callers verify it at runtime.
-#define ORCA_BRIDGE_ABI_VERSION ((uint32_t)13)
+#define ORCA_BRIDGE_ABI_VERSION ((uint32_t)14)
 
 typedef int32_t orca_status_code;
 #define ORCA_STATUS_OK                     ((orca_status_code)0)
@@ -339,7 +339,8 @@ typedef struct {
     float    width;         // mm
     float    height;        // mm
     float    mm3_per_mm;    // flow cross-section
-    uint8_t  move_type;
+    uint8_t  move_type;     // EMoveType; marker types (Seam, Retract, …)
+                             // are POINT segments: start == end
     uint8_t  role;
     uint8_t  extruder;
     uint8_t  flags;         // bit0 = internal_only
@@ -349,7 +350,17 @@ typedef struct {
     float    time_seconds;  // estimated move time (normal mode)
     float    fan_speed;     // part fan, percent
     float    temperature;   // nozzle, degrees C
+    float    actual_feedrate;       // after machine limits, mm/s
+    float    volumetric_rate;       // feedrate × mm3_per_mm, mm³/s
+    float    actual_volumetric_rate; // actual_feedrate × mm3_per_mm
+    float    pressure_advance;      // s
+    float    acceleration;          // mm/s²
+    float    jerk;                  // mm/s
+    float    layer_duration;        // s (of the segment's layer)
+    float    time_stealth;          // estimated move time (silent mode), s
 } orca_tp_segment;
+
+#define ORCA_TP_MAX_EXTRUDERS 16
 
 typedef struct {
     float    z;             // layer z, mm
@@ -363,8 +374,15 @@ typedef struct {
     uint32_t          layer_count;
     orca_tp_segment  *segments;   // caller-owned; see dispose
     orca_tp_layer    *layers;
-    float             estimated_time_seconds;
+    float             estimated_time_seconds;      // normal mode
+    float             estimated_stealth_seconds;   // silent mode (0 if same)
     float             printable_height;
+    // Per-extruder totals for the legend (desktop Total Estimation).
+    uint32_t          extruder_count;              // 1..ORCA_TP_MAX_EXTRUDERS
+    float             filament_diameters[ORCA_TP_MAX_EXTRUDERS];  // mm
+    float             filament_densities[ORCA_TP_MAX_EXTRUDERS]; // g/cm³
+    float             filament_costs[ORCA_TP_MAX_EXTRUDERS];     // per kg
+    double            total_volumes[ORCA_TP_MAX_EXTRUDERS];      // mm³
 } orca_toolpath;
 
 /// Extracts the compact, caller-owned toolpath copy; the `orca_gcode` handle

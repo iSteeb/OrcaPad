@@ -88,6 +88,18 @@ else
     report FAIL "config overlay discipline violated (count=$overlay_count)"
 fi
 
+# 8b. Swift ABI-version literal matches the C header macro (a drift fails
+#     only at RUNTIME via validateABI — loud, but discovered too late).
+swift_abi=$(grep -oE 'expectedBridgeABIVersion: UInt32 = [0-9]+' \
+    "$ROOT/Sources/OrcaBridge/BridgeResult.swift" | grep -oE '= [0-9]+' | grep -oE '[0-9]+')
+cpp_abi=$(grep -oE 'ORCA_BRIDGE_ABI_VERSION \(\(uint32_t\)[0-9]+\)' \
+    "$ROOT/Bridge/engine-cxx/orca_bridge.h" | grep -oE '[0-9]+\)' | grep -oE '[0-9]+')
+if [ -n "$swift_abi" ] && [ "$swift_abi" = "$cpp_abi" ]; then
+    report PASS "Swift ABI version ($swift_abi) matches the header"
+else
+    report FAIL "Swift ABI version ($swift_abi) != header ($cpp_abi)"
+fi
+
 # 9. Bridge sources contain no iOS/Swift/UI references.
 client_headers=$(grep -rn 'include <UIKit\|import SwiftUI\|import UIKit' \
     "$ROOT/Bridge/engine-cxx" 2>/dev/null || true)

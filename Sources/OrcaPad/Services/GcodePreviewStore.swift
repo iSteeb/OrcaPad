@@ -11,16 +11,28 @@ enum ToolpathColorMode: String, CaseIterable, Identifiable, Sendable {
     case lineWidth = "Line Width"
     case fanSpeed = "Fan Speed"
     case temperature = "Temperature"
+    case volumetricRate = "Flow"
+    case actualSpeed = "Actual Speed"
+    case layerTime = "Layer Time"
+    case layerTimeLog = "Layer Time (log)"
+    case pressureAdvance = "Pressure Advance"
+    case acceleration = "Acceleration"
+    case jerk = "Jerk"
+    case tool = "Tool"
 
     var id: String { rawValue }
 
     var unit: String {
         switch self {
-        case .feature: return ""
-        case .speed: return "mm/s"
+        case .feature, .tool: return ""
+        case .speed, .actualSpeed: return "mm/s"
         case .layerHeight, .lineWidth: return "mm"
         case .fanSpeed: return "%"
         case .temperature: return "°C"
+        case .volumetricRate: return "mm³/s"
+        case .layerTime, .layerTimeLog, .pressureAdvance: return "s"
+        case .acceleration: return "mm/s²"
+        case .jerk: return "mm/s"
         }
     }
 }
@@ -89,6 +101,13 @@ final class GcodePreviewStore {
     private(set) var widthRange: ClosedRange<Float> = 0...1
     private(set) var fanRange: ClosedRange<Float> = 0...1
     private(set) var temperatureRange: ClosedRange<Float> = 0...1
+    private(set) var volumetricRange: ClosedRange<Float> = 0...1
+    private(set) var actualSpeedRange: ClosedRange<Float> = 0...1
+    private(set) var layerTimeRange: ClosedRange<Float> = 0...1
+    private(set) var pressureAdvanceRange: ClosedRange<Float> = 0...1
+    private(set) var accelerationRange: ClosedRange<Float> = 0...1
+    private(set) var jerkRange: ClosedRange<Float> = 0...1
+    private(set) var toolRange: ClosedRange<Float> = 0...1
     /// Total extrusion time over all roles (legend percentages).
     private(set) var extrusionSeconds: Float = 0
 
@@ -99,6 +118,13 @@ final class GcodePreviewStore {
     var colorMode: ToolpathColorMode = .feature
     var hiddenRoles: Set<UInt8> = []
     var showTravel = false
+    /// Desktop visibility options: seam markers and retraction markers
+    /// (point moves exported by ABI v14).
+    var showSeams = true
+    var showRetractions = false
+
+    var estimatedStealthSeconds: Float { toolpath?.estimatedStealthSeconds ?? 0 }
+    var extruderStats: [ExtruderStats] { toolpath?.extruders ?? [] }
 
     private var isLoading = false
 
@@ -161,6 +187,13 @@ final class GcodePreviewStore {
         var feed = (Float.infinity, -Float.infinity)
         var height = (Float.infinity, -Float.infinity)
         var width = (Float.infinity, -Float.infinity)
+        var volumetric = (Float.infinity, -Float.infinity)
+        var actualSpeed = (Float.infinity, -Float.infinity)
+        var layerTime = (Float.infinity, -Float.infinity)
+        var pressureAdvance = (Float.infinity, -Float.infinity)
+        var acceleration = (Float.infinity, -Float.infinity)
+        var jerk = (Float.infinity, -Float.infinity)
+        var tool = (Float.infinity, -Float.infinity)
         for segment in toolpath.segments {
             minimum = simd_min(minimum, simd_min(segment.start, segment.end))
             maximum = simd_max(maximum, simd_max(segment.start, segment.end))
@@ -172,6 +205,13 @@ final class GcodePreviewStore {
             feed = (min(feed.0, segment.feedrate), max(feed.1, segment.feedrate))
             height = (min(height.0, segment.height), max(height.1, segment.height))
             width = (min(width.0, segment.width), max(width.1, segment.width))
+            volumetric = (min(volumetric.0, segment.volumetricRate), max(volumetric.1, segment.volumetricRate))
+            actualSpeed = (min(actualSpeed.0, segment.actualFeedrate), max(actualSpeed.1, segment.actualFeedrate))
+            layerTime = (min(layerTime.0, segment.layerDuration), max(layerTime.1, segment.layerDuration))
+            pressureAdvance = (min(pressureAdvance.0, segment.pressureAdvance), max(pressureAdvance.1, segment.pressureAdvance))
+            acceleration = (min(acceleration.0, segment.acceleration), max(acceleration.1, segment.acceleration))
+            jerk = (min(jerk.0, segment.jerk), max(jerk.1, segment.jerk))
+            tool = (min(tool.0, Float(segment.extruder)), max(tool.1, Float(segment.extruder)))
         }
         func range(_ pair: (Float, Float)) -> ClosedRange<Float> {
             guard pair.0.isFinite, pair.1.isFinite, pair.1 >= pair.0 else { return 0...1 }
@@ -189,6 +229,13 @@ final class GcodePreviewStore {
         widthRange = range(width)
         fanRange = range(fan)
         temperatureRange = range(temperature)
+        volumetricRange = range(volumetric)
+        actualSpeedRange = range(actualSpeed)
+        layerTimeRange = range(layerTime)
+        pressureAdvanceRange = range(pressureAdvance)
+        accelerationRange = range(acceleration)
+        jerkRange = range(jerk)
+        toolRange = range(tool)
         extrusionSeconds = roleTimes.values.reduce(0, +)
         hiddenRoles = []
         lowerLayer = 0
