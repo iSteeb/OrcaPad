@@ -2,17 +2,14 @@
 
 ## PLAN
 
-- Current goal: finish Architecture Gate A while preserving the verified
-  STL → preset-backed slice → desktop-compatible G-code path.
-- Acceptance: one authoritative C++ document; Client → Bridge → untouched
-  Engine; stable IDs/revisions; immutable Swift snapshots; derived Metal
-  caches; typed contextual failures; warning-free redirected device build.
-- Next steps:
-  1. Final Gate A validation census + device install and acceptance loop.
-  2. Swift-domain contract tests (blocked on Linux-runnable Swift module or
-     Mac CI).
-  3. Then introduce immutable cancellable slice jobs so slicing no longer
-     retains the live document/preset locks.
+- Current goal: Gate C — four-tab desktop-parity UX (Plate / Prepare /
+  Preview / Device) over the clean three-module architecture. [USER]
+- Priority order [USER 2026-10-06]: tab shell + clean refactor → Prepare
+  desktop parity → Preview gcode parity → Plate transform UI (current
+  move/rotate judged poor by user — redo in C6).
+- Done: C1 shell, C2 Prepare v1 (ABI v4 overrides), C3 Preview v1 (ABI v5).
+- Next: device acceptance of C1–C3, then C4 Preview parity, C5 Prepare
+  parity, C6 Plate gizmos. Immutable cancellable slice jobs remain queued.
 
 ## DECISIONS
 
@@ -36,37 +33,18 @@
 
 ## PROGRESS
 
-- [2026-10-06 CODE][TOOL] HOST CONTRACT TESTS LANDED: `Bridge/build-host-tests.sh`
-  compiles the shared engine closure for Linux (via the new
-  `Bridge/engine-sources.sh` single compile list), links
-  `Bridge/tools/contract_tests.cpp` archive-style (iOS member-pull
-  semantics), and runs it: 183 checks green — ABI v2, typed failures, owned
-  diagnostics + idempotent disposal, stable IDs, +1 revision per successful
-  mutation and +0 per rejection, mutation/snapshot revision equality,
-  deep-copy ownership, NOT_FOUND/INVALID_ARGUMENT taxonomy, transform
-  validation, last-instance atomicity, two-thread process serialization,
-  transactional presets, and all three real slice paths with progress.
-- [2026-10-06 CODE] `Bridge/tools/architecture-audit.sh` (10 static boundary
-  checks: upstream purity, header parity, archive uniqueness, raw-ABI
-  confinement, package direction, no silent-failure patterns, runtime-MSL
-  only, overlay discipline, no client refs in Bridge C++) — all PASS.
-- [2026-10-06 CODE] build-core.sh refactored onto the shared list with a
-  manifest-identical, byte-stable iOS archive; `boost_filesystem_shim.cpp`
-  retired (duplicate definitions of the real boost-filesystem sources);
-  archive now 258 members; app links green.
+- [2026-10-06 CODE][TOOL] GATE C1–C3: RootView TabView + Features/ modules;
+  Prepare editor (schema `mode` filter, engine-derived kind membership,
+  accordions, typed editors, overrides via ABI v4 edited presets); Preview
+  (ABI v5 GCodeProcessor toolpath, feature-colored Metal lines, layer
+  scrubber). Real Thumbnails.cpp compiled (jpeg adapter); brass overlay bug
+  fixed (enum keys_map). Host contract tests 29,762 checks green.
 
-- [2026-10-06 CODE][TOOL] C ABI v2 stable snapshot state landed in `ef29203`:
-  engine object/instance IDs, mutation revisions, owned canonical meshes, one
-  coherent snapshot read, immutable Swift values, and stable renderer caches.
-- [2026-10-06 CODE] `AppEnvironment` now owns process-lifetime client stores.
-  `DocumentStore`, `PresetStore`, `SliceService`, `EnginePaths`, and
-  `StatusCenter` own engine/file/job policy; `PlaterView` is presentation-only.
-- [2026-10-06 CODE] All blocking engine/file operations use one typed detached
-  work boundary. Document busy/stale/preview rules and transactional preset
-  persistence are centralized; slice outcomes carry source revision/config.
-- [2026-10-06 TOOL] Core archive rebuilt at 258/258 unique (shim retirement)
-  with matching headers; the decomposed Swift client passes a warning-free
-  redirected xtool build.
+- [2026-10-06 CODE][TOOL] Gate A/B infrastructure (compressed): shared
+  `engine-sources.sh` list; host contract suite + archive-style link;
+  10-check architecture audit; stable IDs/revisions/snapshots (`ef29203`);
+  AppEnvironment + stores/services decomposition (`3f7b0a9`); placement from
+  machine bed, vendor/compat preset metadata, resolved config (`72892e6`).
 
 ## DISCOVERIES
 
@@ -86,14 +64,8 @@
 
 ## OUTCOMES
 
-- [2026-10-06 TOOL] **GATE B SHIPPED**: config-driven placement (bed from
-  machine, centered import, drag-select-move), vendor-grouped presets with
-  engine-compatible process filtering, and the resolved-config viewer from a
-  committed 751-option schema. Build `80ce347` on iPoke; acceptance pending.
-- [2026-10-06 TOOL] **GATE A VALIDATION CENSUS GREEN**: architecture audit
-  10/10; host contract tests 183/183 (now 10900 with ABI v3); warning-free
-  redirected xtool build; archive 258/258 unique with header parity; upstream
-  pristine.
+- [2026-10-06 USER] Gate B on device: builds and slices; placement/rotate UX
+  rejected as poor → redesign queued as C6. Gate A census green earlier.
 - [2026-10-03 USER] Phase 1 accepted on device: a 483,772-triangle STL sliced
   through the real Orca pipeline to G-code in Documents; desktop compatibility
   was subsequently verified with real presets.

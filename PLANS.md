@@ -41,6 +41,31 @@ work must not deepen hidden-cache or fake-symbol dependencies.
 Bridge; Swift and Metal consume revisioned derived state; all failures are
 typed and loud; current physical-device slice behavior remains green.
 
+## Gate C — Four-tab desktop-parity UX (in progress)
+**Goal:** the app reads like desktop OrcaSlicer: Plate → Prepare → Preview →
+Device, each tab a clean feature module over the same stores.
+
+- [x] C1: RootView glass TabView, `Features/{Plate,Prepare,Preview,Device}`,
+      global status overlay, Device stub (`a32dac4`)
+- [x] C2: Prepare desktop parity v1 — Simple/Advanced/Expert (schema `mode`),
+      engine-derived kind membership, category accordions, typed editors,
+      modified badges + per-key/per-kind reset, Slice in the toolbar;
+      ABI v4 overrides on edited presets (`df05d73`)
+- [x] C3: Preview v1 — upstream GCodeProcessor → compact toolpath (ABI v5),
+      feature-colored Metal lines, layer scrubber, remaining-time estimate;
+      real Thumbnails.cpp + jpeg adapter; brass interop fix (`78f9920`)
+- [ ] C4: Preview parity — dual layer range, in-layer move progress, legend,
+      color modes (feature / speed / height / width), extrusion-width ribbons
+- [ ] C5: Prepare parity — desktop page grouping (Quality/Strength/Speed/
+      Support/Others; machine & filament pages), option tooltips, enum labels,
+      per-type validation (min/max), persisted user overrides
+- [ ] C6: Plate — gizmo-style move/rotate/scale with correct pivots, numeric
+      transform panel, lay-flat/arrange via engine, support-paint stub
+- [ ] Device tab: printer web UI (later)
+
+**Accept:** device walkthrough of all four tabs; edits in Prepare change the
+sliced gcode (verified in Preview + resolved config); Preview scrubs layers.
+
 ## Gate B — Config-driven placement, preset UX, resolved config ✅
 **Goal:** make WHAT YOU SEE match WHAT WILL SLICE: placement tied to the
 selected machine's bed, presets grouped/filtered by engine compatibility, and

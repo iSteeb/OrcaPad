@@ -45,16 +45,23 @@ Bridge/tools/contract_tests.cpp      C ABI + engine contract test suite
 Bridge/tools/architecture-audit.sh   static boundary audit (no build)
 Prebuilt/OrcaBridgeCore.xcframework  shipped binary — regenerated, never edited
 Sources/OrcaBridge/         Swift facade; the ONLY raw-ABI consumer
-Sources/OrcaPad/App/        AppEnvironment (process-lifetime owner), StatusCenter
+Sources/OrcaPad/App/        AppEnvironment (process-lifetime owner), StatusCenter,
+                            RootView (four-tab glass shell)
+Sources/OrcaPad/Features/   one folder per tab: Plate/ Prepare/ Preview/ Device/
+                            (presentation only — no engine/file orchestration)
 Sources/OrcaPad/Stores/     DocumentStore, PresetStore (main-actor state owners)
-Sources/OrcaPad/Services/   EnginePaths (filesystem policy), SliceService
+Sources/OrcaPad/Services/   EnginePaths, SliceService, ResolvedConfigService,
+                            GcodePreviewStore
 Sources/OrcaPad/Viewer/     everything Metal: Renderer, Geometry, Camera,
-                            CoordinateMapper, Shaders (runtime MSL), MetalCanvas
+                            CoordinateMapper, Shaders (runtime MSL), MetalCanvas,
+                            ToolpathRenderer + GcodeCanvas (Preview)
 ```
 
 ## The contract (summary — full text in ARCHITECTURE.md)
 
-**C ABI v2 (`Bridge/engine-cxx/orca_bridge.h`)**
+**C ABI (`Bridge/engine-cxx/orca_bridge.h`, version in `ORCA_BRIDGE_ABI_VERSION`;
+bump it on every header change and update the Swift expectation + the
+contract test literal in the same commit)**
 - Every fallible operation returns a typed `orca_result` (status code + owned
   diagnostic). Callers branch on `code`, never on message text. Diagnostics are
   empty on success.
@@ -72,6 +79,12 @@ Sources/OrcaPad/Viewer/     everything Metal: Renderer, Geometry, Camera,
   typed configuration failure.
 - Supported instance transforms are unmirrored z-rotation with uniform scale;
   anything else is a typed unsupported-capability rejection.
+- Presets: entries expose engine vendor + `is_compatible`; overrides are
+  written to the edited preset of a kind (`full_config()` merges edited
+  presets, so slices consume them); edited vs system dumps detect changes.
+- G-code preview: `orca_gcode_load` runs the upstream GCodeProcessor;
+  `orca_gcode_toolpath` returns a compact owned segment/layer copy carrying
+  the engine's own ExtrusionRole/EMoveType values (never libvgcode's).
 
 **Swift facade (`Sources/OrcaBridge`)**
 - Raw ABI use (`OrcaBridgeCore`, `OpaquePointer`, `orca_*`, `Unmanaged`) is
@@ -120,6 +133,7 @@ Sources/OrcaPad/Viewer/     everything Metal: Renderer, Geometry, Camera,
 | Anything under `Bridge/engine-cxx`, `Bridge/shim*`, `Bridge/engine-sources.sh`, or the upstream pin | 1. `./Bridge/build-core.sh` (rebuild archive) 2. `./Bridge/build-host-tests.sh` (contract tests) 3. `xtool dev build` |
 | `Sources/OrcaBridge` (Swift facade) | `./Bridge/build-host-tests.sh` + `xtool dev build` |
 | `Sources/OrcaPad` (Swift client / viewer) | `xtool dev build`; device run for UI/gesture paths |
+| Upstream pin change, or `Bridge/tools/extract_config.cpp` | after host tests: `./Bridge/tools/build-extract-config.sh` (regenerates the committed `Resources/config-schema.json`) |
 | Contract-adjacent docs (`ARCHITECTURE.md`, this file) | nothing — but keep the tables truthful |
 | **Before every commit, any change** | `./Bridge/tools/architecture-audit.sh` |
 

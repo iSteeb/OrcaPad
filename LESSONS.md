@@ -47,6 +47,17 @@ in ~/xtool-cheatsheet.md — link, don't duplicate.)
   (`Format/objparser.hpp`) and our own shims need explicit includes. Adapter
   pattern: per-file `-include <header>` in `engine-sources.sh`, or fix the
   shim. Never patch upstream.
+- Enum options (`ConfigOptionEnumsGenericTempl`) derive from
+  `ConfigOptionInts` and serialize THROUGH `keys_map`; the static defaults
+  inside `full_print_config()` carry a NULL `keys_map` (only
+  `create_default_option` wires it), so a mutated enum silently serializes
+  as empty. Set ordinals AND wire `keys_map` from `print_config_def`. Lock
+  any interop-critical overlay with a contract-test assertion on the gcode.
+- Before adding a loud stub, check whether the real upstream TU is portable:
+  `GCode/Thumbnails.cpp` only needed a declaration-only jpeg shim + loud jpeg
+  symbols; stubbing its pure string parser broke gcode loading.
+- A ternary `cond ? std::string(...) : nullptr` unifies to `std::string` and
+  throws "construction from null" — branch explicitly.
 - `boost_filesystem_shim.cpp` is RETIRED: the real boost-filesystem-1.90
   sources superseded it and both defining the same symbols was a latent
   multiple-definition hazard. Do not reintroduce it.
