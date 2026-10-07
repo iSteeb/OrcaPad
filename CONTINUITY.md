@@ -74,21 +74,26 @@
   Bridge process-serializes guarded engine entry. Moving a `ModelObject*`
   between models leaves `m_model` dangling — transfer only through upstream
   `Model` APIs.
-- [2026-10-06 CODE] Upstream `GCode.hpp` enables a placeholder check in
-  non-NDEBUG builds that rejects upstream's own bundled presets; host tests
-  mirror the shipped `-O2 -DNDEBUG`. libstdc++ doesn't leak `<memory>`/
-  `<type_traits>` like libc++ — adapters go in `engine-sources.sh` per-file
-  flags or shim fixes, never upstream patches.
+- [2026-10-06 CODE] Bed origin placement is MACHINE-DEPENDENT (604 corner-style
+  vs 53 centered profiles in the bundled tree, e.g. FLSun deltas). Never
+  assume an origin: derive the frame from the `printable_area` polygon. The
+  upstream debug-mode placeholder check rejects upstream's own presets, so
+  host tests mirror the shipped `-O2 -DNDEBUG`. libstdc++ doesn't leak
+  `<memory>`/`<type_traits>` like libc++ — adapters go in `engine-sources.sh`
+  per-file flags or shim fixes, never upstream patches.
 - [2026-10-06 CODE] Current build remains machine-local: manual source closure,
   sequential TBB shims, ignored caches, and duplicated 12,006 profile JSONs.
 
 ## OUTCOMES
 
+- [2026-10-06 TOOL] **GATE B SHIPPED**: config-driven placement (bed from
+  machine, centered import, drag-select-move), vendor-grouped presets with
+  engine-compatible process filtering, and the resolved-config viewer from a
+  committed 751-option schema. Build `80ce347` on iPoke; acceptance pending.
 - [2026-10-06 TOOL] **GATE A VALIDATION CENSUS GREEN**: architecture audit
-  10/10; host contract tests 183/183; warning-free redirected xtool build;
-  archive 258/258 unique with header parity; upstream pristine. Build
-  `d730eea` installed to iPoke — on-device acceptance loop (import →
-  transform → presets → slice → Files) pending user verification.
+  10/10; host contract tests 183/183 (now 10900 with ABI v3); warning-free
+  redirected xtool build; archive 258/258 unique with header parity; upstream
+  pristine.
 - [2026-10-03 USER] Phase 1 accepted on device: a 483,772-triangle STL sliced
   through the real Orca pipeline to G-code in Documents; desktop compatibility
   was subsequently verified with real presets.
