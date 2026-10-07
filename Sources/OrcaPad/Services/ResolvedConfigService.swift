@@ -100,9 +100,27 @@ final class ResolvedConfigService {
         }
         switch result {
         case .success(let json):
+            guard let data = json.data(using: .utf8) else {
+                phase = .failed(.invariant(
+                    operation: "decode resolved config",
+                    diagnostic: "resolved config is not valid UTF-8"
+                ))
+                return
+            }
+            let values: [String: String]
+            do {
+                values = try JSONDecoder().decode([String: String].self, from: data)
+            } catch {
+                phase = .failed(.invariant(
+                    operation: "decode resolved config",
+                    diagnostic: "resolved config is not a JSON object of " +
+                        "strings: \(String(reflecting: error))"
+                ))
+                return
+            }
             switch Self.schema {
             case .success(let schema):
-                install(json: json, schema: schema)
+                install(values: values, schema: schema)
             case .failure(let failure):
                 phase = .failed(failure)
             }
@@ -111,18 +129,7 @@ final class ResolvedConfigService {
         }
     }
 
-    private func install(json: String, schema: [ConfigOptionSchema]) {
-        guard let data = json.data(using: .utf8),
-              let values = try? JSONDecoder().decode(
-                  [String: String].self,
-                  from: data
-              ) else {
-            phase = .failed(.invariant(
-                operation: "decode resolved config",
-                diagnostic: "resolved config is not a JSON object of strings"
-            ))
-            return
-        }
+    private func install(values: [String: String], schema: [ConfigOptionSchema]) {
 
         var built: [ResolvedConfigRow] = []
         built.reserveCapacity(values.count)
