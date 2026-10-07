@@ -88,8 +88,8 @@ yet in `Bridge/engine-sources.sh`), **Client-reimpl** (desktop logic lives in
 | Slice progress | notification/progress bar | `SliceService.swift:23`, `PrepareTabView.swift:53` | ✅ | — |
 | Cancel slicing | `BackgroundSlicingProcess` | none found | ❌ | Bridge (`PrintBase::cancel`) |
 | Slicing warnings / errors list | `NotificationManager.hpp:85` | none found (only hard failures surface) | ❌ | ABI: `Print::validate` warnings, processor warnings |
-| Export / share G-code | `Plater.cpp:14857` | none found (the file stays in the sandbox) | ❌ | UI (ShareLink / fileExporter) |
-| Open external G-code (viewer mode) | `PartPlate.cpp:5969` | `orca_gcode_load` exists; no importer | ❌ | UI |
+| Export / share G-code | `Plater.cpp:14857` | `ShareLink` in `PreviewTabView.swift` file actions + Prepare slice footer (Save to Files, AirDrop, apps) | ✅ | — |
+| Open external G-code (viewer mode) | `PartPlate.cpp:5969` | `PreviewTabView.swift` `.fileImporter` (`.gcode/.g/.gco/.ngc`) → `orca_gcode_load` | ✅ (Files "Open in" document types still missing) | — |
 | G-code thumbnails | `Plater.cpp` thumbnail callback | `orca_bridge.cpp:1489` passes `nullptr` | ❌ | Client renders offscreen in Metal + ABI callback (`Thumbnails.cpp` is compiled) |
 
 ## 4. Device / files / app
@@ -113,7 +113,7 @@ yet in `Bridge/engine-sources.sh`), **Client-reimpl** (desktop logic lives in
 ## Highest-value outstanding items (recommended order)
 
 1. ~~**Bed type (`curr_bed_type`)**~~ ✅ done (ABI v8).
-2. **Export / share G-code** and **open external G-code**: UI-only. Without them the core loop never leaves the device.
+2. ~~Export / share G-code and open external G-code~~ ✅ done (also fixed: re-slicing to the same path never refreshed Preview; imported objects were named "orcapad-import").
 3. **Slice cancel + warnings list**: Bridge (`PrintBase::cancel`, validate warnings). This folds into immutable slice jobs.
 4. **3MF load/save**: Closure work with vendored dependencies only. It unlocks projects, multi-plate persistence and Bambu-style files.
 5. **User presets (C5b)** + unsaved-changes prompt + physical printers: Bridge over compiled `Preset.cpp`.

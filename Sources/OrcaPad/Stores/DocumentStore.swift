@@ -81,7 +81,7 @@ final class DocumentStore {
         let displayName = source.lastPathComponent
         status.report(.document, "\(displayName): loading…")
         let result = await BackgroundWork.run(operation: "import model") {
-            let sandboxURL = try EnginePaths.copyImportIntoSandbox(source)
+            let sandboxURL = try EnginePaths.copyImportIntoSandbox(source, kind: "model")
             let mutation = try plater.apply(
                 .importModel(path: sandboxURL.path, bedCenter: bedCenter)
             )

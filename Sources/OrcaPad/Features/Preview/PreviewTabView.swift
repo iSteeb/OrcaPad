@@ -1,4 +1,5 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// Preview tab (desktop parity): toolpath with a vertical layer range slider,
 /// a horizontal in-layer move scrubber with tool marker, color schemes
@@ -9,38 +10,74 @@ struct PreviewTabView: View {
     @State private var store = GcodePreviewStore()
     @State private var showLegend = true
     @State private var frameRequest = 0
+    @State private var openPresented = false
+    /// Last slice job consumed: tab re-appearance must not override an
+    /// externally opened file, while every new slice replaces it.
+    @State private var consumedSliceJob: UInt64?
 
     var body: some View {
         Group {
             switch store.phase {
             case .idle:
-                ContentUnavailableView(
-                    "Nothing to preview",
-                    systemImage: "eye",
-                    description: Text("Slice a plate in Prepare — the toolpath renders here with layer controls.")
-                )
+                ContentUnavailableView {
+                    Label("Nothing to preview", systemImage: "eye")
+                } description: {
+                    Text("Slice a plate in Prepare, or open an existing G-code file.")
+                } actions: {
+                    Button("Open G-code…") { openPresented = true }
+                }
             case .loading:
                 ProgressView("parsing gcode…")
             case .failed(let failure):
-                ContentUnavailableView(
-                    "Preview unavailable",
-                    systemImage: "exclamationmark.triangle",
-                    description: Text(failure.localizedDescription)
-                )
+                ContentUnavailableView {
+                    Label("Preview unavailable", systemImage: "exclamationmark.triangle")
+                } description: {
+                    Text(failure.localizedDescription)
+                } actions: {
+                    Button("Open G-code…") { openPresented = true }
+                }
             case .ready:
                 viewer
             }
         }
-        .task(id: sliceIdentity) {
-            if let outcome = environment.slicing.lastOutcome {
-                await store.load(url: outcome.outputURL)
-                frameRequest += 1
-            }
+        .task(id: environment.slicing.lastOutcome?.jobID) {
+            guard let outcome = environment.slicing.lastOutcome,
+                  consumedSliceJob != outcome.jobID else { return }
+            consumedSliceJob = outcome.jobID
+            await store.load(url: outcome.outputURL, identity: "slice:\(outcome.jobID)")
+            frameRequest += 1
         }
+        .fileImporter(
+            isPresented: $openPresented,
+            allowedContentTypes: GcodeTypes.all,
+            onCompletion: openExternal
+        )
     }
 
-    private var sliceIdentity: String {
-        environment.slicing.lastOutcome.map(\.outputURL.path) ?? ""
+    /// Desktop "G-code viewer" parity: preview any G-code file.
+    private func openExternal(_ result: Result<URL, any Error>) {
+        switch result {
+        case .success(let url):
+            Task {
+                let copy: URL
+                do {
+                    copy = try EnginePaths.copyImportIntoSandbox(url, kind: "gcode")
+                } catch {
+                    environment.status.report(
+                        .preview,
+                        failure: AppFailure.wrap(error, operation: "open G-code")
+                    )
+                    return
+                }
+                await store.load(url: copy, identity: "external:\(UUID().uuidString)")
+                frameRequest += 1
+            }
+        case .failure(let error):
+            environment.status.report(
+                .preview,
+                failure: AppFailure.wrap(error, operation: "choose G-code file")
+            )
+        }
     }
 
     private var bed: EngineBed {
@@ -84,6 +121,17 @@ struct PreviewTabView: View {
             .padding(.top, 60)
             .padding(.bottom, 110)
 
+            // Top-right: file actions (desktop "Export G-code" / G-code viewer).
+            VStack {
+                HStack {
+                    Spacer()
+                    fileActions
+                }
+                .padding(.trailing, 12)
+                .padding(.top, 8)
+                Spacer()
+            }
+
             // Right: desktop-style vertical layer range slider.
             HStack {
                 Spacer()
@@ -114,6 +162,26 @@ struct PreviewTabView: View {
     }
 
     // MARK: Bottom panel: move scrubber + scheme controls
+
+    private var fileActions: some View {
+        HStack(spacing: 4) {
+            Button { openPresented = true } label: {
+                Label("Open", systemImage: "doc.badge.plus")
+                    .labelStyle(.iconOnly)
+                    .frame(width: 40, height: 34)
+            }
+            if let url = store.loadedURL {
+                ShareLink(item: url) {
+                    Label("Export G-code", systemImage: "square.and.arrow.up")
+                        .labelStyle(.iconOnly)
+                        .frame(width: 40, height: 34)
+                }
+            }
+        }
+        .font(.system(size: 17, weight: .medium))
+        .padding(6)
+        .background(.ultraThinMaterial, in: Capsule())
+    }
 
     private var bottomPanel: some View {
         HStack(spacing: 10) {
@@ -283,5 +351,15 @@ private struct PreviewDock: View {
             in: RoundedRectangle(cornerRadius: 10)
         )
         .contentShape(Rectangle())
+    }
+}
+
+private enum GcodeTypes {
+    /// Desktop G-code viewer extensions (`.gcode`, `.g`, `.gco`, `.ngc`).
+    static let all: [UTType] = ["gcode", "g", "gco", "ngc"].map { ext in
+        guard let type = UTType(filenameExtension: ext, conformingTo: .data) else {
+            preconditionFailure("iOS did not provide a content type for .\(ext)")
+        }
+        return type
     }
 }

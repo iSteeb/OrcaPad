@@ -77,6 +77,10 @@ final class GcodePreviewStore {
     private(set) var phase: Phase = .idle
     private(set) var toolpath: GcodeToolpath?
     private(set) var loadedPath: String?
+    /// Identity of the loaded source (slice job or external open); a new
+    /// identity always reloads even when the path is unchanged.
+    private(set) var loadedIdentity: String?
+    private(set) var loadedURL: URL?
     private(set) var boundsMin: SIMD3<Float> = .zero
     private(set) var boundsMax: SIMD3<Float> = .zero
     private(set) var roles: [RoleSummary] = []
@@ -129,8 +133,8 @@ final class GcodePreviewStore {
         return remaining
     }
 
-    func load(url: URL) async {
-        guard !isLoading, loadedPath != url.path else { return }
+    func load(url: URL, identity: String) async {
+        guard !isLoading, loadedIdentity != identity else { return }
         isLoading = true
         phase = .loading
         let result = await BackgroundWork.run(operation: "load gcode preview") {
@@ -139,7 +143,9 @@ final class GcodePreviewStore {
         isLoading = false
         switch result {
         case .success(let toolpath):
-            install(toolpath, path: url.path)
+            loadedIdentity = identity
+            loadedURL = url
+            install(toolpath, path: "\(identity)|\(url.path)")
         case .failure(let failure):
             phase = .failed(failure)
         }

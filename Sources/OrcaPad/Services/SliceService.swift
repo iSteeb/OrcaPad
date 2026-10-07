@@ -8,6 +8,9 @@ struct SliceProgress: Sendable {
 }
 
 struct CompletedSlice: Sendable {
+    /// Unique per slice job: re-slicing to the same output path must still
+    /// refresh consumers (Preview) keyed by it.
+    let jobID: UInt64
     let sourceRevision: DocumentRevision
     let presetSelection: PresetSelection?
     let outputURL: URL
@@ -102,6 +105,7 @@ final class SliceService {
         switch result {
         case .success(let sliceResult):
             let outcome = CompletedSlice(
+                jobID: jobID,
                 sourceRevision: input.snapshot.revision,
                 presetSelection: presetSelection,
                 outputURL: outputURL,

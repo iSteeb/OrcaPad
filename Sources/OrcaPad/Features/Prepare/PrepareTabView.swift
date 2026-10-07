@@ -205,10 +205,17 @@ struct PrepareTabView: View {
             Text("Last slice failed: \(failure.localizedDescription)")
                 .foregroundStyle(.red)
         } else if let outcome = environment.slicing.lastOutcome {
-            Text(
-                "G-code ready — \(outcome.outputURL.lastPathComponent) · ~" +
-                    "\(Int(outcome.result.timeEstimateSeconds / 60)) min"
-            )
+            HStack {
+                Text(
+                    "G-code ready — \(outcome.outputURL.lastPathComponent) · ~" +
+                        "\(Int(outcome.result.timeEstimateSeconds / 60)) min"
+                )
+                Spacer()
+                ShareLink(item: outcome.outputURL) {
+                    Label("Export G-code", systemImage: "square.and.arrow.up")
+                }
+                .font(.caption.weight(.semibold))
+            }
         }
     }
 }

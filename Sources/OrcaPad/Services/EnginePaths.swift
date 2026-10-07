@@ -80,7 +80,11 @@ enum EnginePaths {
         }
     }
 
-    static func copyImportIntoSandbox(_ source: URL) throws -> URL {
+    /// Copies a user-picked file into `tmp/imports/<kind>/<original name>`
+    /// (the engine needs a plain readable path; the original name keeps
+    /// object / G-code names meaningful). Each kind keeps only its latest
+    /// copy; kinds are serialized by their owning store.
+    static func copyImportIntoSandbox(_ source: URL, kind: String) throws -> URL {
         let hasSecurityScope = source.startAccessingSecurityScopedResource()
         defer {
             if hasSecurityScope {
@@ -88,12 +92,15 @@ enum EnginePaths {
             }
         }
         let fileManager = FileManager.default
-        let destination = fileManager.temporaryDirectory
-            .appendingPathComponent("orcapad-import.stl")
+        let directory = fileManager.temporaryDirectory
+            .appendingPathComponent("imports", isDirectory: true)
+            .appendingPathComponent(kind, isDirectory: true)
+        let destination = directory.appendingPathComponent(source.lastPathComponent)
         do {
-            if fileManager.fileExists(atPath: destination.path) {
-                try fileManager.removeItem(at: destination)
+            if fileManager.fileExists(atPath: directory.path) {
+                try fileManager.removeItem(at: directory)
             }
+            try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
             try fileManager.copyItem(at: source, to: destination)
             return destination
         } catch {
