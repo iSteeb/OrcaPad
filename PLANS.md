@@ -68,8 +68,16 @@ Device, each tab a clean feature module over the same stores.
       engine (`PresetCollection::save_current_preset` into the writable data
       dir) and list user presets alongside system ones (edits are session-only
       until then, like desktop unsaved changes)
-- [ ] C6: Plate — gizmo-style move/rotate/scale with correct pivots, numeric
-      transform panel, lay-flat/arrange via engine, support-paint stub
+- [x] C6: Plate v1 — left gizmo toolbar (Move/Rotate/Scale) with on-canvas
+      gizmos (axes, ring + angle tick, bounding box), ring-drag rotation with
+      5° snap, vertical-drag scale kept on bed, desktop Object manipulation
+      panel (X/Y/RotZ/Scale/size, quick actions), copy/delete; FIXED picking
+      (points vs pixels) that broke tap-select and drag-move (`cc85933`)
+- [ ] C6b: engine Arrange — bring Arrange.cpp + libnest2d + NLopt 2.5 into
+      the closure (configured nlopt_config.h, generated nlopt.hpp), bridge
+      `orca_plater_arrange` over ModelInstance arrange polygons + bed polygon
+- [ ] C6c: Lay flat / free rotation — extend the transform contract beyond
+      z-rotation (snapshot + set ABI), then the face-pick gizmo
 - [ ] Device tab: printer web UI (later)
 
 **Accept:** device walkthrough of all four tabs; edits in Prepare change the

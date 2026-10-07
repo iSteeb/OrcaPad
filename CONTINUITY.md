@@ -7,9 +7,11 @@
 - Priority order [USER 2026-10-06]: tab shell + clean refactor → Prepare
   desktop parity → Preview gcode parity → Plate transform UI (current
   move/rotate judged poor by user — redo in C6).
-- Done: C1 shell, C2 Prepare v1 (ABI v4 overrides), C3 Preview v1 (ABI v5).
-- Next: device acceptance of C1–C3, then C4 Preview parity, C5 Prepare
-  parity, C6 Plate gizmos. Immutable cancellable slice jobs remain queued.
+- Done: C1 shell, C2/C5 Prepare (extracted desktop layout, ABI v4
+  overrides), C3/C4 Preview (ABI v6 toolpath, range/move scrubbing, schemes,
+  legend), C6 Plate gizmos + numeric panel; debug overlay hidden (5x Device).
+- Next (needs user choice): C6b engine Arrange (NLopt closure), C6c lay flat
+  (transform contract), C5b user presets, Device tab, immutable slice jobs.
 
 ## DECISIONS
 
@@ -32,6 +34,11 @@
   `CoordinateMapper` owns z-up ↔ Metal y-up conversion.
 
 ## PROGRESS
+
+- [2026-10-06 CODE][TOOL] C4–C6 + overlay: Preview parity (`b0960d2`,
+  `b5dc9c0` ABI v6), Prepare desktop layout from Tab.cpp (`f09d26b`), Plate
+  gizmos + panel + picking fix (`cc85933`), overlay toggle (`97c16c2`). Host
+  contract tests 29,767 checks green; installed on iPoke.
 
 - [2026-10-06 CODE][TOOL] GATE C1–C3: RootView TabView + Features/ modules;
   Prepare editor (schema `mode` filter, engine-derived kind membership,
