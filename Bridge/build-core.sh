@@ -18,6 +18,7 @@ CLANG="${CLANG:-$HOME/.local/share/swiftly/toolchains/6.4.0/usr/bin/clang++}"
 TARGET="arm64-apple-ios17.0"
 
 source "$ROOT/Bridge/engine-sources.sh"
+engine_fetch_deps
 
 BUILD="$ROOT/Bridge/build-ios"
 OUT="$ROOT/Prebuilt/OrcaBridgeCore.xcframework/ios-arm64"
@@ -36,7 +37,7 @@ CFLAGS=(
     -I"$DEPS/glu-libtess/include"
     -I"$DEPS/libigl" -I"$ROOT/Bridge/cache/Orca-deps-libnoise/src"
     -I"$DEPS/libnest2d/include"
-    -I"$DEPS/clipper2/Clipper2Lib/include" -I"$DEPS/expat/expat/lib"
+    -I"$DEPS/clipper2/Clipper2Lib/include" -I"$DEPS/expat"
     -I"$DEPS/miniz"
     -I"$ROOT/Bridge/engine-cxx"
     -DSLIC3R_APP_KEY='"OrcaSlicer"' -DSLIC3R_APP_NAME='"OrcaSlicer"'
@@ -48,7 +49,7 @@ CONLY_FLAGS=(
     -I"$DEPS" -I"$DEPS/qhull/src" -I"$DEPS/glu-libtess/include"
     -I"$DEPS/libigl" -I"$ROOT/Bridge/cache/Orca-deps-libnoise/src"
     -I"$DEPS/libnest2d/include"
-    -I"$DEPS/clipper2/Clipper2Lib/include" -I"$DEPS/expat/expat/lib"
+    -I"$DEPS/clipper2/Clipper2Lib/include" -I"$DEPS/expat"
     -I"$DEPS/miniz"
 )
 

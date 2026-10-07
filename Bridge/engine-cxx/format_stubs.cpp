@@ -1,5 +1,6 @@
-// OrcaPad adapter: loud stubs for model formats whose engines (draco, OCCT,
-// 3mf project stack) are not yet cross-built for iOS. Each throws the moment
+// OrcaPad adapter: loud stubs for model formats whose engines (draco, OCCT)
+// are not yet cross-built for iOS (3MF is the real Format/3mf.cpp +
+// Format/bbs_3mf.cpp). Each throws the moment
 // it is called — no silent fallbacks. Replace as real deps land.
 // NOTE: everything is inside namespace Slic3r to match the headers' linkage.
 #include "libslic3r/Config.hpp"
@@ -20,27 +21,8 @@ static void orcapad_unsupported(const char *what) {
                                " not supported in this build (dependency not yet ported)");
 }
 
-// --- 3MF (blocked on draco + project stack) — signatures from headers ---
-bool load_3mf(const char *, DynamicPrintConfig &,
-              ConfigSubstitutionContext &, Model *, bool) {
-    orcapad_unsupported("3MF import");
-}
-bool store_3mf(const char *, Model *, const DynamicPrintConfig *,
-               bool, const ThumbnailData *, bool) {
-    orcapad_unsupported("3MF export");
-}
-// DESTRUCTOR-PATH stubs: must never throw (exception-during-unwind =
-// std::terminate, verified by crash OrcaPad-151846). No-op is CORRECT here:
-// no draco/3mf-managed data exists by construction in this build.
-void delete_object_mesh(ModelObject &) {}
-void remove_backup(Model &, bool) {}
 void delete_temp_file(const std::string &) {
     orcapad_unsupported("3MF temp file cleanup");
-}
-
-// --- PrusaFileParser (defined in Format/3mf.cpp — same wall) ---
-bool PrusaFileParser::check_3mf_from_prusa(std::string) {
-    orcapad_unsupported("Prusa 3MF detection");
 }
 
 // --- STEP (blocked on OCCT) ---
@@ -76,11 +58,6 @@ namespace Slic3r {
 
 unsigned get_current_pid() { return (unsigned)getpid(); } // real: iOS has getpid
 
-bool load_bbs_3mf(const char *, DynamicPrintConfig *, ConfigSubstitutionContext *,
-                  Model *, PlateDataPtrs *, std::vector<Preset *> *, bool *, bool *,
-                  Semver *, Import3mfProgressFn, LoadStrategy, BBLProject *, int) {
-    orcapad_unsupported("Bambu 3MF import");
-}
 bool load_drc(const char *, Model *, const char *) {
     orcapad_unsupported("DRC import");
 }
@@ -182,14 +159,6 @@ static std::string orcapad_resources_dir;
 void set_resources_dir(const std::string &path) { orcapad_resources_dir = path; }
 const std::string &resources_dir() { return orcapad_resources_dir; }
 
-// Mirrors the real gate (bbs_3mf.cpp:9017): no-op unless the model opted
-// into project backup (set_need_backup) — which OrcaPad's headless pipeline
-// never does. If something ever enables backup, fail loudly instead.
-void save_object_mesh(ModelObject &object) {
-    if (!object.get_model() || !object.get_model()->is_need_backup()) return;
-    if (object.volumes.empty() || object.instances.empty()) return;
-    orcapad_unsupported("3MF mesh backup");
-}
 
 } // namespace Slic3r
 
@@ -251,14 +220,10 @@ void write_rgb_to_file_scaled(const std::string &, size_t, size_t,
 // closure (parse + PNG/QOI encode through vendored miniz/qoi; JPEG reaches
 // the loud adapter in jpeg_stubs.cpp). No stubs remain here.
 
-// --- miniz zip wrappers + rename (utils.cpp/3mf walls) ---
+// --- rename (utils.cpp wall; zip wrappers are the real miniz_extension.cpp) ---
 #include "miniz_extension.hpp"
 #include <cstdio>
 namespace Slic3r {
-bool open_zip_reader(mz_zip_archive *, const std::string &) {
-    throw std::runtime_error("OrcaPad: zip reader not supported (3MF/AMF archives)");
-}
-bool close_zip_reader(mz_zip_archive *) { return true; }
 std::error_code rename_file(const std::string &from, const std::string &to) {
     return std::rename(from.c_str(), to.c_str()) == 0
         ? std::error_code{} : std::make_error_code(std::errc::io_error);
@@ -276,4 +241,147 @@ const std::string &temporary_dir() {
     }
     return orcapad_temporary_dir;
 }
+} // namespace Slic3r
+
+// --- utils.cpp string/path helpers needed by Format/3mf.cpp + bbs_3mf.cpp.
+// utils.cpp itself is not portable (compiled boost::log/locale, real TBB,
+// libproc, ObjC++ MacUtils); these bodies are copied VERBATIM from the
+// pinned utils.cpp (non-Windows branches) so behaviour is identical.
+#include <cstring>
+#include <errno.h>
+namespace Slic3r {
+
+// utils.cpp:1291
+std::string xml_escape(std::string text, bool is_marked /* = false*/)
+{
+    std::string::size_type pos = 0;
+    for (;;)
+    {
+        pos = text.find_first_of("\"\'&<>", pos);
+        if (pos == std::string::npos)
+            break;
+
+        std::string replacement;
+        switch (text[pos])
+        {
+        case '\"': replacement = "&quot;"; break;
+        case '\'': replacement = "&apos;"; break;
+        case '&':  replacement = "&amp;";  break;
+        case '<':  replacement = is_marked ? "<" :"&lt;"; break;
+        case '>':  replacement = is_marked ? ">" :"&gt;"; break;
+        default: break;
+        }
+
+        text.replace(pos, 1, replacement);
+        pos += replacement.size();
+    }
+
+    return text;
+}
+
+// utils.cpp:1321
+std::string xml_escape_double_quotes_attribute_value(std::string text)
+{
+    std::string::size_type pos = 0;
+    for (;;) {
+        pos = text.find_first_of("\"&<\r\n\t", pos);
+        if (pos == std::string::npos) break;
+
+        std::string replacement;
+        switch (text[pos]) {
+        case '\"': replacement = "&quot;"; break;
+        case '&': replacement = "&amp;"; break;
+        case '<': replacement = "&lt;"; break;
+        case '\r': replacement = "&#xD;"; break;
+        case '\n': replacement = "&#xA;"; break;
+        case '\t': replacement = "&#x9;"; break;
+        default: break;
+        }
+
+        text.replace(pos, 1, replacement);
+        pos += replacement.size();
+    }
+
+    return text;
+}
+
+// utils.cpp:1346
+std::string xml_unescape(std::string s)
+{
+    std::string ret;
+    std::string::size_type i = 0;
+    std::string::size_type pos = 0;
+    while (i < s.size()) {
+        std::string rep;
+        if (s[i] == '&') {
+            if (s.substr(i, 4) == "&lt;") {
+                ret += s.substr(pos, i - pos) + "<";
+                i += 4;
+                pos = i;
+            }
+            else if (s.substr(i, 4) == "&gt;") {
+                ret += s.substr(pos, i - pos) + ">";
+                i += 4;
+                pos = i;
+            }
+            else if (s.substr(i, 5) == "&amp;") {
+                ret += s.substr(pos, i - pos) + "&";
+                i += 5;
+                pos = i;
+            }
+            else {
+                ++i;
+            }
+        }
+        else {
+            ++i;
+        }
+    }
+
+    ret += s.substr(pos);
+    return ret;
+}
+
+// utils.cpp:1209
+std::string string_printf(const char *format, ...)
+{
+    va_list args1;
+    va_start(args1, format);
+    va_list args2;
+    va_copy(args2, args1);
+
+    static const size_t INITIAL_LEN = 200;
+    std::string buffer(INITIAL_LEN, '\0');
+
+    int bufflen = ::vsnprintf(buffer.data(), INITIAL_LEN - 1, format, args1);
+
+    if (bufflen >= int(INITIAL_LEN)) {
+        buffer.resize(size_t(bufflen) + 1);
+        ::vsnprintf(buffer.data(), buffer.size(), format, args2);
+    }
+
+    buffer.resize(bufflen);
+    va_end(args2);
+    va_end(args1);
+
+    return buffer;
+}
+
+// utils.cpp:1162 (non-WIN32 branch)
+std::string decode_path(const char *src) { return src; }
+
+// utils.cpp:1251. Upstream returns {} when the name cannot be determined.
+// The iOS sandbox forbids inspecting other processes (no /proc, no public
+// libproc), so only this process' own name is determinable — exactly the
+// upstream failure contract for every other pid.
+std::string get_process_name(int pid)
+{
+    if (pid != 0 && pid != int(::getpid())) return {};
+#ifdef __APPLE__
+    return getprogname();
+#else
+    return program_invocation_short_name;
+#endif
+}
+
 } // namespace Slic3r

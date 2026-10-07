@@ -93,7 +93,9 @@ final class DocumentStore {
                 )
             }
             let dimensions = object.mesh.bounds.size
-            let status = "\(displayName) · \(object.mesh.indices.count / 3) tris · " +
+            let objectNote = mutation.createdObjectCount > 1
+                ? "\(mutation.createdObjectCount) objects · " : ""
+            let status = "\(displayName) · \(objectNote)\(object.mesh.indices.count / 3) tris · " +
                 String(
                     format: "%.0f×%.0f×%.0f mm",
                     dimensions.x,

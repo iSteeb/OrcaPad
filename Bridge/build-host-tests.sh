@@ -33,7 +33,7 @@ CFLAGS=(
     -I"$DEPS/glu-libtess/include"
     -I"$DEPS/libigl" -I"$ROOT/Bridge/cache/Orca-deps-libnoise/src"
     -I"$DEPS/libnest2d/include"
-    -I"$DEPS/clipper2/Clipper2Lib/include" -I"$DEPS/expat/expat/lib"
+    -I"$DEPS/clipper2/Clipper2Lib/include" -I"$DEPS/expat"
     -I"$DEPS/miniz"
     -I"$ROOT/Bridge/cache/cereal/include"
     -I/usr/include/eigen3
@@ -46,7 +46,7 @@ CONLY_FLAGS=(
     -I"$DEPS" -I"$DEPS/qhull/src" -I"$DEPS/glu-libtess/include"
     -I"$DEPS/libigl" -I"$ROOT/Bridge/cache/Orca-deps-libnoise/src"
     -I"$DEPS/libnest2d/include"
-    -I"$DEPS/clipper2/Clipper2Lib/include" -I"$DEPS/expat/expat/lib"
+    -I"$DEPS/clipper2/Clipper2Lib/include" -I"$DEPS/expat"
     -I"$DEPS/miniz"
 )
 
@@ -159,6 +159,7 @@ run_jobs_parallel() {
 }
 
 source "$ROOT/Bridge/engine-sources.sh"
+engine_fetch_deps
 
 while IFS=$'\t' read -r kind src extra_str; do
     [ -n "${src:-}" ] || continue
@@ -189,7 +190,7 @@ HOST_ARCHIVE="$BUILD/libengine-host.a"
 rm -f "$HOST_ARCHIVE"
 ar rcs "$HOST_ARCHIVE" "${OBJS[@]}"
 "$CXX" -o "$OUT" "$OBJ/contract_tests.o" "$HOST_ARCHIVE" \
-    -lboost_thread -lpthread -lm -lgmp -lmpfr -latomic
+    -lpthread -lm -lgmp -lmpfr -latomic
 file "$OUT"
 
 # --- run ---

@@ -73,7 +73,9 @@ engine_sources() {
              SLA/IndexedMesh.cpp SVG.cpp \
              FilamentGroupUtils.cpp ParameterUtils.cpp ShortEdgeCollapse.cpp \
              IntersectionPoints.cpp FlushVolPredictor.cpp Geometry/Circle.cpp Clipper2Utils.cpp TriangleSetSampling.cpp FaceDetector.cpp TriangleSelector.cpp BuildVolume.cpp Extruder.cpp PrincipalComponents2D.cpp MultiMaterialSegmentation.cpp FilamentGroup.cpp ContourZ.cpp Feature/Interlocking/InterlockingGenerator.cpp Feature/Interlocking/VoxelUtils.cpp calib.cpp MaterialType.cpp FlushVolCalc.cpp NormalUtils.cpp \
-             Preset.cpp PresetBundle.cpp AppConfig.cpp; do
+             Preset.cpp PresetBundle.cpp AppConfig.cpp \
+             miniz_extension.cpp Format/3mf.cpp Format/bbs_3mf.cpp NSVGUtils.cpp \
+             Emboss.cpp ExPolygonsIndex.cpp; do
         case "$f" in
             # host libstdc++ does not leak <memory> transitively into this
             # header (Darwin libc++ does) — same adapter pattern as LocalesUtils
@@ -152,7 +154,19 @@ engine_sources() {
         printf 'cxx\t%s\t-std=c++20\n' "$ROOT/Bridge/cache/boost-filesystem-1.90/src/$f.cpp"
     done
 
-    # adapter stubs (3MF/STEP — loud throws, upstream untouched)
+    # vendored header-only nanosvg: its implementation unit lives in the
+    # upstream GUI (BitmapCache.cpp), so the Bridge provides one
+    printf 'cxx\t%s\n' "$ROOT/Bridge/engine-cxx/nanosvg_impl.cpp"
+
+    # boost::thread compiled bits (pthread API) — real upstream sources at
+    # the installed headers' tag; Format/bbs_3mf.cpp's project auto-backup
+    # manager owns a boost::thread. Flags mirror libs/thread/CMakeLists.txt.
+    for f in pthread/thread pthread/once future; do
+        printf 'cxx\t%s\t-DBOOST_THREAD_SOURCE -DBOOST_THREAD_BUILD_LIB -DBOOST_THREAD_STATIC_LINK -DBOOST_THREAD_NO_LIB\n' \
+            "$ROOT/Bridge/cache/boost-thread-1.90/src/$f.cpp"
+    done
+
+    # adapter stubs (STEP/DRC/SVG — loud throws, upstream untouched)
     printf 'cxx\t%s\n' "$ROOT/Bridge/engine-cxx/format_stubs.cpp"
     # real thumbnail parse/encode (PNG via miniz, QOI vendored; JPEG hits the
     # loud adapter below)
@@ -168,4 +182,19 @@ engine_sources() {
     # orca_bridge.cpp resolves the full config through vendored nlohmann/json.
     printf 'cxx\t%s\t-I%s\n' "$ROOT/Bridge/engine-cxx/orca_bridge.cpp" \
         "$DEPS/nlohmann"
+}
+
+# Fetches build-only third-party sources listed above (idempotent). Both
+# builds call this before engine_sources so neither can drift.
+engine_fetch_deps() {
+    local ROOT
+    ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+    if [ ! -f "$ROOT/Bridge/cache/boost-thread-1.90/src/pthread/thread.cpp" ]; then
+        echo "==> fetching boost.thread 1.90 sources into Bridge/cache/" >&2
+        mkdir -p "$ROOT/Bridge/cache"
+        git clone -q --depth 1 -b boost-1.90.0 https://github.com/boostorg/thread \
+            "$ROOT/Bridge/cache/boost-thread-1.90"
+    fi
+    [ -f "$ROOT/Bridge/cache/boost-thread-1.90/src/pthread/thread.cpp" ] ||
+        { echo "FATAL: boost.thread fetch failed" >&2; return 1; }
 }

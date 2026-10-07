@@ -28,15 +28,19 @@ public final class EnginePlater: @unchecked Sendable {
         public let snapshot: SceneSnapshot
         public let createdObjectID: ObjectID?
         public let createdInstanceID: InstanceID?
+        /// Objects created by an import (first is `createdObjectID`).
+        public let createdObjectCount: Int
 
         fileprivate init(
             snapshot: SceneSnapshot,
             createdObjectID: ObjectID? = nil,
-            createdInstanceID: InstanceID? = nil
+            createdInstanceID: InstanceID? = nil,
+            createdObjectCount: Int = 0
         ) {
             self.snapshot = snapshot
             self.createdObjectID = createdObjectID
             self.createdInstanceID = createdInstanceID
+            self.createdObjectCount = createdObjectCount
         }
     }
 
@@ -74,21 +78,32 @@ public final class EnginePlater: @unchecked Sendable {
             var mutationRevision: UInt64 = 0
             var createdObjectID: ObjectID?
             var createdInstanceID: InstanceID?
+            var createdObjectCount = 0
 
             switch mutation {
             case .importModel(let path, let bedCenter):
                 var rawObjectID: UInt64 = 0
+                var objectCount: UInt32 = 0
                 let result = path.withCString { pathPointer in
-                    orca_plater_add_stl(
+                    orca_plater_import_model(
                         handle,
                         pathPointer,
                         bedCenter.x,
                         bedCenter.y,
                         &rawObjectID,
+                        &objectCount,
                         &mutationRevision
                     )
                 }
                 try BridgeResult.consume(result, operation: "import model")
+                guard objectCount > 0 else {
+                    throw BridgeError.local(
+                        .internalInvariant,
+                        operation: "import model",
+                        diagnostic: "Bridge reported a successful import of zero objects"
+                    )
+                }
+                createdObjectCount = Int(objectCount)
                 createdObjectID = try Self.objectID(
                     rawObjectID,
                     operation: "import model"
@@ -185,7 +200,8 @@ public final class EnginePlater: @unchecked Sendable {
             return MutationResult(
                 snapshot: scene,
                 createdObjectID: createdObjectID,
-                createdInstanceID: createdInstanceID
+                createdInstanceID: createdInstanceID,
+                createdObjectCount: createdObjectCount
             )
         }
     }

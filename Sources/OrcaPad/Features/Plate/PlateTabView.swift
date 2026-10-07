@@ -79,7 +79,7 @@ struct PlateTabView: View {
         }
         .fileImporter(
             isPresented: $importPresented,
-            allowedContentTypes: ImportTypes.stl,
+            allowedContentTypes: ImportTypes.models,
             onCompletion: handleImport
         )
         .sheet(isPresented: $objectsPresented) { objectsList }
@@ -184,7 +184,7 @@ struct PlateTabView: View {
         return NavigationStack {
             Group {
                 if objects.isEmpty {
-                    Text("No objects — import an STL")
+                    Text("No objects — import a model (STL, OBJ, AMF, 3MF)")
                         .foregroundStyle(.secondary)
                 } else {
                     List {
@@ -639,12 +639,14 @@ private struct NumericField: View {
 }
 
 private enum ImportTypes {
-    static let stl: [UTType] = {
-        guard let type = UTType(filenameExtension: "stl") else {
-            preconditionFailure("iOS did not provide an STL content type")
+    /// Engine `Model::read_from_file` geometry formats compiled into the
+    /// closure (STEP/SVG/DRC still need OCCT/draco).
+    static let models: [UTType] = ["stl", "obj", "amf", "3mf"].map { ext in
+        guard let type = UTType(filenameExtension: ext, conformingTo: .data) else {
+            preconditionFailure("iOS did not provide a content type for .\(ext)")
         }
-        return [type]
-    }()
+        return type
+    }
 }
 
 private struct PlateActionButton: View {

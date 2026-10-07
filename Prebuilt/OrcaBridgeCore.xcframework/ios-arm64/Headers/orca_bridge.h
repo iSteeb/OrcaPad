@@ -7,7 +7,7 @@ extern "C" {
 #endif
 
 /// Version of the C ABI contract in this header. Callers verify it at runtime.
-#define ORCA_BRIDGE_ABI_VERSION ((uint32_t)9)
+#define ORCA_BRIDGE_ABI_VERSION ((uint32_t)10)
 
 typedef int32_t orca_status_code;
 #define ORCA_STATUS_OK                     ((orca_status_code)0)
@@ -100,14 +100,19 @@ orca_result orca_plater_new(orca_plater **out_plater);
 void orca_plater_free(orca_plater *plater);
 
 /// Every successful mutation advances and returns the document revision.
-/// Import centers the mesh via upstream `center_around_origin()` (desktop
-/// parity) and places the instance at the caller-provided bed center
-/// (millimetres, engine z-up space) so placement follows the selected
-/// machine's print volume.
-orca_result orca_plater_add_stl(orca_plater *plater, const char *path,
-                                double bed_center_x, double bed_center_y,
-                                orca_object_id *out_object_id,
-                                orca_revision *out_revision);
+/// Imports EVERY object of a model file through upstream
+/// `Model::read_from_file` (STL, OBJ, AMF, 3MF geometry — desktop "Import").
+/// Each mesh is centered via `center_around_origin()` with instance offsets
+/// compensated (file placements are preserved); the imported group's XY
+/// bounding-box center is then moved to the caller's bed center (engine
+/// z-up millimetres) and every object is dropped onto the bed. One import
+/// is one mutation (+1 revision). Object IDs of the import are returned in
+/// document order starting at `out_first_object_id`.
+orca_result orca_plater_import_model(orca_plater *plater, const char *path,
+                                     double bed_center_x, double bed_center_y,
+                                     orca_object_id *out_first_object_id,
+                                     uint32_t *out_object_count,
+                                     orca_revision *out_revision);
 orca_result orca_plater_object_delete(orca_plater *plater,
                                       orca_object_id object_id,
                                       orca_revision *out_revision);

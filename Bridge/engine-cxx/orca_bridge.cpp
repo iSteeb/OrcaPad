@@ -845,17 +845,20 @@ orca_result orca_plater_new(orca_plater **out) {
 
 void orca_plater_free(orca_plater *plater) { delete plater; }
 
-orca_result orca_plater_add_stl(orca_plater *plater, const char *path,
-                                double bed_center_x, double bed_center_y,
-                                orca_object_id *out_object_id,
-                                orca_revision *out_revision) {
-    constexpr const char *operation = "orca_plater_add_stl";
-    if (out_object_id) *out_object_id = 0;
+orca_result orca_plater_import_model(orca_plater *plater, const char *path,
+                                     double bed_center_x, double bed_center_y,
+                                     orca_object_id *out_first_object_id,
+                                     uint32_t *out_object_count,
+                                     orca_revision *out_revision) {
+    constexpr const char *operation = "orca_plater_import_model";
+    if (out_first_object_id) *out_first_object_id = 0;
+    if (out_object_count) *out_object_count = 0;
     if (out_revision) *out_revision = 0;
     if (!plater)
         return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation,
                             "plater handle is null");
-    if (!path || !path[0] || !out_object_id || !out_revision)
+    if (!path || !path[0] || !out_first_object_id || !out_object_count ||
+        !out_revision)
         return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
                             "path is empty or output pointer is null");
     if (!std::isfinite(bed_center_x) || !std::isfinite(bed_center_y))
@@ -870,46 +873,73 @@ orca_result orca_plater_add_stl(orca_plater *plater, const char *path,
         if (!orcapad_revision_available(*plater))
             return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
                                 "document revision is exhausted");
-        Slic3r::Model temporary = Slic3r::Model::read_from_file(path);
+        // Geometry import (desktop "Import 3MF/STL/OBJ/AMF"): configs inside
+        // project files are NOT applied here — that is project open.
+        Slic3r::Model temporary = Slic3r::Model::read_from_file(
+            path, nullptr, nullptr,
+            Slic3r::LoadStrategy::AddDefaultInstances | Slic3r::LoadStrategy::LoadModel);
         if (temporary.objects.empty())
             return orcapad_fail(ORCA_STATUS_INVALID_MODEL, operation,
                                 "input contains no model object");
-        Slic3r::ModelObject *imported = temporary.objects[0];
-        // Desktop import parity: rotation/translation operate around the
-        // object's bbox center, so recentre the mesh on the origin and place
-        // the instance at the caller's bed center (selected machine's volume).
-        imported->center_around_origin();
-        if (!imported->instances.empty()) {
-            Slic3r::ModelInstance *instance = imported->instances[0];
-            const Slic3r::Vec3d offset = instance->get_offset();
-            instance->set_offset(Slic3r::Vec3d(bed_center_x, bed_center_y,
-                                               offset.z()));
+
+        // 1) center meshes (desktop rotation/scale pivot) while preserving
+        //    each instance's world placement: o' = o - L * shift
+        Slic3r::BoundingBoxf3 group;
+        for (Slic3r::ModelObject *object : temporary.objects) {
+            if (object->instances.empty())
+                return orcapad_fail(ORCA_STATUS_INVALID_MODEL, operation,
+                                    "imported object has no instance");
+            const Slic3r::Vec3d shift = -object->raw_mesh_bounding_box().center();
+            object->center_around_origin();
+            for (Slic3r::ModelInstance *instance : object->instances) {
+                const Slic3r::Vec3d delta = instance->get_matrix().linear() * shift;
+                instance->set_offset(instance->get_offset() - delta);
+            }
+            for (size_t i = 0; i < object->instances.size(); ++i)
+                group.merge(object->instance_bounding_box(i));
         }
-        imported->ensure_on_bed(false);
-        Slic3r::ModelObject *object =
-            plater->model.add_object(*imported);
-        if (!object)
-            return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
-                                "engine did not create a document object");
-        const orca_object_id id = static_cast<orca_object_id>(object->id().id);
-        if (id == 0) {
-            plater->model.delete_object(object);
-            return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
-                                "engine returned an invalid object ID");
+        if (!group.defined)
+            return orcapad_fail(ORCA_STATUS_INVALID_MODEL, operation,
+                                "imported geometry has no bounds");
+        // 2) move the group's XY center to the bed center, 3) drop to bed
+        const Slic3r::Vec3d move(bed_center_x - group.center().x(),
+                                 bed_center_y - group.center().y(), 0.0);
+        for (Slic3r::ModelObject *object : temporary.objects) {
+            object->translate_instances(move);
+            object->ensure_on_bed(false);
         }
-        try {
-            const auto inserted = plater->mesh_revisions.emplace(id, 1);
-            if (!inserted.second) {
+
+        std::vector<Slic3r::ModelObject *> added;
+        auto rollback = [&]() {
+            for (Slic3r::ModelObject *object : added) {
+                plater->mesh_revisions.erase(
+                    static_cast<orca_object_id>(object->id().id));
                 plater->model.delete_object(object);
-                return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
-                                    "engine reused an existing object ID");
+            }
+        };
+        try {
+            for (Slic3r::ModelObject *source : temporary.objects) {
+                Slic3r::ModelObject *object = plater->model.add_object(*source);
+                if (!object) {
+                    rollback();
+                    return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
+                                        "engine did not create a document object");
+                }
+                added.push_back(object);
+                const orca_object_id id = static_cast<orca_object_id>(object->id().id);
+                if (id == 0 || !plater->mesh_revisions.emplace(id, 1).second) {
+                    rollback();
+                    return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
+                                        "engine returned an invalid or reused object ID");
+                }
             }
         } catch (...) {
-            plater->model.delete_object(object);
+            rollback();
             throw;
         }
         ++plater->revision;
-        *out_object_id = id;
+        *out_first_object_id = static_cast<orca_object_id>(added.front()->id().id);
+        *out_object_count = static_cast<uint32_t>(added.size());
         *out_revision = plater->revision;
         return orcapad_ok();
     });

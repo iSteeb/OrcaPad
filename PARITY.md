@@ -11,7 +11,7 @@ yet in `Bridge/engine-sources.sh`), **Client-reimpl** (desktop logic lives in
 
 | Feature | Desktop evidence | OrcaPad evidence | Status | Work |
 |---|---|---|---|---|
-| Import model (STL) | `Plater.cpp` load_files | `PlateTabView.swift:82` (`ImportTypes.stl`) | ✅ | — |
+| Import model (STL, OBJ, AMF, 3MF geometry; multi-object) | `Plater.cpp` load_files / `load_model_objects:7044` | ABI v10 `orca_plater_import_model` (all objects, file layout preserved, group centered on bed); `PlateTabView.swift` ImportTypes.models | ✅ (STEP/SVG/DRC blocked, see §4) | — |
 | Delete / delete all | `GLCanvas3D.cpp` toolbar | `DocumentStore.swift:136,143` | ✅ | — |
 | Add/remove instances ("more/fewer") | `GLCanvas3D.cpp:6812,6824` | `DocumentStore.swift:116,129` | ✅ | — |
 | Move gizmo + panel | `GizmoObjectManipulation.cpp:731` (X/Y/Z, world/object) | `PlateTabView.swift:357` X/Y + center | 🟡 Z and the world/object coordinate switch are omitted on purpose (user decision; the engine rests the object on the bed) | — |
@@ -99,8 +99,8 @@ yet in `Bridge/engine-sources.sh`), **Client-reimpl** (desktop logic lives in
 | Device tab (printer web UI) | `PrinterWebView.hpp:37` | `DeviceTabView.swift` placeholder | ❌ | **Decision:** AGENTS.md bans WebView *UI*; embedding the printer's own page needs your OK |
 | Print hosts (OctoPrint, Moonraker, PrusaLink/Connect, Duet, Repetier, MKS, Elegoo, Flashforge, SimplyPrint, …) | `Utils/PrintHost.cpp:58-73`, `PrintConfig.hpp:80` | none found | ❌ | Client-reimpl (these are GUI-side libcurl HTTP; native URLSession) |
 | Bambu cloud/LAN monitor | `Monitor.cpp` | — | ➖ proprietary network plugin | — |
-| OBJ / AMF import | `Plater.cpp` load_files | `OBJ.cpp`, `AMF.cpp` compiled; only `orca_plater_add_stl` exposed | ❌ | Bridge only |
-| 3MF project load/save | `Plater.cpp:12102,12234,15551` | stubbed in `format_stubs.cpp:24-28,79` | ❌ | Closure: `3mf.cpp`/`bbs_3mf.cpp` need miniz + expat (both vendored) + boost property_tree (header-only) |
+| OBJ / AMF import | `Plater.cpp` load_files | ABI v10 `orca_plater_import_model` → `Model::read_from_file` | ✅ | — |
+| 3MF project load/save | `Plater.cpp:12102,12234,15551` | real `Format/3mf.cpp` + `bbs_3mf.cpp` now compiled (with `NSVGUtils`, `Emboss`, `ExPolygonsIndex`, nanosvg impl, Boost.Thread); geometry import ✅; project open/save ❌ | 🟡 | Bridge (project open/save) |
 | STEP | `Format/STEP.cpp` (OCCT) | stubbed in `format_stubs.cpp:47-58` | ❌ | Closure: OpenCASCADE (heavy) |
 | SVG import | `Format/svg.cpp` (OCCT + nanosvg) | stubbed in `format_stubs.cpp:87` | ❌ | Closure: OCCT |
 | DRC | `Format/DRC.cpp` (draco) | stubbed in `format_stubs.cpp:84` | ❌ | Closure: draco (not vendored) |

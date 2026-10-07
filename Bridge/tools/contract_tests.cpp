@@ -201,6 +201,44 @@ static orca_scene_snapshot take_snapshot(orca_plater *plater) {
     return snap;
 }
 
+// Two separate 20 mm cubes (x 0..20 and x 50..70) as plain-XML AMF —
+// a multi-object geometry file without placements.
+static std::string write_two_cube_amf(const std::string &dir, const char *name) {
+    const std::string path = dir + "/" + name;
+    FILE *file = fopen(path.c_str(), "w");
+    if (!file) { fprintf(stderr, "FATAL: cannot write %s\n", path.c_str()); exit(2); }
+    fprintf(file, "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<amf unit=\"millimeter\">\n");
+    const int facets[12][3] = {{0,2,1},{0,3,2},{4,5,6},{4,6,7},{0,1,5},{0,5,4},
+                               {1,2,6},{1,6,5},{2,3,7},{2,7,6},{3,0,4},{3,4,7}};
+    for (int object = 0; object < 2; ++object) {
+        const float x0 = object == 0 ? 0.f : 50.f;
+        const float v[8][3] = {{x0,0,0},{x0+20,0,0},{x0+20,20,0},{x0,20,0},
+                               {x0,0,20},{x0+20,0,20},{x0+20,20,20},{x0,20,20}};
+        fprintf(file, " <object id=\"%d\"><mesh><vertices>\n", object);
+        for (const auto &p : v)
+            fprintf(file, "  <vertex><coordinates><x>%g</x><y>%g</y><z>%g</z></coordinates></vertex>\n", p[0], p[1], p[2]);
+        fprintf(file, " </vertices><volume>\n");
+        for (const auto &f : facets)
+            fprintf(file, "  <triangle><v1>%d</v1><v2>%d</v2><v3>%d</v3></triangle>\n", f[0], f[1], f[2]);
+        fprintf(file, " </volume></mesh></object>\n");
+    }
+    fprintf(file, "</amf>\n");
+    fclose(file);
+    return path;
+}
+
+// Single-object import helper for the many cube-based tests.
+static orca_result import_one(orca_plater *plater, const char *path,
+                              double x, double y, orca_object_id *out_id,
+                              orca_revision *out_revision) {
+    uint32_t count = 0;
+    orca_result result = orca_plater_import_model(plater, path, x, y, out_id,
+                                                  out_id ? &count : nullptr,
+                                                  out_revision);
+    if (result.code == ORCA_STATUS_OK) CHECK_EQ(count, 1u);
+    return result;
+}
+
 static orca_revision snapshot_revision(orca_plater *plater) {
     orca_scene_snapshot snap = take_snapshot(plater);
     const orca_revision revision = snap.revision;
@@ -234,7 +272,7 @@ static void test_md5_shim() {
 
 static void test_abi_version() {
     CHECK_EQ(orca_bridge_abi_version(), ORCA_BRIDGE_ABI_VERSION);
-    CHECK_EQ(ORCA_BRIDGE_ABI_VERSION, 9);
+    CHECK_EQ(ORCA_BRIDGE_ABI_VERSION, 10);
 }
 
 static void test_document_lifecycle(const std::string &dir) {
@@ -285,26 +323,26 @@ static void test_add_failures(const std::string &dir) {
     orca_revision revision = 0;
 
     // null handle
-    GUARD(g1, orca_plater_add_stl(nullptr, "/x.stl", 100.0, 100.0, &object_id, &revision));
+    GUARD(g1, import_one(nullptr, "/x.stl", 100.0, 100.0, &object_id, &revision));
     expect_code(g1, ORCA_STATUS_INVALID_HANDLE, "add_stl(null plater)");
 
     // empty path and null outputs
-    GUARD(g2, orca_plater_add_stl(plater, "", 100.0, 100.0, &object_id, &revision));
+    GUARD(g2, import_one(plater, "", 100.0, 100.0, &object_id, &revision));
     expect_code(g2, ORCA_STATUS_INVALID_ARGUMENT, "add_stl(empty path)");
-    GUARD(g3, orca_plater_add_stl(plater, "/x.stl", 100.0, 100.0, nullptr, &revision));
+    GUARD(g3, import_one(plater, "/x.stl", 100.0, 100.0, nullptr, &revision));
     expect_code(g3, ORCA_STATUS_INVALID_ARGUMENT, "add_stl(null object out)");
-    GUARD(g4, orca_plater_add_stl(plater, "/x.stl", 100.0, 100.0, &object_id, nullptr));
+    GUARD(g4, import_one(plater, "/x.stl", 100.0, 100.0, &object_id, nullptr));
     expect_code(g4, ORCA_STATUS_INVALID_ARGUMENT, "add_stl(null revision out)");
 
     // missing file
-    GUARD(g5, orca_plater_add_stl(plater, (dir + "/missing.stl").c_str(),
+    GUARD(g5, import_one(plater, (dir + "/missing.stl").c_str(),
                                   100.0, 100.0, &object_id, &revision));
     expect_code(g5, ORCA_STATUS_IO_FAILURE, "add_stl(missing file)");
     expect_owned_diagnostic(g5, "add_stl(missing file)");
 
     // garbage input: typed loud failure, either model or engine level
     const std::string garbage = write_garbage_file(dir);
-    GUARD(g6, orca_plater_add_stl(plater, garbage.c_str(), 100.0, 100.0, &object_id,
+    GUARD(g6, import_one(plater, garbage.c_str(), 100.0, 100.0, &object_id,
                                   &revision));
     ++checks;
     if (g6.ok()) {
@@ -329,7 +367,7 @@ static void test_stable_ids_and_revisions(const std::string &dir) {
 
     orca_object_id object_id = 0;
     orca_revision revision = 0;
-    GUARD(g1, orca_plater_add_stl(plater, cube.c_str(), 100.0, 100.0, &object_id, &revision));
+    GUARD(g1, import_one(plater, cube.c_str(), 100.0, 100.0, &object_id, &revision));
     expect_ok(g1, "add cube");
     CHECK(object_id != 0);
     CHECK_EQ(revision, 1); // first successful mutation → revision 1
@@ -471,7 +509,7 @@ static void test_not_found_and_validation(const std::string &dir) {
 
     orca_object_id object_id = 0;
     orca_revision revision = 0;
-    GUARD(g1, orca_plater_add_stl(plater, cube.c_str(), 100.0, 100.0, &object_id, &revision));
+    GUARD(g1, import_one(plater, cube.c_str(), 100.0, 100.0, &object_id, &revision));
     expect_ok(g1, "add cube");
     const orca_revision baseline = revision;
 
@@ -539,6 +577,48 @@ static double instance_min_z(const orca_scene_object &object, const double *m) {
     return lowest;
 }
 
+static void test_multi_object_import(const std::string &dir) {
+    const std::string amf = write_two_cube_amf(dir, "orcapad-two-cubes.amf");
+    orca_plater *plater = nullptr;
+    GUARD(g0, orca_plater_new(&plater));
+    expect_ok(g0, "plater_new");
+
+    orca_object_id first = 0;
+    uint32_t count = 0;
+    orca_revision revision = 0;
+    GUARD(gn, orca_plater_import_model(plater, amf.c_str(), 100.0, 100.0, &first, nullptr, &revision));
+    expect_code(gn, ORCA_STATUS_INVALID_ARGUMENT, "import(null count)");
+
+    GUARD(g1, orca_plater_import_model(plater, amf.c_str(), 120.0, 80.0, &first, &count, &revision));
+    expect_ok(g1, "import two-object AMF");
+    CHECK_EQ(count, 2u);
+    CHECK_EQ(revision, (orca_revision)1); // one import = one mutation
+    CHECK(first != 0);
+
+    orca_scene_snapshot snap = take_snapshot(plater);
+    CHECK_EQ(snap.object_count, 2);
+    if (snap.object_count == 2) {
+        CHECK_EQ(snap.objects[0].id, first);
+        const auto &a = snap.objects[0].instances[0].transform;
+        const auto &b = snap.objects[1].instances[0].transform;
+        // relative layout preserved: centers 50 mm apart in X, same Y
+        CHECK_NEAR(b.offset_x - a.offset_x, 50.0, 1e-6);
+        CHECK_NEAR(b.offset_y - a.offset_y, 0.0, 1e-6);
+        // group centered on the requested bed center, resting on the bed
+        CHECK_NEAR((a.offset_x + b.offset_x) / 2.0, 120.0, 1e-6);
+        CHECK_NEAR(a.offset_y, 80.0, 1e-6);
+        CHECK_NEAR(a.offset_z, 10.0, 1e-6);
+        CHECK_NEAR(b.offset_z, 10.0, 1e-6);
+        // meshes centered on their origin (rotation/scale pivot)
+        for (int i = 0; i < 2; ++i) {
+            CHECK_NEAR(snap.objects[i].bbox_min[0] + snap.objects[i].bbox_max[0], 0.0, 1e-4);
+            CHECK_NEAR(snap.objects[i].bbox_min[2] + snap.objects[i].bbox_max[2], 0.0, 1e-4);
+        }
+    }
+    orca_scene_snapshot_dispose(&snap);
+    orca_plater_free(plater);
+}
+
 static void test_full_transforms(const std::string &dir) {
     const std::string cube = write_cube_stl(dir, "orcapad-cube-transform.stl");
     orca_plater *plater = nullptr;
@@ -546,7 +626,7 @@ static void test_full_transforms(const std::string &dir) {
     expect_ok(g0, "plater_new");
     orca_object_id object_id = 0;
     orca_revision revision = 0;
-    GUARD(g1, orca_plater_add_stl(plater, cube.c_str(), 100.0, 100.0, &object_id, &revision));
+    GUARD(g1, import_one(plater, cube.c_str(), 100.0, 100.0, &object_id, &revision));
     expect_ok(g1, "add cube");
     orca_scene_snapshot snap = take_snapshot(plater);
     const orca_instance_id instance = snap.objects[0].instances[0].id;
@@ -630,7 +710,7 @@ static void test_snapshot_ownership(const std::string &dir) {
     expect_ok(g0, "plater_new");
     orca_object_id object_id = 0;
     orca_revision revision = 0;
-    GUARD(g1, orca_plater_add_stl(plater, cube.c_str(), 100.0, 100.0, &object_id, &revision));
+    GUARD(g1, import_one(plater, cube.c_str(), 100.0, 100.0, &object_id, &revision));
     expect_ok(g1, "add cube");
 
     // copy A
@@ -690,7 +770,7 @@ static void test_engine_serialization(const std::string &dir) {
     expect_ok(g0, "plater_new");
     orca_object_id object_id = 0;
     orca_revision revision = 0;
-    GUARD(g1, orca_plater_add_stl(plater, cube.c_str(), 100.0, 100.0, &object_id, &revision));
+    GUARD(g1, import_one(plater, cube.c_str(), 100.0, 100.0, &object_id, &revision));
     expect_ok(g1, "add cube");
 
     orca_scene_snapshot snap = take_snapshot(plater);
@@ -1241,7 +1321,7 @@ static void test_slice_defaults(const std::string &dir) {
     expect_ok(g0, "plater_new");
     orca_object_id object_id = 0;
     orca_revision revision = 0;
-    GUARD(g1, orca_plater_add_stl(plater, cube.c_str(), 100.0, 100.0, &object_id, &revision));
+    GUARD(g1, import_one(plater, cube.c_str(), 100.0, 100.0, &object_id, &revision));
     expect_ok(g1, "add cube");
 
     // a second instance for multi-instance coverage
@@ -1322,7 +1402,7 @@ static void test_slice_with_presets(const std::string &dir,
     const std::string cube = write_cube_stl(dir, "orcapad-cube6.stl");
     orca_object_id object_id = 0;
     orca_revision revision = 0;
-    GUARD(g2, orca_plater_add_stl(plater, cube.c_str(), 100.0, 100.0, &object_id, &revision));
+    GUARD(g2, import_one(plater, cube.c_str(), 100.0, 100.0, &object_id, &revision));
     expect_ok(g2, "add cube");
 
     ProgressRecord progress;
@@ -1414,7 +1494,7 @@ static void test_slice_cancel(const std::string &dir) {
     expect_ok(g1, "plater_new");
     orca_object_id object_id = 0;
     orca_revision revision = 0;
-    GUARD(g2, orca_plater_add_stl(plater, cube.c_str(), 100.0, 100.0, &object_id, &revision));
+    GUARD(g2, import_one(plater, cube.c_str(), 100.0, 100.0, &object_id, &revision));
     expect_ok(g2, "add cube");
     const std::string gcode = dir + "/cancel.gcode";
 
@@ -1601,6 +1681,7 @@ int main() {
     test_not_found_and_validation(dir);
     test_snapshot_ownership(dir);
     test_full_transforms(dir);
+    test_multi_object_import(dir);
     test_engine_serialization(dir);
     test_presets(data_dir);
     test_preset_metadata(data_dir);
