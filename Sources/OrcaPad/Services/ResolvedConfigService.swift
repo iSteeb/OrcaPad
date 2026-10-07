@@ -2,38 +2,6 @@ import Foundation
 import Observation
 import OrcaBridge
 
-struct ConfigOptionSchema: Codable, Sendable {
-    let key: String
-    let type: Int
-    let label: String?
-    let fullLabel: String?
-    let category: String?
-    let tooltip: String?
-    let guiFlags: String?
-    let mode: Int?
-    let defaultValue: String?
-    let min: Double?
-    let max: Double?
-    let enumValues: [String]?
-    let enumLabels: [String]?
-
-    enum CodingKeys: String, CodingKey {
-        case key
-        case type
-        case label
-        case fullLabel = "full_label"
-        case category
-        case tooltip
-        case guiFlags = "gui_flags"
-        case mode
-        case defaultValue = "default"
-        case min
-        case max
-        case enumValues = "enum_values"
-        case enumLabels = "enum_labels"
-    }
-}
-
 struct ResolvedConfigRow: Identifiable, Sendable {
     let key: String
     let label: String

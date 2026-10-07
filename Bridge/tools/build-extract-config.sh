@@ -58,7 +58,13 @@ keys = {option["key"] for option in schema}
 for anchor in ("layer_height", "printable_area", "nozzle_diameter"):
     assert anchor in keys, f"missing anchor option: {anchor}"
 assert all("mode" in option and 0 <= option["mode"] <= 3 for option in schema), "mode field missing"
+assert all("sidetext" in option and "multiline" in option for option in schema), "editor fields missing"
 print(f"schema ok: {len(schema)} options")
 EOF
 mv "$SCHEMA.tmp" "$SCHEMA"
 wc -c "$SCHEMA"
+
+# Desktop settings layout (page -> optgroup -> options) from the pinned GUI
+# source, validated against the freshly generated schema.
+echo "==> extracting desktop settings layout" >&2
+python3 "$ROOT/Bridge/tools/extract_settings_layout.py"

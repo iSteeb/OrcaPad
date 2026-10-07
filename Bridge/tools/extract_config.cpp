@@ -38,6 +38,9 @@ int main() {
         j["tooltip"]     = def.tooltip;
         j["gui_flags"]   = def.gui_flags;
         j["mode"]        = int(def.mode);
+        j["sidetext"]    = def.sidetext;
+        j["multiline"]   = def.multiline;
+        j["full_width"]  = def.full_width;
         if (def.default_value)
             j["default"] = def.default_value->serialize();
         else
