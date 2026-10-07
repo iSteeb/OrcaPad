@@ -115,6 +115,62 @@ final class DocumentStore {
         }
     }
 
+    // MARK: Projects (desktop File ▸ Open / Save project)
+
+    /// Last saved project file (shareable).
+    private(set) var lastSavedProject: URL?
+
+    /// Replaces the document and the preset session with a 3MF project.
+    /// Returns whether the engine committed the open (the caller then
+    /// refreshes the preset store from the engine).
+    func openProject(from source: URL, presets: EnginePresets) async -> Bool {
+        guard let plater, !isBusy else {
+            status.report(.document, "open project blocked: document is busy")
+            return false
+        }
+        isMutating = true
+        let displayName = source.lastPathComponent
+        status.report(.document, "\(displayName): opening project…")
+        let result = await BackgroundWork.run(operation: "open project") {
+            let sandboxURL = try EnginePaths.copyImportIntoSandbox(source, kind: "project")
+            return try plater.openProject(path: sandboxURL.path, presets: presets)
+        }
+        isMutating = false
+        switch result {
+        case .success(let opened):
+            selection = nil
+            install(opened.snapshot)
+            frameRequest += 1
+            let settings = opened.configApplied ? "project settings applied" : "geometry only (no settings)"
+            status.report(.document, "\(displayName): \(opened.objectCount) object(s) · \(settings)")
+            return true
+        case .failure(let failure):
+            status.report(.document, failure: failure)
+            return false
+        }
+    }
+
+    func saveProject(named name: String, presets: EnginePresets) async {
+        guard let plater, !isBusy else {
+            status.report(.document, "save project blocked: document is busy")
+            return
+        }
+        isMutating = true
+        let result = await BackgroundWork.run(operation: "save project") {
+            let url = try EnginePaths.projectURL(name: name)
+            try plater.saveProject(path: url.path, presets: presets)
+            return url
+        }
+        isMutating = false
+        switch result {
+        case .success(let url):
+            lastSavedProject = url
+            status.report(.document, "project saved: \(url.lastPathComponent)")
+        case .failure(let failure):
+            status.report(.document, failure: failure)
+        }
+    }
+
     func addInstance(to objectID: ObjectID) async {
         guard let mutation = await applyMutation(
             .addInstance(objectID: objectID),

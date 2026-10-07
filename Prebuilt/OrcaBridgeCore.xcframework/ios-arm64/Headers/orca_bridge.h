@@ -7,7 +7,7 @@ extern "C" {
 #endif
 
 /// Version of the C ABI contract in this header. Callers verify it at runtime.
-#define ORCA_BRIDGE_ABI_VERSION ((uint32_t)10)
+#define ORCA_BRIDGE_ABI_VERSION ((uint32_t)11)
 
 typedef int32_t orca_status_code;
 #define ORCA_STATUS_OK                     ((orca_status_code)0)
@@ -157,6 +157,9 @@ orca_result orca_presets_new(const char *data_dir_path, orca_presets **out);
 void orca_presets_free(orca_presets *presets);
 
 /// kind: 0 = machine (printer), 1 = filament, 2 = process (print).
+/// Listed presets of a kind: every non-default preset (system, user,
+/// project-embedded, external), sorted by name — the stable order shared by
+/// list_name and list_entry. `orca_presets_select` accepts exactly these.
 orca_result orca_presets_list_count(orca_presets *presets, int32_t kind,
                                     int32_t *out_count);
 /// Returned names are caller-owned and independent of later preset calls.
@@ -168,10 +171,16 @@ orca_result orca_presets_list_name(orca_presets *presets, int32_t kind,
 /// `compatible` mirrors the engine's own `is_compatible` flag computed by
 /// `update_compatible` against the currently selected machine (always 1 for
 /// machines themselves).
+#define ORCA_PRESET_ORIGIN_SYSTEM   ((uint8_t)0)
+#define ORCA_PRESET_ORIGIN_USER     ((uint8_t)1) // user / imported bundle
+#define ORCA_PRESET_ORIGIN_PROJECT  ((uint8_t)2) // embedded in a loaded project
+#define ORCA_PRESET_ORIGIN_EXTERNAL ((uint8_t)3) // loaded from a file's config
+
 typedef struct {
     orca_owned_string name;
     orca_owned_string vendor;
     uint8_t          compatible;
+    uint8_t          origin;     // ORCA_PRESET_ORIGIN_*
 } orca_preset_entry;
 
 orca_result orca_presets_list_entry(orca_presets *presets, int32_t kind,
@@ -234,6 +243,34 @@ orca_result orca_presets_reset_kind(orca_presets *presets, int32_t kind);
 orca_result orca_presets_config_dump(orca_presets *presets, int32_t kind,
                                     uint8_t edited,
                                     orca_owned_string *out_json);
+
+/// Desktop "Open project": loads a 3MF project (model + embedded presets +
+/// project settings, `PresetBundle::load_config_model`) and REPLACES the
+/// document (new document id, revision +1) and the preset session
+/// atomically — nothing changes on failure. Object placements are kept
+/// exactly (project semantics). Projects whose plates 2+ hold objects are
+/// rejected with ORCA_STATUS_UNSUPPORTED_CAPABILITY (single plate only).
+#define ORCA_PROJECT_FROM_ORCA   ((uint8_t)0)
+#define ORCA_PROJECT_FROM_BBS    ((uint8_t)1)
+#define ORCA_PROJECT_FROM_PRUSA  ((uint8_t)2)
+#define ORCA_PROJECT_FROM_OTHER  ((uint8_t)3)
+typedef struct {
+    orca_revision revision;
+    uint32_t      object_count;
+    uint32_t      plate_count;     // plates described by the file (0 = none)
+    uint8_t       config_applied;  // project settings adopted into presets
+    uint8_t       source;          // ORCA_PROJECT_FROM_*
+    uint8_t       reserved[6];
+} orca_project_info;
+orca_result orca_project_open(orca_plater *plater, orca_presets *presets,
+                              const char *path, orca_project_info *out_info);
+
+/// Desktop "Save project": writes the document as a single-plate Orca 3MF
+/// (`store_bbs_3mf`) with the session's secure full config
+/// (`full_config_secure`, no print-host credentials) and project-embedded
+/// presets. Saving is not a mutation (revision unchanged).
+orca_result orca_project_save(orca_plater *plater, orca_presets *presets,
+                              const char *path);
 
 /// Parsed G-code for the toolpath preview. Loading runs the full upstream
 /// GCodeProcessor over the file (CPU-heavy: run off the main thread; the

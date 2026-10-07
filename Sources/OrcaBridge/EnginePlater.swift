@@ -248,6 +248,52 @@ public final class EnginePlater: @unchecked Sendable {
         }
     }
 
+    /// Desktop "Open project": replaces the document (new document id) and
+    /// the preset session atomically; returns the new authoritative scene.
+    public func openProject(
+        path: String,
+        presets: EnginePresets
+    ) throws -> ProjectOpenResult {
+        try Self.withLockedHandles(plater: self, presets: presets) { platerHandle, presetHandle in
+            var info = orca_project_info()
+            let result = path.withCString { pointer in
+                orca_project_open(platerHandle, presetHandle, pointer, &info)
+            }
+            try BridgeResult.consume(result, operation: "open project")
+            let scene = try snapshotLocked()
+            guard scene.revision.rawValue == info.revision else {
+                throw BridgeError.local(
+                    .internalInvariant,
+                    operation: "open project",
+                    diagnostic: "Open returned revision \(info.revision), snapshot returned \(scene.revision.rawValue)"
+                )
+            }
+            guard let source = ProjectOpenResult.Source(rawValue: info.source) else {
+                throw BridgeError.local(
+                    .internalInvariant, operation: "open project",
+                    diagnostic: "unknown project source \(info.source)"
+                )
+            }
+            return ProjectOpenResult(
+                snapshot: scene,
+                objectCount: Int(info.object_count),
+                plateCount: Int(info.plate_count),
+                configApplied: info.config_applied != 0,
+                source: source
+            )
+        }
+    }
+
+    /// Desktop "Save project" (single-plate Orca 3MF). Not a mutation.
+    public func saveProject(path: String, presets: EnginePresets) throws {
+        try Self.withLockedHandles(plater: self, presets: presets) { platerHandle, presetHandle in
+            let result = path.withCString { pointer in
+                orca_project_save(platerHandle, presetHandle, pointer)
+            }
+            try BridgeResult.consume(result, operation: "save project")
+        }
+    }
+
     private func snapshotLocked() throws -> SceneSnapshot {
         var rawSnapshot = orca_scene_snapshot()
         try BridgeResult.consume(
@@ -499,6 +545,18 @@ public final class EnginePlater: @unchecked Sendable {
         defer { Unmanaged<ProgressBox>.fromOpaque(context).release() }
         return try body(progressTrampoline, context)
     }
+}
+
+public struct ProjectOpenResult: Sendable {
+    public enum Source: UInt8, Sendable {
+        case orca = 0, bambu = 1, prusa = 2, other = 3
+    }
+    public let snapshot: SceneSnapshot
+    public let objectCount: Int
+    public let plateCount: Int
+    /// Project settings were adopted into the preset session.
+    public let configApplied: Bool
+    public let source: Source
 }
 
 /// Cancellation token for one slice (desktop "Cancel"). `cancel()` is safe

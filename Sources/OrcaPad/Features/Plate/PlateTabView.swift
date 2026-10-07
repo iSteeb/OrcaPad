@@ -10,6 +10,10 @@ import UniformTypeIdentifiers
 struct PlateTabView: View {
     @Environment(AppEnvironment.self) private var environment
     @State private var importPresented = false
+    @State private var importMode: ImportMode = .model
+    @State private var replaceConfirmation: URL?
+    @State private var savePresented = false
+    @State private var projectName = ""
     @State private var objectsPresented = false
     @State private var gizmoMode: GizmoMode = .move
     @State private var rotationAxis: EngineAxis = .z
@@ -79,11 +83,40 @@ struct PlateTabView: View {
         }
         .fileImporter(
             isPresented: $importPresented,
-            allowedContentTypes: ImportTypes.models,
+            allowedContentTypes: importMode == .model ? ImportTypes.models : ImportTypes.projects,
             onCompletion: handleImport
         )
         .sheet(isPresented: $objectsPresented) { objectsList }
+        .confirmationDialog(
+            "Open project?",
+            isPresented: Binding(
+                get: { replaceConfirmation != nil },
+                set: { if !$0 { replaceConfirmation = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            Button("Replace current plate", role: .destructive) {
+                if let url = replaceConfirmation {
+                    Task { await environment.openProject(url) }
+                }
+                replaceConfirmation = nil
+            }
+        } message: {
+            Text("Opening a project replaces the objects on the plate and loads the project's printer, filament and process settings. Unsaved changes are lost.")
+        }
+        .alert("Save project", isPresented: $savePresented) {
+            TextField("Project name", text: $projectName)
+            Button("Save") {
+                let name = projectName
+                Task { await environment.saveProject(named: name) }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Saved as a 3MF project in Files ▸ OrcaPad ▸ Projects (opens in OrcaSlicer and Bambu Studio).")
+        }
     }
+
+    private enum ImportMode { case model, project }
 
     // MARK: Canvas
 
@@ -121,9 +154,44 @@ struct PlateTabView: View {
 
     private var fileActions: some View {
         HStack(spacing: 4) {
-            PlateActionButton(symbol: "plus", label: "Import", disabled: document.isBusy) {
-                importPresented = true
+            Menu {
+                Button {
+                    importMode = .model
+                    importPresented = true
+                } label: {
+                    Label("Import model…", systemImage: "plus.square")
+                }
+                Divider()
+                Button {
+                    importMode = .project
+                    importPresented = true
+                } label: {
+                    Label("Open project…", systemImage: "folder")
+                }
+                Button {
+                    projectName = defaultProjectName
+                    savePresented = true
+                } label: {
+                    Label("Save project…", systemImage: "square.and.arrow.down")
+                }
+                .disabled(document.scene?.objects.isEmpty != false)
+                if let project = document.lastSavedProject {
+                    ShareLink(item: project) {
+                        Label("Share \(project.lastPathComponent)", systemImage: "square.and.arrow.up")
+                    }
+                }
+            } label: {
+                VStack(spacing: 2) {
+                    Image(systemName: "doc.badge.plus")
+                        .font(.system(size: 17, weight: .medium))
+                    Text("File")
+                        .font(.system(size: 9))
+                }
+                .frame(minWidth: 52, minHeight: 40)
+                .contentShape(Rectangle())
             }
+            .foregroundStyle(document.isBusy ? .secondary : .primary)
+            .disabled(document.isBusy)
             PlateActionButton(
                 symbol: "list.bullet",
                 label: "Objects",
@@ -156,7 +224,21 @@ struct PlateTabView: View {
         }
     }
 
+    private var defaultProjectName: String {
+        let first = document.scene?.objects.first?.name ?? ""
+        let base = (first as NSString).deletingPathExtension
+        return base.isEmpty ? "OrcaPad project" : base
+    }
+
     private func handleImport(_ result: Result<URL, any Error>) {
+        if importMode == .project, case .success(let url) = result {
+            if document.scene?.objects.isEmpty == false {
+                replaceConfirmation = url
+            } else {
+                Task { await environment.openProject(url) }
+            }
+            return
+        }
         switch result {
         case .success(let url):
             Task {
@@ -641,6 +723,13 @@ private struct NumericField: View {
 private enum ImportTypes {
     /// Engine `Model::read_from_file` geometry formats compiled into the
     /// closure (STEP/SVG/DRC still need OCCT/draco).
+    static let projects: [UTType] = ["3mf"].map { ext in
+        guard let type = UTType(filenameExtension: ext, conformingTo: .data) else {
+            preconditionFailure("iOS did not provide a content type for .\(ext)")
+        }
+        return type
+    }
+
     static let models: [UTType] = ["stl", "obj", "amf", "3mf"].map { ext in
         guard let type = UTType(filenameExtension: ext, conformingTo: .data) else {
             preconditionFailure("iOS did not provide a content type for .\(ext)")

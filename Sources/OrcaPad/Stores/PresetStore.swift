@@ -304,6 +304,82 @@ final class PresetStore {
         }
     }
 
+    // MARK: Exclusive engine sessions (project open/save)
+
+    /// Runs `body` while preset edits/selection are blocked — for operations
+    /// that read or replace the engine preset session from another store.
+    func withExclusiveSession(_ body: () async -> Void) async {
+        guard isReady, !isSelecting else {
+            status.report(.presets, "preset session busy")
+            return
+        }
+        isSelecting = true
+        await body()
+        isSelecting = false
+    }
+
+    /// Re-reads every listing, the selection, bed, plate type and dumps from
+    /// the engine after an external replacement of the session (project
+    /// open). Only valid inside `withExclusiveSession`.
+    func reloadFromEngine() async {
+        precondition(isSelecting, "reloadFromEngine requires an exclusive preset session")
+        guard let engine else { return }
+        let result = await BackgroundWork.run(operation: "reload presets") {
+            let machines = try engine.entries(kind: .machine).get()
+            let filaments = try engine.entries(kind: .filament).get()
+            let processes = try engine.entries(kind: .process).get()
+            let selection = PresetSelection(
+                machine: try engine.current(kind: .machine).get(),
+                filament: try engine.current(kind: .filament).get(),
+                process: try engine.current(kind: .process).get()
+            )
+            var edited: [PresetKind: [String: String]] = [:]
+            var system: [PresetKind: [String: String]] = [:]
+            for kind in [PresetKind.machine, .filament, .process] {
+                edited[kind] = try engine.configDump(kind: kind, edited: true).get()
+                system[kind] = try engine.configDump(kind: kind, edited: false).get()
+            }
+            return PresetLoadPayload(
+                engine: engine,
+                machines: machines,
+                filaments: filaments,
+                processes: processes,
+                selection: selection,
+                printVolume: try engine.printVolume().get(),
+                bedType: try engine.bedType().get(),
+                editedConfigs: edited,
+                systemConfigs: system,
+                warning: nil
+            )
+        }
+        switch result {
+        case .success(let payload):
+            machines = payload.machines
+            filaments = payload.filaments
+            processes = payload.processes
+            selection = payload.selection
+            printVolume = payload.printVolume
+            bedType = payload.bedType
+            editedConfigs = payload.editedConfigs
+            systemConfigs = payload.systemConfigs
+            // Project/external presets are session-only: persist a selection
+            // only when every preset survives a relaunch.
+            let durable = [
+                (payload.machines, payload.selection.machine),
+                (payload.filaments, payload.selection.filament),
+                (payload.processes, payload.selection.process),
+            ].allSatisfy { entries, name in
+                entries.first { $0.name == name }.map {
+                    $0.origin == .system || $0.origin == .user
+                } ?? false
+            }
+            if durable { persist(payload.selection) }
+            status.report(.presets, "presets: project settings loaded")
+        case .failure(let failure):
+            status.report(.presets, failure: failure)
+        }
+    }
+
     // MARK: Plate type (desktop sidebar "Plate type")
 
     func setBedType(_ value: Int32) async {

@@ -5,6 +5,8 @@ enum EnginePathError: Error, LocalizedError, Sendable {
     case bundledProfilesMissing(String)
     case importCopy(String)
     case gcodeDirectory(String)
+    case projectName(String)
+    case projectDirectory(String)
 
     var errorDescription: String? {
         switch self {
@@ -16,6 +18,10 @@ enum EnginePathError: Error, LocalizedError, Sendable {
             return "import copy: \(diagnostic)"
         case .gcodeDirectory(let diagnostic):
             return "G-code directory: \(diagnostic)"
+        case .projectName(let name):
+            return "invalid project name \"\(name)\""
+        case .projectDirectory(let diagnostic):
+            return "project directory: \(diagnostic)"
         }
     }
 }
@@ -106,6 +112,24 @@ enum EnginePaths {
         } catch {
             throw EnginePathError.importCopy(String(reflecting: error))
         }
+    }
+
+    /// `Documents/Projects/<name>.3mf` (visible in Files ▸ On My iPad).
+    static func projectURL(name: String) throws -> URL {
+        let trimmed = (name as NSString).deletingPathExtension
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, !trimmed.contains("/") else {
+            throw EnginePathError.projectName(name)
+        }
+        let fileManager = FileManager.default
+        let directory = fileManager.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("Projects", isDirectory: true)
+        do {
+            try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+        } catch {
+            throw EnginePathError.projectDirectory(String(reflecting: error))
+        }
+        return directory.appendingPathComponent(trimmed).appendingPathExtension("3mf")
     }
 
     static func gcodeOutputURL(sceneName: String) throws -> URL {

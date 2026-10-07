@@ -272,7 +272,7 @@ static void test_md5_shim() {
 
 static void test_abi_version() {
     CHECK_EQ(orca_bridge_abi_version(), ORCA_BRIDGE_ABI_VERSION);
-    CHECK_EQ(ORCA_BRIDGE_ABI_VERSION, 10);
+    CHECK_EQ(ORCA_BRIDGE_ABI_VERSION, 11);
 }
 
 static void test_document_lifecycle(const std::string &dir) {
@@ -1470,6 +1470,140 @@ static void test_slice_with_presets(const std::string &dir,
     orca_presets_free(presets);
 }
 
+static std::string current_preset(orca_presets *presets, int32_t kind) {
+    orca_owned_string name;
+    GUARD(g, orca_presets_current(presets, kind, &name));
+    expect_ok(g, "current preset");
+    std::string value = name.data ? name.data : "";
+    orca_owned_string_dispose(&name);
+    return value;
+}
+
+static std::string config_dump(orca_presets *presets, int32_t kind, uint8_t edited) {
+    orca_owned_string json;
+    GUARD(g, orca_presets_config_dump(presets, kind, edited, &json));
+    expect_ok(g, "config dump");
+    std::string value = json.data ? json.data : "";
+    orca_owned_string_dispose(&json);
+    return value;
+}
+
+// Desktop Save project → Open project round trip: geometry, instances,
+// transforms, selected presets, overrides and plate type all survive.
+static void test_project_roundtrip(const std::string &dir, const std::string &data_dir) {
+    orca_presets *presets = nullptr;
+    GUARD(gp, orca_presets_new(data_dir.c_str(), &presets));
+    expect_ok(gp, "presets_new");
+    GUARD(gs, orca_presets_select(presets, "Bambu Lab X1 Carbon 0.4 nozzle",
+                                  "Bambu PLA Basic @BBL X1C", "0.20mm Standard @BBL X1C"));
+    expect_ok(gs, "select X1C");
+    GUARD(go, orca_presets_set_value(presets, 2, "layer_height", "0.24"));
+    expect_ok(go, "override layer_height");
+    GUARD(gb, orca_presets_set_bed_type(presets, 4));
+    expect_ok(gb, "textured PEI");
+
+    const std::string cube = write_cube_stl(dir, "orcapad-cube9.stl");
+    orca_plater *plater = nullptr;
+    GUARD(g0, orca_plater_new(&plater));
+    expect_ok(g0, "plater_new");
+    orca_object_id object_id = 0;
+    orca_revision revision = 0;
+    GUARD(g1, import_one(plater, cube.c_str(), 128.0, 128.0, &object_id, &revision));
+    expect_ok(g1, "import cube");
+    orca_instance_id second = 0;
+    GUARD(g2, orca_plater_instance_add(plater, object_id, &second, &revision));
+    expect_ok(g2, "second instance");
+    GUARD(g3, orca_plater_instance_rotate(plater, object_id, second, 2, 0.5235987755982988, &revision));
+    expect_ok(g3, "rotate second");
+
+    const std::string project = dir + "/roundtrip.3mf";
+    GUARD(e1, orca_project_save(nullptr, presets, project.c_str()));
+    expect_code(e1, ORCA_STATUS_INVALID_HANDLE, "save(null plater)");
+    GUARD(e2, orca_project_save(plater, presets, (dir + "/x.stl").c_str()));
+    expect_code(e2, ORCA_STATUS_INVALID_ARGUMENT, "save(non-3mf)");
+    GUARD(g4, orca_project_save(plater, presets, project.c_str()));
+    expect_ok(g4, "save project");
+    CHECK_EQ(snapshot_revision(plater), revision); // saving is not a mutation
+    struct stat status;
+    CHECK(stat(project.c_str(), &status) == 0 && status.st_size > 0);
+
+    orca_scene_snapshot before = take_snapshot(plater);
+
+    // reopen into a FRESH document + session
+    orca_presets *presets2 = nullptr;
+    GUARD(gp2, orca_presets_new(data_dir.c_str(), &presets2));
+    expect_ok(gp2, "presets_new 2");
+    orca_plater *plater2 = nullptr;
+    GUARD(g5, orca_plater_new(&plater2));
+    expect_ok(g5, "plater_new 2");
+    orca_scene_snapshot empty2 = take_snapshot(plater2);
+    const orca_document_id old_document = empty2.document_id;
+    orca_scene_snapshot_dispose(&empty2);
+
+    orca_project_info info;
+    GUARD(e3, orca_project_open(plater2, presets2, (dir + "/missing.3mf").c_str(), &info));
+    expect_code(e3, ORCA_STATUS_IO_FAILURE, "open(missing)");
+    GUARD(e4, orca_project_open(plater2, presets2, cube.c_str(), &info));
+    CHECK(!e4.ok()); // an STL is not a project
+    CHECK_EQ(snapshot_revision(plater2), (orca_revision)0); // untouched on failure
+
+    GUARD(g6, orca_project_open(plater2, presets2, project.c_str(), &info));
+    expect_ok(g6, "open project");
+    CHECK_EQ(info.object_count, 1u);
+    CHECK_EQ(info.plate_count, 1u);
+    CHECK_EQ((int)info.config_applied, 1);
+    CHECK_EQ((int)info.source, (int)ORCA_PROJECT_FROM_ORCA);
+    CHECK_EQ(info.revision, (orca_revision)1);
+
+    orca_scene_snapshot after = take_snapshot(plater2);
+    CHECK(after.document_id != old_document); // open = new document
+    CHECK_EQ(after.object_count, 1);
+    if (after.object_count == 1 && before.object_count == 1) {
+        CHECK_EQ(after.objects[0].instance_count, 2);
+        for (int32_t i = 0; i < after.objects[0].instance_count && i < 2; ++i) {
+            const auto &a = before.objects[0].instances[i].transform;
+            const auto &b = after.objects[0].instances[i].transform;
+            CHECK_NEAR(a.offset_x, b.offset_x, 1e-4);
+            CHECK_NEAR(a.offset_y, b.offset_y, 1e-4);
+            CHECK_NEAR(a.offset_z, b.offset_z, 1e-4);
+            CHECK_NEAR(a.rotation_z, b.rotation_z, 1e-6);
+        }
+        CHECK_EQ(after.objects[0].index_count, before.objects[0].index_count);
+    }
+    orca_scene_snapshot_dispose(&before);
+    orca_scene_snapshot_dispose(&after);
+
+    CHECK(current_preset(presets2, 0) == "Bambu Lab X1 Carbon 0.4 nozzle");
+    CHECK(current_preset(presets2, 2) == "0.20mm Standard @BBL X1C");
+    CHECK(config_dump(presets2, 2, 1).find("\"layer_height\":\"0.24\"") != std::string::npos);
+    CHECK(config_dump(presets2, 2, 0).find("\"layer_height\":\"0.24\"") == std::string::npos);
+    orca_bed_type_state bed{};
+    GUARD(g7, orca_presets_bed_type(presets2, &bed));
+    expect_ok(g7, "bed type after open");
+    CHECK_EQ(bed.current, 4);
+
+    // listed presets report a valid origin; the opened selection is listed
+    int32_t count = 0;
+    GUARD(g8, orca_presets_list_count(presets2, 1, &count));
+    expect_ok(g8, "filament count");
+    bool selected_listed = false;
+    const std::string filament = current_preset(presets2, 1);
+    for (int32_t i = 0; i < count; ++i) {
+        orca_preset_entry entry;
+        GUARD(ge, orca_presets_list_entry(presets2, 1, i, &entry));
+        expect_ok(ge, "entry");
+        CHECK(entry.origin <= ORCA_PRESET_ORIGIN_EXTERNAL);
+        if (entry.name.data && filament == entry.name.data) selected_listed = true;
+        orca_preset_entry_dispose(&entry);
+    }
+    CHECK(selected_listed);
+
+    orca_plater_free(plater2);
+    orca_presets_free(presets2);
+    orca_plater_free(plater);
+    orca_presets_free(presets);
+}
+
 struct CancelOnProgress {
     orca_slice_job *job;
     std::atomic<int> calls{0};
@@ -1693,6 +1827,7 @@ int main() {
     test_slice_with_presets(dir, data_dir);
     test_standalone_slice(dir);
     test_slice_cancel(dir);
+    test_project_roundtrip(dir, data_dir);
     test_gcode_toolpath(dir);
 
     fprintf(stderr, "\n═══ contract tests: %d checks, %d failures ═══\n",

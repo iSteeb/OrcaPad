@@ -26,12 +26,20 @@ struct GroupedPickerList: View {
                 $0.name.localizedCaseInsensitiveContains(search) ||
                     $0.vendor.localizedCaseInsensitiveContains(search)
             }
-        let byVendor = Dictionary(grouping: filtered) { entry in
+        // Desktop preset combos list project and user presets above the
+        // system presets grouped by vendor.
+        let byVendor = Dictionary(grouping: filtered.filter { $0.origin == .system }) { entry in
             entry.vendor.isEmpty ? vendorPlaceholder : entry.vendor
         }
-        return byVendor
+        let vendorGroups = byVendor
             .map { Group(vendor: $0.key, entries: $0.value) }
             .sorted { $0.vendor < $1.vendor }
+        let project = filtered.filter { $0.origin == .project || $0.origin == .external }
+        let user = filtered.filter { $0.origin == .user }
+        var result: [Group] = []
+        if !project.isEmpty { result.append(Group(vendor: "Project presets", entries: project)) }
+        if !user.isEmpty { result.append(Group(vendor: "User presets", entries: user)) }
+        return result + vendorGroups
     }
 
     var body: some View {

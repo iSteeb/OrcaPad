@@ -100,12 +100,12 @@ yet in `Bridge/engine-sources.sh`), **Client-reimpl** (desktop logic lives in
 | Print hosts (OctoPrint, Moonraker, PrusaLink/Connect, Duet, Repetier, MKS, Elegoo, Flashforge, SimplyPrint, …) | `Utils/PrintHost.cpp:58-73`, `PrintConfig.hpp:80` | none found | ❌ | Client-reimpl (these are GUI-side libcurl HTTP; native URLSession) |
 | Bambu cloud/LAN monitor | `Monitor.cpp` | — | ➖ proprietary network plugin | — |
 | OBJ / AMF import | `Plater.cpp` load_files | ABI v10 `orca_plater_import_model` → `Model::read_from_file` | ✅ | — |
-| 3MF project load/save | `Plater.cpp:12102,12234,15551` | real `Format/3mf.cpp` + `bbs_3mf.cpp` now compiled (with `NSVGUtils`, `Emboss`, `ExPolygonsIndex`, nanosvg impl, Boost.Thread); geometry import ✅; project open/save ❌ | 🟡 | Bridge (project open/save) |
+| 3MF project load/save | `Plater.cpp:12102,12234,15551` | ABI v11 `orca_project_open` (model + embedded presets + `load_config_model` + plate type, atomic) / `orca_project_save` (`store_bbs_3mf`, `full_config_secure`); Plate ▸ File menu | ✅ single plate (multi-plate projects rejected loudly; no thumbnails yet) | — |
 | STEP | `Format/STEP.cpp` (OCCT) | stubbed in `format_stubs.cpp:47-58` | ❌ | Closure: OpenCASCADE (heavy) |
 | SVG import | `Format/svg.cpp` (OCCT + nanosvg) | stubbed in `format_stubs.cpp:87` | ❌ | Closure: OCCT |
 | DRC | `Format/DRC.cpp` (draco) | stubbed in `format_stubs.cpp:84` | ❌ | Closure: draco (not vendored) |
 | Export plate STL/OBJ, printable 3MF | `Plater.cpp:15047` | none found | ❌ | Bridge (STL/OBJ store compiled); 3MF blocked as above |
-| Recent projects, auto-backup | `MainFrame.cpp`, `remove_backup` stub | none found | ❌ | Client + 3MF |
+| Recent projects, auto-backup | `MainFrame.cpp`, `bbs_3mf.cpp` backup manager | projects saved to Files ▸ OrcaPad ▸ Projects; no recent list, backup manager compiled but unused | 🟡 | UI |
 | Calibration menu (temp, max flow, PA, flow, retraction, VFA, cornering, input shaping) | `MainFrame.cpp:3328-3478`, `Plater.cpp:12622-13396` | none found | ❌ | Engine `calib.cpp` is compiled, but the models are `.drc` (`Plater.cpp:12634-13359`), so draco is required first |
 | Preferences | `Preferences.hpp:31` | none found | ❌ | UI |
 | Setup wizard (vendor/printer picking) | `ConfigWizard.cpp` | all system printers are listed | 🟡 | UI |
@@ -115,7 +115,7 @@ yet in `Bridge/engine-sources.sh`), **Client-reimpl** (desktop logic lives in
 1. ~~**Bed type (`curr_bed_type`)**~~ ✅ done (ABI v8).
 2. ~~Export / share G-code and open external G-code~~ ✅ done (also fixed: re-slicing to the same path never refreshed Preview; imported objects were named "orcapad-import").
 3. ~~Slice cancel + warnings list~~ ✅ done (ABI v9; slices now run `Print::validate` like desktop — previously OrcaPad exported G-code desktop would refuse).
-4. **3MF load/save**: Closure work with vendored dependencies only. It unlocks projects, multi-plate persistence and Bambu-style files.
+4. ~~3MF load/save~~ ✅ done (ABI v10 import of STL/OBJ/AMF/3MF geometry; ABI v11 single-plate project open/save incl. presets + plate type). Follow-ups: multi-plate, project thumbnails.
 5. **User presets (C5b)** + unsaved-changes prompt + physical printers: Bridge over compiled `Preset.cpp`.
 6. **Arrange / orient / lay-flat**: needs NLopt for Arrange; `Orient.cpp` is a small closure step; lay-flat is client logic on the v7 rotate.
 7. **Print host upload (Moonraker/OctoPrint/PrusaLink)**: native networking, needs the physical-printer model from item 5.

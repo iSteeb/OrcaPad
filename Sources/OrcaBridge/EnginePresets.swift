@@ -8,10 +8,21 @@ public enum PresetKind: Int32, Sendable {
     case process = 2
 }
 
+/// Where a listed preset comes from (desktop preset combo grouping).
+public enum PresetOrigin: UInt8, Sendable {
+    case system = 0
+    case user = 1
+    /// Embedded in a loaded project.
+    case project = 2
+    /// Loaded from a file's configuration.
+    case external = 3
+}
+
 public struct PresetEntry: Sendable {
     public let name: String
     public let vendor: String
     public let isCompatible: Bool
+    public let origin: PresetOrigin
 }
 
 public struct PrintVolume: Equatable, Sendable {
@@ -228,10 +239,18 @@ public final class EnginePresets: @unchecked Sendable {
             case .success(let value): vendor = value
             case .failure(let error): return .failure(error)
             }
+            guard let origin = PresetOrigin(rawValue: entry.origin) else {
+                return .failure(.local(
+                    .internalInvariant,
+                    operation: operation,
+                    diagnostic: "\(operation): unknown preset origin \(entry.origin)"
+                ))
+            }
             result.append(PresetEntry(
                 name: name,
                 vendor: vendor,
-                isCompatible: entry.compatible != 0
+                isCompatible: entry.compatible != 0,
+                origin: origin
             ))
         }
         return .success(result)

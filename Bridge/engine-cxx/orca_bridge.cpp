@@ -249,22 +249,14 @@ static bool orcapad_valid_preset_kind(int32_t kind) {
     return kind >= 0 && kind <= 2;
 }
 
-static std::vector<std::string> orcapad_system_preset_names(
-    const Slic3r::PresetCollection &collection) {
-    std::vector<std::string> names;
-    for (const Slic3r::Preset &preset : collection)
-        if (preset.is_system) names.push_back(preset.name);
-    std::sort(names.begin(), names.end());
-    return names;
-}
-
-/// System presets sorted by name — the canonical stable order shared by
+/// Listed presets: every non-default preset (system, user, project-embedded,
+/// external), sorted by name — the canonical stable order shared by
 /// orca_presets_list_name and orca_presets_list_entry.
-static std::vector<const Slic3r::Preset *> orcapad_system_presets(
+static std::vector<const Slic3r::Preset *> orcapad_listed_presets(
     const Slic3r::PresetCollection &collection) {
     std::vector<const Slic3r::Preset *> presets;
     for (const Slic3r::Preset &preset : collection)
-        if (preset.is_system) presets.push_back(&preset);
+        if (!preset.is_default) presets.push_back(&preset);
     std::sort(presets.begin(), presets.end(),
               [](const Slic3r::Preset *a, const Slic3r::Preset *b) {
                   return a->name < b->name;
@@ -272,10 +264,17 @@ static std::vector<const Slic3r::Preset *> orcapad_system_presets(
     return presets;
 }
 
-static bool orcapad_has_exact_system_preset(
+static uint8_t orcapad_preset_origin(const Slic3r::Preset &preset) {
+    if (preset.is_system) return ORCA_PRESET_ORIGIN_SYSTEM;
+    if (preset.is_project_embedded) return ORCA_PRESET_ORIGIN_PROJECT;
+    if (preset.is_external) return ORCA_PRESET_ORIGIN_EXTERNAL;
+    return ORCA_PRESET_ORIGIN_USER;
+}
+
+static bool orcapad_has_listed_preset(
     Slic3r::PresetCollection &collection, const char *name) {
     const Slic3r::Preset *preset = collection.find_preset(name, false, true);
-    return preset && preset->is_system && preset->name == name;
+    return preset && !preset->is_default && preset->name == name;
 }
 
 // --- plate (bed) type: desktop Sidebar::update_presets / reset_bed_type_combox_choices
@@ -379,7 +378,7 @@ orca_result orca_presets_list_count(orca_presets *presets, int32_t kind,
 
     return orcapad_guard(operation, [&]() -> orca_result {
         const size_t count =
-            orcapad_system_preset_names(presets->collection(kind)).size();
+            orcapad_listed_presets(presets->collection(kind)).size();
         if (count > static_cast<size_t>(std::numeric_limits<int32_t>::max()))
             return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
                                 "preset count exceeds ABI range");
@@ -403,12 +402,12 @@ orca_result orca_presets_list_name(orca_presets *presets, int32_t kind,
                             "preset kind is invalid");
 
     return orcapad_guard(operation, [&]() -> orca_result {
-        const auto names =
-            orcapad_system_preset_names(presets->collection(kind));
-        if (index < 0 || static_cast<size_t>(index) >= names.size())
+        const auto listed =
+            orcapad_listed_presets(presets->collection(kind));
+        if (index < 0 || static_cast<size_t>(index) >= listed.size())
             return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation,
                                 "preset index was not found");
-        if (!orcapad_copy_string(names[static_cast<size_t>(index)].c_str(), out_name))
+        if (!orcapad_copy_string(listed[static_cast<size_t>(index)]->name.c_str(), out_name))
             return orcapad_fail(ORCA_STATUS_OUT_OF_MEMORY, operation,
                                 "could not allocate preset name");
         return orcapad_ok();
@@ -427,15 +426,15 @@ orca_result orca_presets_select(orca_presets *presets, const char *machine,
                             "preset name is empty");
 
     return orcapad_guard(operation, [&]() -> orca_result {
-        if (!orcapad_has_exact_system_preset(
+        if (!orcapad_has_listed_preset(
                 presets->bundle->printers, machine))
             return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation,
                                 "machine preset was not found");
-        if (!orcapad_has_exact_system_preset(
+        if (!orcapad_has_listed_preset(
                 presets->bundle->filaments, filament))
             return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation,
                                 "filament preset was not found");
-        if (!orcapad_has_exact_system_preset(
+        if (!orcapad_has_listed_preset(
                 presets->bundle->prints, process))
             return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation,
                                 "process preset was not found");
@@ -493,6 +492,7 @@ void orca_preset_entry_dispose(orca_preset_entry *entry) {
     orca_owned_string_dispose(&entry->name);
     orca_owned_string_dispose(&entry->vendor);
     entry->compatible = 0;
+    entry->origin = 0;
 }
 
 orca_result orca_presets_list_entry(orca_presets *presets, int32_t kind,
@@ -515,20 +515,17 @@ orca_result orca_presets_list_entry(orca_presets *presets, int32_t kind,
                             "preset kind is invalid");
 
     return orcapad_guard(operation, [&]() -> orca_result {
-        const auto list = orcapad_system_presets(presets->collection(kind));
+        const auto list = orcapad_listed_presets(presets->collection(kind));
         if (index < 0 || static_cast<size_t>(index) >= list.size())
             return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation,
                                 "preset index was not found");
         const Slic3r::Preset &preset = *list[static_cast<size_t>(index)];
 
         // Vendor: walk parents via the collection so inherited profiles
-        // (e.g. variant presets) still report their manufacturer.
-        const Slic3r::VendorProfile *vendor = nullptr;
-        if (preset.is_system) {
-            const auto with_vendor = presets->collection(kind)
-                .get_preset_with_vendor_profile(preset);
-            vendor = with_vendor.vendor;
-        }
+        // (variants, user/project presets inheriting a system preset) still
+        // report their manufacturer.
+        const Slic3r::VendorProfile *vendor = presets->collection(kind)
+            .get_preset_with_vendor_profile(preset).vendor;
         const std::string &vendor_name =
             vendor && !vendor->name.empty() ? vendor->name
                                             : (vendor ? vendor->id : "");
@@ -543,6 +540,7 @@ orca_result orca_presets_list_entry(orca_presets *presets, int32_t kind,
                                 "could not allocate preset entry");
         }
         entry.compatible = preset.is_compatible ? 1 : 0;
+        entry.origin = orcapad_preset_origin(preset);
         *out_entry = entry;
         return orcapad_ok();
     });
@@ -1902,5 +1900,162 @@ orca_result orca_plater_slice_to_gcode_with_presets(
         print.is_BBL_printer() = presets->bundle->is_bbl_vendor();
         return orcapad_run_print(operation, print, gcode_path, progress, ctx,
                                  job, out_report);
+    });
+}
+
+// --- projects (3MF) -------------------------------------------------------
+
+#include "libslic3r/Format/bbs_3mf.hpp"
+
+namespace {
+/// Owns the heap objects load_bbs_3mf hands back (desktop deletes them the
+/// same way after loading — Plater.cpp:6263, release_PlateData_list).
+struct OrcapadProjectLoadScratch {
+    Slic3r::PlateDataPtrs plates;
+    std::vector<Slic3r::Preset *> presets;
+    ~OrcapadProjectLoadScratch() {
+        Slic3r::release_PlateData_list(plates);
+        for (Slic3r::Preset *preset : presets) delete preset;
+    }
+};
+} // namespace
+
+orca_result orca_project_open(orca_plater *plater, orca_presets *presets,
+                              const char *path, orca_project_info *out_info) {
+    constexpr const char *operation = "orca_project_open";
+    if (out_info) *out_info = orca_project_info{};
+    if (!plater)
+        return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation, "plater handle is null");
+    if (!presets)
+        return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation, "presets handle is null");
+    if (!path || !path[0] || !out_info)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "path is empty or output pointer is null");
+    struct stat path_status;
+    if (stat(path, &path_status) != 0)
+        return orcapad_fail(ORCA_STATUS_IO_FAILURE, operation, "project file is not accessible");
+
+    return orcapad_guard(operation, [&]() -> orca_result {
+        if (!orcapad_revision_available(*plater))
+            return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
+                                "document revision is exhausted");
+        // 1) load into temporaries (desktop Plater::priv::load_files, project)
+        Slic3r::DynamicPrintConfig config;
+        Slic3r::ConfigSubstitutionContext substitutions(
+            Slic3r::ForwardCompatibilitySubstitutionRule::Enable);
+        Slic3r::En3mfType file_type = Slic3r::En3mfType::From_Other;
+        Slic3r::Semver file_version;
+        OrcapadProjectLoadScratch scratch;
+        Slic3r::Model loaded = Slic3r::Model::read_from_archive(
+            path, &config, &substitutions, file_type,
+            Slic3r::LoadStrategy::LoadModel | Slic3r::LoadStrategy::LoadConfig |
+                Slic3r::LoadStrategy::AddDefaultInstances,
+            &scratch.plates, &scratch.presets, &file_version);
+        if (loaded.objects.empty())
+            return orcapad_fail(ORCA_STATUS_INVALID_MODEL, operation,
+                                "project contains no model object");
+        for (size_t plate = 1; plate < scratch.plates.size(); ++plate)
+            if (scratch.plates[plate] && !scratch.plates[plate]->objects_and_instances.empty())
+                return orcapad_fail(ORCA_STATUS_UNSUPPORTED_CAPABILITY, operation,
+                                    "multi-plate projects are not supported yet "
+                                    "(objects on plates beyond the first)");
+
+        // 2) adopt presets + project settings into a candidate session
+        auto candidate = std::make_unique<Slic3r::PresetBundle>(*presets->bundle);
+        if (!scratch.presets.empty())
+            candidate->load_project_embedded_presets(
+                scratch.presets, Slic3r::ForwardCompatibilitySubstitutionRule::Enable);
+        const bool has_config = !config.empty() && config.has("filament_colour");
+        if (has_config)
+            candidate->load_config_model(path, std::move(config), file_version);
+
+        // 3) identity bookkeeping for the new document
+        std::unordered_map<orca_object_id, uint64_t> revisions;
+        for (const Slic3r::ModelObject *object : loaded.objects) {
+            const orca_object_id id = static_cast<orca_object_id>(object->id().id);
+            if (id == 0 || !revisions.emplace(id, 1).second)
+                return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
+                                    "project object has an invalid or duplicate ID");
+        }
+        const uint32_t object_count = static_cast<uint32_t>(loaded.objects.size());
+
+        // 4) commit (no-throw): new document + session swap atomically
+        plater->model = std::move(loaded);
+        plater->mesh_revisions.swap(revisions);
+        ++plater->revision;
+        presets->bundle.swap(candidate);
+
+        orca_project_info info{};
+        info.revision = plater->revision;
+        info.object_count = object_count;
+        info.plate_count = static_cast<uint32_t>(scratch.plates.size());
+        info.config_applied = has_config ? 1 : 0;
+        switch (file_type) {
+        case Slic3r::En3mfType::From_Orca: info.source = ORCA_PROJECT_FROM_ORCA; break;
+        case Slic3r::En3mfType::From_BBS: info.source = ORCA_PROJECT_FROM_BBS; break;
+        case Slic3r::En3mfType::From_Prusa: info.source = ORCA_PROJECT_FROM_PRUSA; break;
+        case Slic3r::En3mfType::From_Other: info.source = ORCA_PROJECT_FROM_OTHER; break;
+        }
+        *out_info = info;
+        return orcapad_ok();
+    });
+}
+
+orca_result orca_project_save(orca_plater *plater, orca_presets *presets,
+                              const char *path) {
+    constexpr const char *operation = "orca_project_save";
+    if (!plater)
+        return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation, "plater handle is null");
+    if (!presets)
+        return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation, "presets handle is null");
+    if (!path || !path[0])
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation, "path is empty");
+    const std::string target(path);
+    if (target.size() < 4 || target.compare(target.size() - 4, 4, ".3mf") != 0)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "project path must end in .3mf");
+    if (plater->model.objects.empty())
+        return orcapad_fail(ORCA_STATUS_INVALID_MODEL, operation,
+                            "document contains no model object");
+
+    return orcapad_guard(operation, [&]() -> orca_result {
+        Slic3r::PresetBundle &bundle = *presets->bundle;
+        // desktop Plater::export_3mf: secure full config, embedded presets,
+        // one plate (PartPlateList::store_to_3mf_structure, plate_index 0)
+        Slic3r::DynamicPrintConfig config = bundle.full_config_secure();
+        struct EmbeddedPresets {
+            std::vector<Slic3r::Preset *> list;
+            ~EmbeddedPresets() { for (Slic3r::Preset *p : list) delete p; }
+        } embedded{bundle.get_current_project_embedded_presets()};
+
+        Slic3r::PlateDataPtrs plates;
+        struct PlateGuard {
+            Slic3r::PlateDataPtrs &plates;
+            ~PlateGuard() { Slic3r::release_PlateData_list(plates); }
+        } plate_guard{plates};
+        auto *plate = new Slic3r::PlateData();
+        plates.push_back(plate);
+        plate->plate_index = 0;
+        plate->locked = false;
+        for (size_t object = 0; object < plater->model.objects.size(); ++object)
+            for (size_t instance = 0;
+                 instance < plater->model.objects[object]->instances.size(); ++instance)
+                plate->objects_and_instances.emplace_back(int(object), int(instance));
+        plate->printer_model_id =
+            bundle.printers.get_edited_preset().get_printer_type(&bundle);
+        if (const auto *nozzles = config.option<Slic3r::ConfigOptionFloats>("nozzle_diameter"))
+            plate->nozzle_diameters = nozzles->serialize();
+
+        Slic3r::StoreParams params;
+        params.path = target.c_str();
+        params.model = &plater->model;
+        params.plate_data_list = plates;
+        params.project_presets = embedded.list;
+        params.config = &config;
+        params.strategy = Slic3r::SaveStrategy::Zip64;
+        if (!Slic3r::store_bbs_3mf(params))
+            return orcapad_fail(ORCA_STATUS_IO_FAILURE, operation,
+                                "engine failed to write the project file");
+        return orcapad_ok();
     });
 }
