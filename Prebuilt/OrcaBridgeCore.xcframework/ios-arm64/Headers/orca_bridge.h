@@ -7,7 +7,7 @@ extern "C" {
 #endif
 
 /// Version of the C ABI contract in this header. Callers verify it at runtime.
-#define ORCA_BRIDGE_ABI_VERSION ((uint32_t)12)
+#define ORCA_BRIDGE_ABI_VERSION ((uint32_t)13)
 
 typedef int32_t orca_status_code;
 #define ORCA_STATUS_OK                     ((orca_status_code)0)
@@ -281,6 +281,37 @@ typedef struct {
 } orca_project_info;
 orca_result orca_project_open(orca_plater *plater, orca_presets *presets,
                               const char *path, orca_project_info *out_info);
+
+/// Desktop "Auto orient" (OrientJob): orients the selected instance, or
+/// every instance when object_id == 0, using the engine's orienter
+/// (min-area mode by default) with `support_threshold_angle` from the
+/// current preset full config (`presets` may be null for engine defaults).
+/// One mutation: revision +1.
+orca_result orca_plater_orient(orca_plater *plater, orca_presets *presets,
+                               orca_object_id object_id,
+                               orca_instance_id instance_id,
+                               orca_revision *out_revision);
+
+/// Desktop "Lay flat" (Flatten gizmo): rotates the instance so the given
+/// face normal (ENGINE z-up world space, from a tapped facet) points down,
+/// then rests the object on the bed. Unlike the desktop gizmo there is no
+/// convex-hull plane highlighting — the caller passes any facet normal.
+/// One mutation: revision +1.
+orca_result orca_plater_instance_lay_flat(orca_plater *plater,
+                                          orca_object_id object_id,
+                                          orca_instance_id instance_id,
+                                          double nx, double ny, double nz,
+                                          orca_revision *out_revision);
+
+/// Desktop "Arrange" (ArrangeJob/CLI flow: update_arrange_params →
+/// inflation → get_shrink_bedpts → arrangement::arrange → apply). Arranges
+/// EVERY instance. Items that do not fit the bed are placed on the next
+/// virtual bed (shifted beside the printable area) and counted in
+/// out_unprintable — desktop shows them on extra plates. One mutation.
+orca_result orca_plater_arrange(orca_plater *plater, orca_presets *presets,
+                                uint8_t allow_rotations,
+                                uint32_t *out_unprintable,
+                                orca_revision *out_revision);
 
 /// Desktop "Save project": writes the document as a single-plate Orca 3MF
 /// (`store_bbs_3mf`) with the session's secure full config

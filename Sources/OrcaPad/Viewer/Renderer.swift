@@ -10,6 +10,9 @@ enum GizmoMode: String, CaseIterable, Sendable {
     case move
     case rotate
     case scale
+    /// Desktop Flatten gizmo (subset): tapping the object lays it on the
+    /// tapped face.
+    case layFlat
 }
 
 /// One immutable instance draw derived from a revisioned scene snapshot.
@@ -400,24 +403,56 @@ final class Renderer: NSObject, MTKViewDelegate {
         at point: CGPoint,
         in view: MTKView
     ) -> (objectID: ObjectID, instanceID: InstanceID)? {
+        pick(at: point, in: view).map { ($0.pick.objectID, $0.pick.instanceID) }
+    }
+
+    /// Full pick: nearest instance under the screen point plus the ENGINE-frame
+    /// (z-up) world-space normal of the hit facet (for lay-flat).
+    struct FacePick {
+        let objectID: ObjectID
+        let instanceID: InstanceID
+        let engineNormal: SIMD3<Double>
+    }
+
+    func pickFace(at point: CGPoint, in view: MTKView) -> FacePick? {
+        pick(at: point, in: view)?.pick
+    }
+
+    private func pick(
+        at point: CGPoint,
+        in view: MTKView
+    ) -> (pick: FacePick, t: Float)? {
         let ray = screenRay(at: point, in: view)
-        var best: (objectID: ObjectID, instanceID: InstanceID, t: Float)?
+        var best: (pick: FacePick, t: Float)?
         for obj in objects {
             for inst in obj.instances {
-                guard let tHit = rayCastObject(ray, object: obj, model: inst.model) else { continue }
-                if best == nil || tHit < best!.t {
-                    best = (obj.objectID, inst.instanceID, tHit)
+                guard let hit = rayCastObject(ray, object: obj, model: inst.model) else { continue }
+                if best == nil || hit.t < best!.t {
+                    // object-space normal → viewer world → engine z-up
+                    let columns = inst.model.columns
+                    let world = hit.normal.x * SIMD3(columns.0.x, columns.0.y, columns.0.z)
+                        + hit.normal.y * SIMD3(columns.1.x, columns.1.y, columns.1.z)
+                        + hit.normal.z * SIMD3(columns.2.x, columns.2.y, columns.2.z)
+                    let engine = CoordinateMapper.viewerToEngine * SIMD4<Float>(world, 0)
+                    best = (FacePick(
+                        objectID: obj.objectID,
+                        instanceID: inst.instanceID,
+                        engineNormal: simd_normalize(SIMD3<Double>(
+                            Double(engine.x), Double(engine.y), Double(engine.z)
+                        ))
+                    ), hit.t)
                 }
             }
         }
-        guard let b = best else { return nil }
-        return (b.objectID, b.instanceID)
+        return best
     }
 
     /// Ray vs one instance: world-space AABB pre-test, then exact test in
     /// object space (ray transformed by the inverse model matrix).
+    /// Returns (distance, object-space face normal of the hit facet).
     private func rayCastObject(_ ray: (origin: SIMD3<Float>, dir: SIMD3<Float>),
-                               object: RenderObject, model: simd_float4x4) -> Float? {
+                               object: RenderObject, model: simd_float4x4)
+        -> (t: Float, normal: SIMD3<Float>)? {
         // AABB in world space (transform 8 corners of the packed bbox).
         var bbMin = SIMD3<Float>(repeating: .infinity)
         var bbMax = SIMD3<Float>(repeating: -.infinity)
@@ -450,6 +485,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         let p = object.pickPositions
         let idx = object.pickIndices
         var bestT: Float? = nil
+        var bestNormal = SIMD3<Float>.zero
         var t = 0, i0 = 0, i1 = 0, i2 = 0
         let triCount = idx.count / 3
         let e = Float.ulpOfOne
@@ -470,13 +506,15 @@ final class Renderer: NSObject, MTKViewDelegate {
                         let dist = simd_dot(ac, qvec) * invDet
                         if dist > 0.01 && (bestT == nil || dist < bestT!) {
                             bestT = dist
+                            bestNormal = simd_normalize(simd_cross(b - a, c - a))
                         }
                     }
                 }
             }
             t += 1
         }
-        return bestT
+        guard let t = bestT else { return nil }
+        return (t, bestNormal)
     }
 
     // MARK: MTKViewDelegate (invoked on the main thread)
@@ -557,6 +595,9 @@ final class Renderer: NSObject, MTKViewDelegate {
         var vertices: [VertexPC] = []
         let accent = SIMD4<Float>(0.16, 0.80, 0.95, 1)
         switch gizmoMode {
+        case .layFlat:
+            // no on-canvas gizmo: the interaction is tapping a facet
+            break
         case .move:
             // Engine +X → viewer +X (red); engine +Y → viewer -Z (green),
             // drawn on the bed plane under the object.

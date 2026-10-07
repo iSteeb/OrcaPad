@@ -19,9 +19,9 @@ yet in `Bridge/engine-sources.sh`), **Client-reimpl** (desktop logic lives in
 | Rotate panel (relative X/Y/Z input, reset) | `GizmoObjectManipulation.cpp:890,966,558` | `PlateTabView.swift:382` axis picker + glyph, ±15°, reset | 🟡 no free-angle relative entry | UI |
 | Scale gizmo (per-axis handles) | `GLGizmoScale.cpp` | on-canvas handles are uniform only | 🟡 | UI |
 | Scale panel (per-axis %, size, uniform lock) | `GizmoObjectManipulation.cpp:1095,1190-1276` | `PlateTabView.swift:494` | ✅ local axes only | — |
-| Arrange | `GLCanvas3D.cpp:6788`, `Plater.cpp:17077` | none found | ❌ | Closure: `Arrange.cpp` needs libnest2d (vendored) + **NLopt** (not vendored) |
-| Auto-orient | `GLCanvas3D.cpp:6766`, `Plater.cpp:10912` | none found | ❌ | Closure: `Orient.cpp` only needs the existing tbb shim |
-| Lay on face (Flatten) | `GLGizmosManager.cpp:209` | `PlateTabView.swift:257` placeholder | ❌ | Client-reimpl: plane search lives in the GUI gizmo; convex hull is compiled; v7 rotate can apply the result |
+| Arrange | `GLCanvas3D.cpp:6788`, `Plater.cpp:17077` | ABI v13 `orca_plater_arrange` — real libnest2d + NLopt 2.5.0 (Orca's pin) in the closure; ArrangeJob/CLI param flow; overflow → virtual beds beside the plate; Arrange button | ✅ single plate (multi-plate overflow is shifted aside, not plated) | — |
+| Auto-orient | `GLCanvas3D.cpp:6766`, `Plater.cpp:10912` | ABI v13 `orca_plater_orient` (engine `Orient.cpp`, min-area default, preset overhang angle); Orient button | ✅ | — |
+| Lay on face (Flatten) | `GLGizmosManager.cpp:209` | ABI v13 `orca_plater_instance_lay_flat` + facet-pick tap (`Renderer.pickFace`) in the Lay flat tool | 🟡 taps any facet; no convex-hull plane highlighting | Bridge (hull plane grouping) |
 | Split to objects / parts | `GLCanvas3D.cpp:6836,6848`, `Plater.cpp:17251` | none found | ❌ | Bridge (`ModelObject::split` is compiled) |
 | Mirror | `Plater.cpp:7605` | snapshot rejects left-handed instances | ❌ | Bridge + renderer (winding flip) |
 | Cut | `GLGizmosManager.cpp:210` | none found | ❌ | Closure: `CutUtils.cpp` (no exotic dependencies) |

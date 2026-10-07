@@ -29,6 +29,8 @@ struct CanvasManipulation {
     let onRotate: (Double) -> Void
     /// Total uniform scale factor since gesture start.
     let onScale: (Double) -> Void
+    /// Lay flat: engine-frame normal of the tapped facet.
+    let onLayFlat: (SIMD3<Double>) -> Void
     let onEnd: () -> Void
 }
 
@@ -162,7 +164,12 @@ struct MetalCanvas: UIViewRepresentable {
         @objc private func onTap(_ gesture: UITapGestureRecognizer) {
             guard let view = gesture.view as? MTKView, let renderer else { return }
             let location = gesture.location(in: view)
-            if let hit = renderer.pickInstance(at: location, in: view) {
+            if renderer.gizmoMode == .layFlat,
+               let face = renderer.pickFace(at: location, in: view) {
+                // Lay flat: the tapped facet decides the resting face.
+                manipulation?.onSelect(face.objectID, face.instanceID)
+                manipulation?.onLayFlat(face.engineNormal)
+            } else if let hit = renderer.pickInstance(at: location, in: view) {
                 manipulation?.onSelect(hit.objectID, hit.instanceID)
             } else {
                 manipulation?.onSelect(nil, nil)
@@ -252,6 +259,9 @@ struct MetalCanvas: UIViewRepresentable {
                 manipulation?.onSelect(hit.objectID, hit.instanceID)
             }
             switch mode {
+            case .layFlat:
+                // tap-only interaction; drags orbit the camera
+                return .orbit
             case .move:
                 guard let bed = renderer.bedPlaneHit(at: location, in: view) else { return .orbit }
                 return .move(bedOrigin: bed)

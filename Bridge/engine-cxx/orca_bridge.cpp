@@ -2171,3 +2171,239 @@ orca_result orca_project_save(orca_plater *plater, orca_presets *presets,
         return orcapad_ok();
     });
 }
+
+// --- orient / arrange -------------------------------------------------------
+
+#include "libslic3r/Orient.hpp"
+#include "libslic3r/Arrange.hpp"
+#include "libslic3r/ModelArrange.hpp"
+
+static Slic3r::DynamicPrintConfig orcapad_arrange_config(orca_presets *presets) {
+    if (presets) return presets->bundle->full_config();
+    Slic3r::DynamicPrintConfig config =
+        Slic3r::DynamicPrintConfig::full_print_config();
+    orcapad_config_overlays(config);
+    return config;
+}
+
+/// Selected instance, or every instance when both ids are 0.
+static orca_result orcapad_target_instances(
+    orca_plater *plater, orca_object_id object_id, orca_instance_id instance_id,
+    const char *operation, std::vector<Slic3r::ModelInstance *> *out) {
+    if (object_id == 0 && instance_id == 0) {
+        for (Slic3r::ModelObject *object : plater->model.objects)
+            for (Slic3r::ModelInstance *instance : object->instances)
+                out->push_back(instance);
+        return orcapad_ok();
+    }
+    Slic3r::ModelObject *object = plater_obj(plater, object_id);
+    if (!object)
+        return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation,
+                            "object was not found");
+    Slic3r::ModelInstance *instance = plater_instance(object, instance_id);
+    if (!instance)
+        return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation,
+                            "instance was not found");
+    out->push_back(instance);
+    return orcapad_ok();
+}
+
+orca_result orca_plater_orient(orca_plater *plater, orca_presets *presets,
+                               orca_object_id object_id,
+                               orca_instance_id instance_id,
+                               orca_revision *out_revision) {
+    constexpr const char *operation = "orca_plater_orient";
+    if (out_revision) *out_revision = 0;
+    if (!plater)
+        return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation, "plater handle is null");
+    if (!plater->model.objects.empty() && object_id == 0 && instance_id != 0)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "instance id requires an object id");
+
+    return orcapad_guard(operation, [&]() -> orca_result {
+        if (plater->model.objects.empty())
+            return orcapad_fail(ORCA_STATUS_INVALID_MODEL, operation,
+                                "document contains no model object");
+        if (!orcapad_revision_available(*plater))
+            return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
+                                "document revision is exhausted");
+        std::vector<Slic3r::ModelInstance *> targets;
+        const orca_result found = orcapad_target_instances(
+            plater, object_id, instance_id, operation, &targets);
+        if (found.code != ORCA_STATUS_OK) return found;
+        if (targets.empty())
+            return orcapad_fail(ORCA_STATUS_INVALID_MODEL, operation,
+                                "no instance to orient");
+
+        const Slic3r::DynamicPrintConfig config = orcapad_arrange_config(presets);
+        const int overhang = config.has("support_threshold_angle")
+                                 ? config.opt_int("support_threshold_angle")
+                                 : 60;
+
+        // desktop OrientJob::get_orient_mesh (min_area default on)
+        Slic3r::orientation::OrientMeshs selected, unselected;
+        for (Slic3r::ModelInstance *instance : targets) {
+            Slic3r::ModelObject *obj = instance->get_object();
+            Slic3r::orientation::OrientMesh om;
+            om.name = obj->name;
+            om.mesh = obj->mesh();
+            om.overhang_angle = overhang;
+            om.setter = [instance](const Slic3r::orientation::OrientMesh &p) {
+                instance->rotate(p.rotation_matrix);
+                instance->get_object()->invalidate_bounding_box();
+                instance->get_object()->ensure_on_bed();
+            };
+            selected.emplace_back(std::move(om));
+        }
+        Slic3r::orientation::OrientParams params;
+        Slic3r::orientation::OrientParamsArea params_area;
+        memcpy(&params, &params_area, sizeof(params));
+        params.min_volume = false;
+        // OrientJob.cpp does the same: the area params carry EMPTY
+        // std::function members, so both callbacks must be set after memcpy
+        // (a null progressind would throw bad_function_call inside _orient).
+        params.progressind = [](unsigned, std::string) {};
+        params.stopcondition = []() { return false; };
+        Slic3r::orientation::orient(selected, unselected, params);
+        for (Slic3r::orientation::OrientMesh &mesh : selected) mesh.apply();
+
+        ++plater->revision;
+        *out_revision = plater->revision;
+        return orcapad_ok();
+    });
+}
+
+orca_result orca_plater_instance_lay_flat(orca_plater *plater,
+                                          orca_object_id object_id,
+                                          orca_instance_id instance_id,
+                                          double nx, double ny, double nz,
+                                          orca_revision *out_revision) {
+    constexpr const char *operation = "orca_plater_instance_lay_flat";
+    if (out_revision) *out_revision = 0;
+    if (!plater)
+        return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation, "plater handle is null");
+    if (!std::isfinite(nx) || !std::isfinite(ny) || !std::isfinite(nz))
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "face normal contains a non-finite value");
+    const Slic3r::Vec3d normal(nx, ny, nz);
+    if (normal.squaredNorm() < 1e-12)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "face normal is degenerate");
+    normal.normalized();
+
+    return orcapad_guard(operation, [&]() -> orca_result {
+        if (!orcapad_revision_available(*plater))
+            return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
+                                "document revision is exhausted");
+        Slic3r::ModelObject *object = plater_obj(plater, object_id);
+        if (!object)
+            return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation, "object was not found");
+        Slic3r::ModelInstance *instance = plater_instance(object, instance_id);
+        if (!instance)
+            return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation, "instance was not found");
+
+        // desktop GLGizmoFlatten: rotate the chosen face normal to point
+        // down; the object then rests on that face.
+        Slic3r::Vec3d axis;
+        double angle = 0.0;
+        Slic3r::Matrix3d rotation = Slic3r::Matrix3d::Identity();
+        Slic3r::Geometry::rotation_from_two_vectors(normal.normalized(),
+                                                    -Slic3r::Vec3d::UnitZ(),
+                                                    axis, angle, &rotation);
+        // ModelInstance::rotate takes a matrix (like the orient setter)
+        if (std::abs(angle) > 1e-9) instance->rotate(rotation);
+        object->invalidate_bounding_box();
+        object->ensure_on_bed();
+
+        ++plater->revision;
+        *out_revision = plater->revision;
+        return orcapad_ok();
+    });
+}
+
+orca_result orca_plater_arrange(orca_plater *plater, orca_presets *presets,
+                                uint8_t allow_rotations,
+                                uint32_t *out_unprintable,
+                                orca_revision *out_revision) {
+    constexpr const char *operation = "orca_plater_arrange";
+    if (out_unprintable) *out_unprintable = 0;
+    if (out_revision) *out_revision = 0;
+    if (!plater)
+        return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation, "plater handle is null");
+    if (!out_unprintable || !out_revision)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "output pointer is null");
+
+    return orcapad_guard(operation, [&]() -> orca_result {
+        if (plater->model.objects.empty())
+            return orcapad_fail(ORCA_STATUS_INVALID_MODEL, operation,
+                                "document contains no model object");
+        if (!orcapad_revision_available(*plater))
+            return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
+                                "document revision is exhausted");
+
+        const Slic3r::DynamicPrintConfig config = orcapad_arrange_config(presets);
+        // desktop ArrangeJob::prepare: every printable instance is selected
+        Slic3r::ModelInstancePtrs instances;
+        Slic3r::arrangement::ArrangePolygons input =
+            Slic3r::get_arrange_polys(plater->model, instances);
+        if (input.empty())
+            return orcapad_fail(ORCA_STATUS_INVALID_MODEL, operation,
+                                "no arrangeable instance");
+
+        Slic3r::arrangement::ArrangeParams params;
+        params.allow_rotations = allow_rotations != 0;
+        params.printable_height = config.opt_float("printable_height");
+        params.clearance_height_to_rod =
+            config.opt_float("extruder_clearance_height_to_rod");
+        params.clearance_height_to_lid =
+            config.opt_float("extruder_clearance_height_to_lid");
+        params.clearance_radius = config.opt_float("extruder_clearance_radius");
+        if (const auto *nozzle = config.option<Slic3r::ConfigOptionFloats>("nozzle_diameter"))
+            if (!nozzle->values.empty())
+                params.nozzle_height = nozzle->values.front();
+        params.min_obj_distance =
+            Slic3r::scaled(6.0); // desktop default arrange distance
+        // desktop ArrangeJob::process step 2 (engine helpers)
+        Slic3r::arrangement::update_arrange_params(params, &config, input);
+        Slic3r::arrangement::update_selected_items_inflation(input, &config, params);
+        Slic3r::arrangement::update_selected_items_axis_align(input, &config, params);
+        const Slic3r::Points bed =
+            Slic3r::arrangement::get_shrink_bedpts(&config, params);
+
+        Slic3r::arrangement::arrange(input, {}, bed, params);
+
+        // Virtual beds: the desktop creates new plates for overflow; OrcaPad
+        // has one plate, so bed n>0 lands shifted beside the printable area
+        // (vfn's own approach) and is reported as unprintable.
+        const auto *area = config.option<Slic3r::ConfigOptionPoints>("printable_area");
+        double bed_width = 200.0, bed_min_x = 0.0;
+        if (area && !area->values.empty()) {
+            Slic3r::BoundingBoxf bb;
+            for (const auto &point : area->values) bb.merge(Slic3r::Vec2d(point.x(), point.y()));
+            bed_width = std::max(bb.size().x(), 50.0);
+            bed_min_x = bb.min.x();
+        }
+        uint32_t unprintable = 0;
+        for (size_t i = 0; i < input.size(); ++i) {
+            if (input[i].bed_idx < 0) continue; // not placed at all
+            if (input[i].bed_idx > 0) {
+                ++unprintable;
+                const double shift = bed_min_x + bed_width * 1.25 * input[i].bed_idx;
+                input[i].translation.x() += Slic3r::scaled(shift);
+            }
+            if (input[i].bed_idx >= 0)
+                instances[i]->apply_arrange_result(
+                    input[i].translation.cast<double>(), input[i].rotation);
+        }
+        for (Slic3r::ModelObject *object : plater->model.objects) {
+            object->invalidate_bounding_box();
+            object->ensure_on_bed();
+        }
+
+        ++plater->revision;
+        *out_unprintable = unprintable;
+        *out_revision = plater->revision;
+        return orcapad_ok();
+    });
+}

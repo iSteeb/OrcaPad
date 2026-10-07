@@ -183,7 +183,7 @@ run_jobs_parallel() { # phase 2: bounded-parallel compile + hard verification
 # --- 2b. compile the shared engine source list ---
 # Single source of truth: Bridge/engine-sources.sh (shared verbatim with the
 # host contract-test build — lists must never drift apart again).
-# Records: cxx<TAB>path<TAB>[extra flags...] | c<TAB>path
+# Records: cxx<TAB>path<TAB>[extra flags...] | c<TAB>path<TAB>[extra flags...]
 while IFS=$'\t' read -r kind src extra_str; do
     [ -n "${src:-}" ] || continue
     extra_args=()
@@ -192,7 +192,7 @@ while IFS=$'\t' read -r kind src extra_str; do
     if [ "$kind" = "cxx" ]; then
         compile_one "$src" "$o" "$CLANG" "${CFLAGS[@]}" "${extra_args[@]}"
     else
-        compile_one "$src" "$o" "${CLANG%++}" "${CONLY_FLAGS[@]}"
+        compile_one "$src" "$o" "${CLANG%++}" "${CONLY_FLAGS[@]}" "${extra_args[@]}"
     fi
 done < <(engine_sources)
 

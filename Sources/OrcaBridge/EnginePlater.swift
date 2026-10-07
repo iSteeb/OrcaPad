@@ -21,6 +21,13 @@ public final class EnginePlater: @unchecked Sendable {
             axis: EngineAxis,
             radians: Double
         )
+        case layFlat(
+            objectID: ObjectID,
+            instanceID: InstanceID,
+            normal: SIMD3<Double>
+        )
+        case orientAll
+        case arrange(allowRotations: Bool)
         case ensureOnBed
     }
 
@@ -31,16 +38,21 @@ public final class EnginePlater: @unchecked Sendable {
         /// Objects created by an import (first is `createdObjectID`).
         public let createdObjectCount: Int
 
+        /// Instances that did not fit the bed after `arrange` (0 otherwise).
+        public let unprintableCount: Int
+
         fileprivate init(
             snapshot: SceneSnapshot,
             createdObjectID: ObjectID? = nil,
             createdInstanceID: InstanceID? = nil,
-            createdObjectCount: Int = 0
+            createdObjectCount: Int = 0,
+            unprintableCount: Int = 0
         ) {
             self.snapshot = snapshot
             self.createdObjectID = createdObjectID
             self.createdInstanceID = createdInstanceID
             self.createdObjectCount = createdObjectCount
+            self.unprintableCount = unprintableCount
         }
     }
 
@@ -73,12 +85,14 @@ public final class EnginePlater: @unchecked Sendable {
 
     /// Applies exactly one engine mutation and returns the complete scene at
     /// the resulting revision while retaining the document lock throughout.
-    public func apply(_ mutation: Mutation) throws -> MutationResult {
+    public func apply(_ mutation: Mutation, presets: EnginePresets? = nil) throws -> MutationResult {
         try lock.withLock {
             var mutationRevision: UInt64 = 0
             var createdObjectID: ObjectID?
             var createdInstanceID: InstanceID?
             var createdObjectCount = 0
+            var arrangeUnprintableCount = 0
+            let presetHandle: OpaquePointer? = presets?.withUnsafeHandle { $0 }
 
             switch mutation {
             case .importModel(let path, let bedCenter):
@@ -169,6 +183,38 @@ public final class EnginePlater: @unchecked Sendable {
                     operation: "set transform for instance \(instanceID)"
                 )
 
+            case .layFlat(let objectID, let instanceID, let normal):
+                try BridgeResult.consume(
+                    orca_plater_instance_lay_flat(
+                        handle,
+                        objectID.rawValue,
+                        instanceID.rawValue,
+                        normal.x, normal.y, normal.z,
+                        &mutationRevision
+                    ),
+                    operation: "lay instance flat"
+                )
+
+            case .orientAll:
+                try BridgeResult.consume(
+                    orca_plater_orient(handle, presetHandle, 0, 0, &mutationRevision),
+                    operation: "orient all instances"
+                )
+
+            case .arrange(let allowRotations):
+                var unprintable: UInt32 = 0
+                try BridgeResult.consume(
+                    orca_plater_arrange(
+                        handle,
+                        presetHandle,
+                        allowRotations ? 1 : 0,
+                        &unprintable,
+                        &mutationRevision
+                    ),
+                    operation: "arrange plate"
+                )
+                arrangeUnprintableCount = Int(unprintable)
+
             case .rotate(let objectID, let instanceID, let axis, let radians):
                 try BridgeResult.consume(
                     orca_plater_instance_rotate(
@@ -201,7 +247,8 @@ public final class EnginePlater: @unchecked Sendable {
                 snapshot: scene,
                 createdObjectID: createdObjectID,
                 createdInstanceID: createdInstanceID,
-                createdObjectCount: createdObjectCount
+                createdObjectCount: createdObjectCount,
+                unprintableCount: arrangeUnprintableCount
             )
         }
     }

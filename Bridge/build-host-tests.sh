@@ -169,7 +169,7 @@ while IFS=$'\t' read -r kind src extra_str; do
     if [ "$kind" = "cxx" ]; then
         compile_one "$src" "$o" "$CXX" "${CFLAGS[@]}" "${extra_args[@]}"
     else
-        compile_one "$src" "$o" "${CXX%++}" "${CONLY_FLAGS[@]}"
+        compile_one "$src" "$o" "${CXX%++}" "${CONLY_FLAGS[@]}" "${extra_args[@]}"
     fi
 done < <(engine_sources)
 

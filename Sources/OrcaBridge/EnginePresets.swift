@@ -87,6 +87,15 @@ public final class EnginePresets: @unchecked Sendable {
     /// Keeps the presets session locked for the complete Bridge operation.
     /// `EnginePlater` always acquires its own lock first, establishing the
     /// only cross-session lock order: plater → presets.
+    func withUnsafeHandle<Value>(_ body: (OpaquePointer) throws -> Value) rethrows -> Value {
+        try lock.withLock {
+            guard let handle else {
+                throw invalidHandle("EnginePresets.withUnsafeHandle")
+            }
+            return try body(handle)
+        }
+    }
+
     func withLockedHandle<Value>(
         _ body: (OpaquePointer) throws -> Value
     ) throws -> Value {

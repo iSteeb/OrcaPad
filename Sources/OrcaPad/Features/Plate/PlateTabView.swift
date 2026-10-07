@@ -141,8 +141,21 @@ struct PlateTabView: View {
                     onMove: { document.moveSelected(by: $0) },
                     onBegin: { document.beginManipulation() },
                     onRotate: { document.previewRotation(axis: rotationAxis, deltaRadians: $0) },
-                    onScale: { document.previewScale(factor: $0) },
-                    onEnd: { Task { await document.commitSelectedTransform() } }
+                onScale: { document.previewScale(factor: $0) },
+                onLayFlat: { normal in
+                    guard let engine = environment.presets.engineForSlicing else {
+                        environment.status.report(
+                            .document,
+                            failure: .invariant(
+                                operation: "lay flat",
+                                diagnostic: "presets are not loaded"
+                            )
+                        )
+                        return
+                    }
+                    Task { await document.layFlatSelected(normal: normal, presets: engine) }
+                },
+                onEnd: { Task { await document.commitSelectedTransform() } }
                 )
             )
         } else {
@@ -199,8 +212,19 @@ struct PlateTabView: View {
             ) {
                 objectsPresented = true
             }
-            PlateActionButton(symbol: "square.grid.3x3", label: "Arrange", disabled: true) {
-                // Engine arrange (Arrange.cpp + libnest2d) — not yet in the closure.
+            PlateActionButton(
+                symbol: "square.grid.3x3", label: "Arrange",
+                disabled: document.scene?.objects.isEmpty != false || document.isMutating
+            ) {
+                guard let engine = environment.presets.engineForSlicing else { return }
+                Task { await document.arrangeAll(presets: engine, allowRotations: false) }
+            }
+            PlateActionButton(
+                symbol: "location.north.circle", label: "Orient",
+                disabled: document.scene?.objects.isEmpty != false || document.isMutating
+            ) {
+                guard let engine = environment.presets.engineForSlicing else { return }
+                Task { await document.orientAll(presets: engine) }
             }
         }
         .padding(6)
@@ -332,11 +356,11 @@ private struct GizmoToolbar: View {
             tool(.move, symbol: "arrow.up.and.down.and.arrow.left.and.right", label: "Move")
             tool(.rotate, symbol: "arrow.clockwise.circle", label: "Rotate")
             tool(.scale, symbol: "arrow.up.left.and.arrow.down.right", label: "Scale")
+            tool(.layFlat, symbol: "square.bottomhalf.filled", label: "Lay flat")
             Divider().frame(width: 32)
             action("plus.square.on.square", label: "Copy", action: onDuplicate)
             action("trash", label: "Delete", action: onDelete)
             Divider().frame(width: 32)
-            future("square.bottomhalf.filled", label: "Lay flat")
             future("paintbrush.pointed", label: "Supports")
         }
         .padding(.vertical, 10)
@@ -428,6 +452,13 @@ private struct ManipulationPanel: View {
             case .move: movePanel
             case .rotate: RotatePanel(transform: transform, axis: $rotationAxis, actions: actions)
             case .scale: ScalePanel(transform: transform, meshSize: meshSize, actions: actions)
+            case .layFlat:
+                Label(
+                    "Tap a face of the object to lay it flat on that face.",
+                    systemImage: "hand.tap"
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
             }
         }
         .padding(12)

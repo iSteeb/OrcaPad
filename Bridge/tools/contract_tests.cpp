@@ -272,7 +272,7 @@ static void test_md5_shim() {
 
 static void test_abi_version() {
     CHECK_EQ(orca_bridge_abi_version(), ORCA_BRIDGE_ABI_VERSION);
-    CHECK_EQ(ORCA_BRIDGE_ABI_VERSION, 12);
+    CHECK_EQ(ORCA_BRIDGE_ABI_VERSION, 13);
 }
 
 static void test_document_lifecycle(const std::string &dir) {
@@ -1490,6 +1490,113 @@ static std::string config_dump(orca_presets *presets, int32_t kind, uint8_t edit
 
 // Desktop Save project → Open project round trip: geometry, instances,
 // transforms, selected presets, overrides and plate type all survive.
+// Arrange + orient: many instances of one cube pack onto the bed in a grid
+// and stay there; orient leaves instances resting on the bed.
+static void test_arrange_orient(const std::string &dir, const std::string &data_dir) {
+    const std::string cube = write_cube_stl(dir, "orcapad-cube10.stl");
+    orca_plater *plater = nullptr;
+    GUARD(g0, orca_plater_new(&plater));
+    expect_ok(g0, "plater_new");
+    orca_object_id object_id = 0;
+    orca_revision revision = 0;
+    GUARD(g1, import_one(plater, cube.c_str(), 0.0, 0.0, &object_id, &revision));
+    expect_ok(g1, "import cube");
+    for (int i = 0; i < 8; ++i) {
+        orca_instance_id instance = 0;
+        GUARD(ga, orca_plater_instance_add(plater, object_id, &instance, &revision));
+        expect_ok(ga, "stack instances");
+    }
+
+    orca_presets *presets = nullptr;
+    GUARD(gp, orca_presets_new(data_dir.c_str(), &presets));
+    expect_ok(gp, "presets_new");
+    GUARD(gsel, orca_presets_select(presets, "Anycubic Vyper 0.4 nozzle",
+                                    "Anycubic Generic PLA",
+                                    "0.20mm Standard @Anycubic Vyper"));
+    expect_ok(gsel, "select Vyper (244x244 bed)");
+
+    uint32_t unprintable = 99;
+    GUARD(e1, orca_plater_arrange(plater, presets, 0, &unprintable, &revision));
+    expect_ok(e1, "arrange");
+    CHECK_EQ(unprintable, 0u);
+    CHECK_EQ(revision, (orca_revision)10); // import + 8 adds + arrange
+
+    // all 9 instances are separated (no two share a position) and on the bed
+    {
+        orca_scene_snapshot snap = take_snapshot(plater);
+        CHECK_EQ(snap.object_count, 1);
+        if (snap.object_count == 1) {
+            const int n = snap.objects[0].instance_count;
+            CHECK_EQ(n, 9);
+            for (int i = 0; i < n; ++i) {
+                CHECK_NEAR(snap.objects[0].instances[i].transform.offset_z, 10.0, 1e-6);
+                for (int j = i + 1; j < n; ++j) {
+                    const double dx = snap.objects[0].instances[i].transform.offset_x -
+                                      snap.objects[0].instances[j].transform.offset_x;
+                    const double dy = snap.objects[0].instances[i].transform.offset_y -
+                                      snap.objects[0].instances[j].transform.offset_y;
+                    CHECK(std::hypot(dx, dy) > 19.9); // 20mm cubes cannot overlap
+                }
+            }
+        }
+        orca_scene_snapshot_dispose(&snap);
+    }
+
+    // orient the whole document: everything stays on the bed
+    GUARD(g2, orca_plater_orient(plater, presets, 0, 0, &revision));
+    expect_ok(g2, "orient all");
+    {
+        orca_scene_snapshot snap = take_snapshot(plater);
+        for (int i = 0; i < snap.objects[0].instance_count; ++i)
+            CHECK_NEAR(snap.objects[0].instances[i].transform.offset_z, 10.0, 1e-6);
+        orca_scene_snapshot_dispose(&snap);
+    }
+
+    // lay flat on a face normal: after +90° about X, the original BOTTOM
+    // face points +Y; laying that face down restores the upright cube.
+    orca_object_id flat_object = 0;
+    GUARD(f0, import_one(plater, (dir + "/orcapad-cube10.stl").c_str(), 60.0, 60.0, &flat_object, &revision));
+    expect_ok(f0, "import flat cube");
+    orca_instance_id flat_instance = 0;
+    {
+        orca_scene_snapshot snap = take_snapshot(plater);
+        for (int32_t i = 0; i < snap.object_count && !flat_instance; ++i)
+            if (snap.objects[i].id == flat_object && snap.objects[i].instance_count > 0)
+                flat_instance = snap.objects[i].instances[0].id;
+        orca_scene_snapshot_dispose(&snap);
+    }
+    CHECK(flat_instance != 0);
+    GUARD(f1, orca_plater_instance_rotate(plater, flat_object, flat_instance, 0, M_PI / 2, &revision));
+    expect_ok(f1, "rotate X 90°");
+    GUARD(f2, orca_plater_instance_lay_flat(plater, flat_object, flat_instance, 0.0, 1.0, 0.0, &revision));
+    expect_ok(f2, "lay flat on -Y face");
+    {
+        orca_scene_snapshot snap = take_snapshot(plater);
+        const orca_scene_object *flat_obj = nullptr;
+        for (int32_t i = 0; i < snap.object_count; ++i)
+            if (snap.objects[i].id == flat_object) flat_obj = &snap.objects[i];
+        CHECK(flat_obj != nullptr);
+        if (!flat_obj) { orca_scene_snapshot_dispose(&snap); orca_plater_free(plater); orca_presets_free(presets); return; }
+        const auto &tr = flat_obj->instances[0].transform;
+        CHECK_NEAR(tr.rotation_x, 0.0, 1e-6);
+        CHECK_NEAR(tr.rotation_y, 0.0, 1e-6);
+        CHECK_NEAR(tr.rotation_z, 0.0, 1e-6);
+        CHECK_NEAR(tr.offset_z, 10.0, 1e-6);
+        orca_scene_snapshot_dispose(&snap);
+    }
+    GUARD(f3, orca_plater_instance_lay_flat(plater, flat_object, flat_instance, 0.0, 0.0, 0.0, &revision));
+    expect_code(f3, ORCA_STATUS_INVALID_ARGUMENT, "lay flat degenerate normal");
+
+    // typed rejections
+    GUARD(e2, orca_plater_orient(plater, presets, 12345, 1, &revision));
+    expect_code(e2, ORCA_STATUS_NOT_FOUND, "orient missing object");
+    GUARD(e3, orca_plater_arrange(nullptr, presets, 0, &unprintable, &revision));
+    expect_code(e3, ORCA_STATUS_INVALID_HANDLE, "arrange null plater");
+
+    orca_presets_free(presets);
+    orca_plater_free(plater);
+}
+
 static void test_project_roundtrip(const std::string &dir, const std::string &data_dir) {
     orca_presets *presets = nullptr;
     GUARD(gp, orca_presets_new(data_dir.c_str(), &presets));
@@ -1924,6 +2031,7 @@ int main() {
     test_slice_cancel(dir);
     test_project_roundtrip(dir, data_dir);
     test_user_presets(data_dir);
+    test_arrange_orient(dir, data_dir);
     test_gcode_toolpath(dir);
 
     fprintf(stderr, "\n═══ contract tests: %d checks, %d failures ═══\n",

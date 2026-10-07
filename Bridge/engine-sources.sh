@@ -6,7 +6,7 @@
 #
 # Each record is one line:
 #   cxx<TAB>/absolute/path.cpp<TAB>extra flags (space separated, optional)
-#   c  <TAB>/absolute/path.c
+#   c  <TAB>/absolute/path.c<TAB>extra flags (space separated, optional)
 engine_sources() {
     local ROOT SRC DEPS f
     ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -75,7 +75,7 @@ engine_sources() {
              IntersectionPoints.cpp FlushVolPredictor.cpp Geometry/Circle.cpp Clipper2Utils.cpp TriangleSetSampling.cpp FaceDetector.cpp TriangleSelector.cpp BuildVolume.cpp Extruder.cpp PrincipalComponents2D.cpp MultiMaterialSegmentation.cpp FilamentGroup.cpp ContourZ.cpp Feature/Interlocking/InterlockingGenerator.cpp Feature/Interlocking/VoxelUtils.cpp calib.cpp MaterialType.cpp FlushVolCalc.cpp NormalUtils.cpp \
              Preset.cpp PresetBundle.cpp AppConfig.cpp \
              miniz_extension.cpp Format/3mf.cpp Format/bbs_3mf.cpp NSVGUtils.cpp \
-             Emboss.cpp ExPolygonsIndex.cpp; do
+             Emboss.cpp ExPolygonsIndex.cpp Orient.cpp; do
         case "$f" in
             # host libstdc++ does not leak <memory> transitively into this
             # header (Darwin libc++ does) — same adapter pattern as LocalesUtils
@@ -154,6 +154,31 @@ engine_sources() {
         printf 'cxx\t%s\t-std=c++20\n' "$ROOT/Bridge/cache/boost-filesystem-1.90/src/$f.cpp"
     done
 
+    # arrange: libslic3r Arrange/ModelArrange over vendored libnest2d with
+    # NLopt 2.5.0 (OrcaSlicer's pin, deps/NLopt/NLopt.cmake). Defines are
+    # libnest2d's PUBLIC compile definitions (deps_src/libnest2d/CMakeLists).
+    local NEST="-DLIBNEST2D_THREADING_tbb -DLIBNEST2D_STATIC -DLIBNEST2D_OPTIMIZER_nlopt -DLIBNEST2D_GEOMETRIES_libslic3r -I$ROOT/Bridge/cache/nlopt-gen -I$ROOT/Bridge/cache/nlopt/src/api"
+    printf 'cxx\t%s\t%s\n' "$SRC/libslic3r/Arrange.cpp" "$NEST"
+    printf 'cxx\t%s\t%s\n' "$SRC/libslic3r/ModelArrange.cpp" "$NEST"
+    printf 'cxx\t%s\t%s\n' "$DEPS/libnest2d/src/libnest2d.cpp" "$NEST"
+    # NLopt C sources — EXACT NLOPT_SOURCES of its CMakeLists.txt (NLOPT_CXX
+    # and NLOPT_CXX11 off, as in OrcaSlicer's deps build)
+    local NL="$ROOT/Bridge/cache/nlopt/src"
+    local NLI="-I$ROOT/Bridge/cache/nlopt-gen -I$NL/api -I$NL/util"
+    for d in direct cdirect praxis luksan crs mlsl mma cobyla newuoa neldermead auglag bobyqa isres slsqp esch; do
+        NLI="$NLI -I$NL/algs/$d"
+    done
+    for f in algs/direct/DIRect algs/direct/direct_wrap algs/direct/DIRserial algs/direct/DIRsubrout \
+             algs/cdirect/cdirect algs/cdirect/hybrid algs/praxis/praxis \
+             algs/luksan/plis algs/luksan/plip algs/luksan/pnet algs/luksan/mssubs algs/luksan/pssubs \
+             algs/crs/crs algs/mlsl/mlsl algs/mma/mma algs/mma/ccsa_quadratic algs/cobyla/cobyla \
+             algs/newuoa/newuoa algs/neldermead/nldrmd algs/neldermead/sbplx algs/auglag/auglag \
+             algs/bobyqa/bobyqa algs/isres/isres algs/slsqp/slsqp algs/esch/esch \
+             api/general api/options api/optimize api/deprecated api/f77api \
+             util/mt19937ar util/sobolseq util/timer util/stop util/redblack util/qsort_r util/rescale; do
+        printf 'c\t%s\t%s\n' "$NL/$f.c" "$NLI"
+    done
+
     # vendored header-only nanosvg: its implementation unit lives in the
     # upstream GUI (BitmapCache.cpp), so the Bridge provides one
     printf 'cxx\t%s\n' "$ROOT/Bridge/engine-cxx/nanosvg_impl.cpp"
@@ -197,4 +222,18 @@ engine_fetch_deps() {
     fi
     [ -f "$ROOT/Bridge/cache/boost-thread-1.90/src/pthread/thread.cpp" ] ||
         { echo "FATAL: boost.thread fetch failed" >&2; return 1; }
+    if [ ! -f "$ROOT/Bridge/cache/nlopt/src/api/nlopt-in.hpp" ]; then
+        echo "==> fetching NLopt v2.5.0 (OrcaSlicer's pin) into Bridge/cache/" >&2
+        git clone -q --depth 1 -b v2.5.0 https://github.com/stevengj/nlopt \
+            "$ROOT/Bridge/cache/nlopt"
+    fi
+    [ -f "$ROOT/Bridge/cache/nlopt/src/api/nlopt-in.hpp" ] ||
+        { echo "FATAL: NLopt fetch failed" >&2; return 1; }
+    # configure-time headers (NLopt's CMake would generate these)
+    mkdir -p "$ROOT/Bridge/cache/nlopt-gen"
+    if [ ! -f "$ROOT/Bridge/cache/nlopt-gen/nlopt.hpp" ] ||
+       [ "$ROOT/Bridge/tools/gen_nlopt.py" -nt "$ROOT/Bridge/cache/nlopt-gen/nlopt.hpp" ]; then
+        python3 "$ROOT/Bridge/tools/gen_nlopt.py" "$ROOT/Bridge/cache/nlopt" \
+            "$ROOT/Bridge/cache/nlopt-gen" || { echo "FATAL: NLopt header generation failed" >&2; return 1; }
+    fi
 }

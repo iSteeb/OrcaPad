@@ -385,8 +385,83 @@ final class DocumentStore {
         )
     }
 
-    /// Incremental world-axis rotation (rotate panel ± steps): the engine
-    /// composes it, so repeated steps wrap continuously through 360°.
+    // MARK: Arrange / orient / lay flat (desktop toolbar parity)
+
+    func arrangeAll(presets: EnginePresets, allowRotations: Bool) async {
+        guard let plater, !isBusy else {
+            status.report(.document, "arrange blocked: document is busy")
+            return
+        }
+        isMutating = true
+        let result = await BackgroundWork.run(operation: "arrange") {
+            try plater.apply(.arrange(allowRotations: allowRotations), presets: presets)
+        }
+        isMutating = false
+        switch result {
+        case .success(let mutation):
+            install(mutation.snapshot)
+            frameRequest += 1
+            if mutation.unprintableCount > 0 {
+                status.report(
+                    .document,
+                    "arranged; \(mutation.unprintableCount) object(s) did not fit " +
+                        "the print bed and were placed beside it"
+                )
+            } else {
+                status.report(.document, "arranged")
+            }
+        case .failure(let failure):
+            status.report(.document, failure: failure)
+        }
+    }
+
+    func orientAll(presets: EnginePresets) async {
+        guard let plater, !isBusy else {
+            status.report(.document, "orient blocked: document is busy")
+            return
+        }
+        isMutating = true
+        let result = await BackgroundWork.run(operation: "orient") {
+            try plater.apply(.orientAll, presets: presets)
+        }
+        isMutating = false
+        switch result {
+        case .success(let mutation):
+            install(mutation.snapshot)
+            frameRequest += 1
+            status.report(.document, "oriented")
+        case .failure(let failure):
+            status.report(.document, failure: failure)
+        }
+    }
+
+    func layFlatSelected(normal: SIMD3<Double>, presets: EnginePresets) async {
+        guard let plater, let selection, !isBusy else {
+            status.report(.document, "lay flat blocked: engine is not ready")
+            return
+        }
+        isMutating = true
+        let result = await BackgroundWork.run(operation: "lay flat") {
+            try plater.apply(
+                .layFlat(
+                    objectID: selection.objectID,
+                    instanceID: selection.instanceID,
+                    normal: normal
+                ),
+                presets: presets
+            )
+        }
+        isMutating = false
+        switch result {
+        case .success(let mutation):
+            install(mutation.snapshot)
+            frameRequest += 1
+            status.report(.document, "laid flat")
+        case .failure(let failure):
+            status.report(.document, failure: failure)
+        }
+    }
+
     func rotateSelected(axis: EngineAxis, degrees: Double) async {
         guard let selection else { return }
         _ = await applyMutation(
