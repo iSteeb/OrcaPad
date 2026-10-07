@@ -59,7 +59,9 @@ fi
 
 # 6. No silent-failure patterns in Swift sources (empty catch / try?).
 empty_catch=$(grep -rEUn 'catch\s*\{\s*\}' "$ROOT/Sources" 2>/dev/null || true)
-try_q=$(grep -rn 'try?' "$ROOT/Sources" --include='*.swift' 2>/dev/null || true)
+# word-boundary match: identifiers ending in "try" (e.g. `PresetEntry?`)
+# are optional types, not `try?` expressions
+try_q=$(grep -rEn '(^|[^A-Za-z0-9_])try\?' "$ROOT/Sources" --include='*.swift' 2>/dev/null || true)
 if [ -z "$empty_catch" ] && [ -z "$try_q" ]; then
     report PASS "no empty catch blocks or try? in Swift sources"
 else
