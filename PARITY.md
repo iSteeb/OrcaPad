@@ -56,11 +56,11 @@ yet in `Bridge/engine-sources.sh`), **Client-reimpl** (desktop logic lives in
 | Range validation | `Field.cpp` | `ConfigSchema.swift` numeric validation | ✅ | — |
 | Option dependency enable/disable, sanity dialogs | `ConfigManipulation.cpp:594` | none found | ❌ | Client-reimpl (GUI logic) |
 | Modified marker + revert to system | `Tab.cpp:1133,1143` | `SettingsPagesView.swift:68,99`, `resetKind` | ✅ | — |
-| Revert to saved (user preset level) | `Tab.cpp:1143` | needs user presets | ❌ | Blocked on C5b |
+| Revert to saved (user preset level) | `Tab.cpp:1143` | per-key reset + "Discard changes" restore the selected (saved) user preset | 🟡 no separate revert-to-parent-system for user presets | UI |
 | Search | `Search.hpp:91` (global, all tabs) | per-screen `.searchable` | 🟡 | UI |
 | Compare presets | `UnsavedChangesDialog.hpp:408`, `Tab.cpp:6626` | none found | ❌ | UI (config_dump already exists) |
-| Save / rename / delete / detach user presets | `Tab.cpp:6663,6801`; `Preset.cpp:2865,2983` | none found | ❌ (C5b) | Bridge (`Preset.cpp` is compiled) |
-| Unsaved-changes prompt when switching presets | `UnsavedChangesDialog.hpp:266` | edits are discarded silently on select | ❌ | UI + C5b |
+| Save / rename / delete / detach user presets | `Tab.cpp:6663,6801`; `Preset.cpp:2865,2983`; `SavePresetDialog.cpp:135` | ABI v12 `orca_presets_save_user`/`delete_user` (desktop name rules, Orca filament scoping, `.info`, persisted + reloaded); `PresetActions.swift` menu + save sheet; user/project groups in pickers | ✅ (rename = save-as + delete) | — |
+| Unsaved-changes prompt when switching presets | `UnsavedChangesDialog.hpp:266` | `PrepareTabView.swift` confirmation (discard / keep editing; save via preset menu) | 🟡 no "transfer changes to new preset" | Bridge (apply dirty options onto new selection) |
 | Physical printers (host/URL) | `PhysicalPrinterDialog.hpp:27` | none found | ❌ | Bridge (`PhysicalPrinter` in Preset.cpp) — a Device-tab prerequisite |
 | Import / export configs, bundles | `MainFrame.cpp:2762,2804,3688,3723` | none found | ❌ | Bridge |
 | Resolved-config inspector | (no desktop equivalent) | `ResolvedConfigView.swift` | ✅ extra | — |
@@ -116,7 +116,7 @@ yet in `Bridge/engine-sources.sh`), **Client-reimpl** (desktop logic lives in
 2. ~~Export / share G-code and open external G-code~~ ✅ done (also fixed: re-slicing to the same path never refreshed Preview; imported objects were named "orcapad-import").
 3. ~~Slice cancel + warnings list~~ ✅ done (ABI v9; slices now run `Print::validate` like desktop — previously OrcaPad exported G-code desktop would refuse).
 4. ~~3MF load/save~~ ✅ done (ABI v10 import of STL/OBJ/AMF/3MF geometry; ABI v11 single-plate project open/save incl. presets + plate type). Follow-ups: multi-plate, project thumbnails.
-5. **User presets (C5b)** + unsaved-changes prompt + physical printers: Bridge over compiled `Preset.cpp`.
+5. ~~User presets (C5b) + unsaved-changes prompt~~ ✅ done (ABI v12). Physical printers move to item 7 (print hosts).
 6. **Arrange / orient / lay-flat**: needs NLopt for Arrange; `Orient.cpp` is a small closure step; lay-flat is client logic on the v7 rotate.
 7. **Print host upload (Moonraker/OctoPrint/PrusaLink)**: native networking, needs the physical-printer model from item 5.
 8. **Preview ABI v8**: retract/seam/wipe markers, `actual_feedrate`/`layer_duration`/PA/accel/jerk, stealth time and filament statistics. These complete the Types.hpp scheme list.

@@ -10,6 +10,16 @@ struct PrepareTabView: View {
     @State private var modeFilter: SettingsModeFilter = .simple
     @State private var search = ""
     @State private var showAllProcesses = false
+    /// Desktop UnsavedChangesDialog: a selection waiting for a decision
+    /// about the modified preset it would replace.
+    @State private var pendingSelection: PendingSelection?
+
+    private struct PendingSelection: Identifiable {
+        let kind: PresetKind
+        let name: String
+        let modified: Int
+        var id: String { "\(kind.rawValue)|\(name)" }
+    }
 
     private var presets: PresetStore { environment.presets }
 
@@ -36,6 +46,22 @@ struct PrepareTabView: View {
                 ToolbarItem(placement: .primaryAction) { sliceButton }
             }
             .searchable(text: $search, placement: .navigationBarDrawer(displayMode: .automatic))
+            .confirmationDialog(
+                "Unsaved changes",
+                isPresented: Binding(
+                    get: { pendingSelection != nil },
+                    set: { if !$0 { pendingSelection = nil } }
+                ),
+                titleVisibility: .visible,
+                presenting: pendingSelection
+            ) { pending in
+                Button("Discard \(pending.modified) change(s) and switch", role: .destructive) {
+                    Task { await presets.select(kind: pending.kind, name: pending.name) }
+                }
+                Button("Keep editing", role: .cancel) {}
+            } message: { pending in
+                Text("The current preset has \(pending.modified) modified setting(s). Save them as a user preset from the preset menu first, or discard them.")
+            }
         }
     }
 
@@ -116,7 +142,7 @@ struct PrepareTabView: View {
                     selected: presets.selection.machine,
                     vendorPlaceholder: "Other manufacturers"
                 ) { name in
-                    Task { await presets.select(kind: .machine, name: name) }
+                    requestSelect(.machine, name)
                 }
             } label: {
                 presetLabel(presets.selection.machine, symbol: "printer")
@@ -150,7 +176,7 @@ struct PrepareTabView: View {
                     selected: presets.selection.filament,
                     vendorPlaceholder: "Generic filaments"
                 ) { name in
-                    Task { await presets.select(kind: .filament, name: name) }
+                    requestSelect(.filament, name)
                 }
             } label: {
                 presetLabel(presets.selection.filament, symbol: "circle.dotted.circle")
@@ -174,13 +200,21 @@ struct PrepareTabView: View {
                     selected: presets.selection.process,
                     vendorPlaceholder: "Generic processes"
                 ) { name in
-                    Task { await presets.select(kind: .process, name: name) }
+                    requestSelect(.process, name)
                 }
             } label: {
                 presetLabel(presets.selection.process, symbol: "slider.horizontal.3")
             }
             Toggle("Show incompatible processes", isOn: $showAllProcesses)
                 .font(.caption)
+            HStack {
+                Text("Process preset")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                PresetActionsMenu(kind: .process)
+                    .font(.caption)
+            }
             let modified = presets.modifiedKeys(in: .process).count
             if modified > 0 {
                 Button("Reset \(modified) modified process settings") {
@@ -190,6 +224,23 @@ struct PrepareTabView: View {
             }
         } header: {
             Text("Process")
+        }
+    }
+
+    /// Selecting another preset discards the edited copy (engine
+    /// select_preset), so modified presets ask first — desktop parity.
+    private func requestSelect(_ kind: PresetKind, _ name: String) {
+        let modified = presets.modifiedKeys(in: kind).count
+        let current: String
+        switch kind {
+        case .machine: current = presets.selection.machine
+        case .filament: current = presets.selection.filament
+        case .process: current = presets.selection.process
+        }
+        if modified > 0 && name != current {
+            pendingSelection = PendingSelection(kind: kind, name: name, modified: modified)
+        } else {
+            Task { await presets.select(kind: kind, name: name) }
         }
     }
 

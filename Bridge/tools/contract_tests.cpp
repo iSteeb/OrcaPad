@@ -272,7 +272,7 @@ static void test_md5_shim() {
 
 static void test_abi_version() {
     CHECK_EQ(orca_bridge_abi_version(), ORCA_BRIDGE_ABI_VERSION);
-    CHECK_EQ(ORCA_BRIDGE_ABI_VERSION, 11);
+    CHECK_EQ(ORCA_BRIDGE_ABI_VERSION, 12);
 }
 
 static void test_document_lifecycle(const std::string &dir) {
@@ -1604,6 +1604,101 @@ static void test_project_roundtrip(const std::string &dir, const std::string &da
     orca_presets_free(presets);
 }
 
+static bool listed_with_origin(orca_presets *presets, int32_t kind,
+                               const std::string &name, uint8_t origin) {
+    int32_t count = 0;
+    GUARD(g, orca_presets_list_count(presets, kind, &count));
+    expect_ok(g, "list count");
+    for (int32_t i = 0; i < count; ++i) {
+        orca_preset_entry entry;
+        GUARD(ge, orca_presets_list_entry(presets, kind, i, &entry));
+        expect_ok(ge, "list entry");
+        const bool match = entry.name.data && name == entry.name.data;
+        const uint8_t found_origin = entry.origin;
+        orca_preset_entry_dispose(&entry);
+        if (match) return found_origin == origin;
+    }
+    return false;
+}
+
+// Desktop C5b: Save preset (SavePresetDialog rules) → persisted user
+// preset reloadable by a fresh session → Delete preset.
+static void test_user_presets(const std::string &data_dir) {
+    orca_presets *presets = nullptr;
+    GUARD(g0, orca_presets_new(data_dir.c_str(), &presets));
+    expect_ok(g0, "presets_new");
+    GUARD(g1, orca_presets_select(presets, "Bambu Lab X1 Carbon 0.4 nozzle",
+                                  "Bambu PLA Basic @BBL X1C", "0.20mm Standard @BBL X1C"));
+    expect_ok(g1, "select X1C");
+    GUARD(g2, orca_presets_set_value(presets, 2, "layer_height", "0.27"));
+    expect_ok(g2, "override");
+
+    // desktop name rules
+    const char *bad_names[] = {"", "a/b", " lead", "trail ", "x (modified)", "Default Printer"};
+    for (const char *bad : bad_names) {
+        GUARD(gb, orca_presets_save_user(presets, 2, bad, 0));
+        expect_code(gb, ORCA_STATUS_INVALID_ARGUMENT, bad);
+    }
+    GUARD(gs, orca_presets_save_user(presets, 2, "0.20mm Standard @BBL X1C", 0));
+    expect_code(gs, ORCA_STATUS_INVALID_CONFIGURATION, "overwrite system");
+    GUARD(gk, orca_presets_save_user(presets, 9, "x", 0));
+    expect_code(gk, ORCA_STATUS_INVALID_ARGUMENT, "bad kind");
+
+    GUARD(g3, orca_presets_save_user(presets, 2, "OrcaPad Test Process", 0));
+    expect_ok(g3, "save process");
+    CHECK(current_preset(presets, 2) == "OrcaPad Test Process");
+    CHECK(listed_with_origin(presets, 2, "OrcaPad Test Process", ORCA_PRESET_ORIGIN_USER));
+    // saved values are now the preset's own: no pending modifications
+    CHECK(config_dump(presets, 2, 1) == config_dump(presets, 2, 0));
+    CHECK(config_dump(presets, 2, 0).find("\"layer_height\":\"0.27\"") != std::string::npos);
+    struct stat status;
+    CHECK(stat((data_dir + "/user/default/process/OrcaPad Test Process.json").c_str(), &status) == 0);
+
+    // overwrite the same user preset
+    GUARD(g4, orca_presets_set_value(presets, 2, "layer_height", "0.26"));
+    expect_ok(g4, "override again");
+    GUARD(g5, orca_presets_save_user(presets, 2, "OrcaPad Test Process", 0));
+    expect_ok(g5, "overwrite user preset");
+    CHECK(config_dump(presets, 2, 0).find("\"layer_height\":\"0.26\"") != std::string::npos);
+
+    // filament save scopes a system-derived filament to the current printer
+    GUARD(g6, orca_presets_save_user(presets, 1, "OrcaPad Test PLA", 0));
+    expect_ok(g6, "save filament");
+    CHECK(current_preset(presets, 1) == "OrcaPad Test PLA");
+    CHECK(config_dump(presets, 1, 0).find("Bambu Lab X1 Carbon") != std::string::npos);
+
+    // a fresh session reloads the persisted user presets from disk
+    orca_presets *fresh = nullptr;
+    GUARD(g7, orca_presets_new(data_dir.c_str(), &fresh));
+    expect_ok(g7, "presets_new fresh");
+    CHECK(listed_with_origin(fresh, 2, "OrcaPad Test Process", ORCA_PRESET_ORIGIN_USER));
+    GUARD(g8, orca_presets_select(fresh, "Bambu Lab X1 Carbon 0.4 nozzle",
+                                  "OrcaPad Test PLA", "OrcaPad Test Process"));
+    expect_ok(g8, "select user presets in fresh session");
+    CHECK(config_dump(fresh, 2, 0).find("\"layer_height\":\"0.26\"") != std::string::npos);
+    orca_presets_free(fresh);
+
+    // delete
+    GUARD(d1, orca_presets_delete_user(presets, 2, "0.20mm Standard @BBL X1C"));
+    expect_code(d1, ORCA_STATUS_INVALID_CONFIGURATION, "delete system");
+    GUARD(d2, orca_presets_delete_user(presets, 2, "__missing__"));
+    expect_code(d2, ORCA_STATUS_NOT_FOUND, "delete missing");
+    GUARD(d3, orca_presets_delete_user(presets, 2, "OrcaPad Test Process"));
+    expect_ok(d3, "delete selected user process");
+    CHECK(current_preset(presets, 2) != "OrcaPad Test Process");
+    CHECK(!listed_with_origin(presets, 2, "OrcaPad Test Process", ORCA_PRESET_ORIGIN_USER));
+    CHECK(stat((data_dir + "/user/default/process/OrcaPad Test Process.json").c_str(), &status) != 0);
+    GUARD(d4, orca_presets_delete_user(presets, 1, "OrcaPad Test PLA"));
+    expect_ok(d4, "delete user filament");
+
+    // the session still resolves a full config afterwards
+    orca_owned_string resolved;
+    GUARD(g9, orca_presets_resolved_config(presets, &resolved));
+    expect_ok(g9, "resolved after delete");
+    orca_owned_string_dispose(&resolved);
+    orca_presets_free(presets);
+}
+
 struct CancelOnProgress {
     orca_slice_job *job;
     std::atomic<int> calls{0};
@@ -1828,6 +1923,7 @@ int main() {
     test_standalone_slice(dir);
     test_slice_cancel(dir);
     test_project_roundtrip(dir, data_dir);
+    test_user_presets(data_dir);
     test_gcode_toolpath(dir);
 
     fprintf(stderr, "\n═══ contract tests: %d checks, %d failures ═══\n",

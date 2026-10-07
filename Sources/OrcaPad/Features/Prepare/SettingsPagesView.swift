@@ -126,13 +126,8 @@ struct SettingsPagesScreen: View {
         .navigationBarTitleDisplayMode(.inline)
         .searchable(text: $search, placement: .navigationBarDrawer(displayMode: .automatic))
         .toolbar {
-            let modified = environment.presets.modifiedKeys(in: kind).count
-            if modified > 0 {
-                ToolbarItem(placement: .primaryAction) {
-                    Button("Reset \(modified)") {
-                        Task { await environment.presets.resetKind(kind) }
-                    }
-                }
+            ToolbarItem(placement: .primaryAction) {
+                PresetActionsMenu(kind: kind)
             }
         }
     }

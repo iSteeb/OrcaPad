@@ -392,6 +392,33 @@ public final class EnginePresets: @unchecked Sendable {
         return .success(())
     }
 
+    /// Desktop "Save preset": the edited preset of `kind` becomes user
+    /// preset `name` (persisted under the data dir) and is selected.
+    public func saveUser(kind: PresetKind, name: String, detach: Bool) -> Result<Void, BridgeError> {
+        let operation = "EnginePresets.saveUser"
+        lock.lock(); defer { lock.unlock() }
+        guard let handle else { return .failure(invalidHandle(operation)) }
+        if let error = bridgeFailure(operation: operation, call: {
+            name.withCString { orca_presets_save_user(handle, kind.rawValue, $0, detach ? 1 : 0) }
+        }) {
+            return .failure(error)
+        }
+        return .success(())
+    }
+
+    /// Desktop "Delete preset" (user presets only).
+    public func deleteUser(kind: PresetKind, name: String) -> Result<Void, BridgeError> {
+        let operation = "EnginePresets.deleteUser"
+        lock.lock(); defer { lock.unlock() }
+        guard let handle else { return .failure(invalidHandle(operation)) }
+        if let error = bridgeFailure(operation: operation, call: {
+            name.withCString { orca_presets_delete_user(handle, kind.rawValue, $0) }
+        }) {
+            return .failure(error)
+        }
+        return .success(())
+    }
+
     /// Serialized key→value dictionary of either the edited or the selected
     /// system preset config of `kind` (the client diffs the two to detect
     /// modified values).

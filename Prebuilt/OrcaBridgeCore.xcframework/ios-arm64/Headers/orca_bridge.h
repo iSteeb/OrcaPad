@@ -7,7 +7,7 @@ extern "C" {
 #endif
 
 /// Version of the C ABI contract in this header. Callers verify it at runtime.
-#define ORCA_BRIDGE_ABI_VERSION ((uint32_t)11)
+#define ORCA_BRIDGE_ABI_VERSION ((uint32_t)12)
 
 typedef int32_t orca_status_code;
 #define ORCA_STATUS_OK                     ((orca_status_code)0)
@@ -196,6 +196,23 @@ void orca_preset_entry_dispose(orca_preset_entry *entry);
 orca_result orca_presets_print_volume(orca_presets *presets,
                                       double *out_min_x, double *out_min_y,
                                       double *out_max_x, double *out_max_y);
+
+/// Desktop Tab::save_preset: saves the edited preset of `kind` as the user
+/// preset `name` (new, or overwriting an existing user preset), selects it,
+/// and writes <data_dir>/user/default/<kind>/<name>.json (+ .info). `detach`
+/// clears the link to the parent system preset. Name rules are desktop
+/// SavePresetDialog's: non-empty, no leading/trailing space, none of
+/// <>[]:/\|?*" , no "(modified)" suffix, not a reserved/alias name —
+/// violations are ORCA_STATUS_INVALID_ARGUMENT; overwriting a system preset
+/// is ORCA_STATUS_INVALID_CONFIGURATION.
+orca_result orca_presets_save_user(orca_presets *presets, int32_t kind,
+                                   const char *name, uint8_t detach);
+/// Desktop Tab::delete_preset: deletes user preset `name` of `kind` (file +
+/// entry). Deleting the selected preset selects the next visible one.
+/// System/default presets and presets other presets inherit from are
+/// ORCA_STATUS_INVALID_CONFIGURATION.
+orca_result orca_presets_delete_user(orca_presets *presets, int32_t kind,
+                                     const char *name);
 
 /// Plate (bed) type state — desktop sidebar "plate type" parity. Values are
 /// the engine's `Slic3r::BedType` (1 = Cool Plate … btCount-1); slicing reads

@@ -445,9 +445,14 @@ orca_result orca_presets_select(orca_presets *presets, const char *machine,
         candidate->update_compatible(
             Slic3r::PresetSelectCompatibleType::Always);
         candidate->filaments.select_preset_by_name(filament, false);
+        // desktop Sidebar filament combo: the bundle's per-extruder filament
+        // list drives full_config metadata (inherits, settings ids)
+        candidate->set_filament_preset(0, filament);
         candidate->prints.select_preset_by_name(process, false);
         if (candidate->printers.get_selected_preset().name != machine ||
             candidate->filaments.get_selected_preset().name != filament ||
+            candidate->filament_presets.empty() ||
+            candidate->filament_presets.front() != filament ||
             candidate->prints.get_selected_preset().name != process)
             return orcapad_fail(ORCA_STATUS_INVALID_CONFIGURATION, operation,
                                 "preset combination is not selectable");
@@ -583,6 +588,113 @@ orca_result orca_presets_print_volume(orca_presets *presets,
         *out_min_y = min_y;
         *out_max_x = max_x;
         *out_max_y = max_y;
+        return orcapad_ok();
+    });
+}
+
+// --- user presets (desktop Tab::save_preset / delete_preset) ----------------
+
+static bool orcapad_preset_kind_collection(int32_t kind, orca_presets *presets,
+                                           Slic3r::PresetCollection **out);
+
+static const char *orcapad_invalid_preset_name(Slic3r::PresetCollection &collection,
+                                               const std::string &name) {
+    // SavePresetDialog::Item::update (src/slic3r/GUI/SavePresetDialog.cpp)
+    if (name.empty()) return "The name is not allowed to be empty.";
+    if (name.find_first_of("<>[]:/\\|?*\"") != std::string::npos)
+        return "Name is invalid; illegal characters: <>[]:/\\|?*\"";
+    if (name.find(Slic3r::PresetCollection::get_suffix_modified()) != std::string::npos)
+        return "Name is invalid; illegal suffix: (modified)";
+    if (name == "Default Setting" || name == "Default Printer" ||
+        name == Slic3r::PresetBundle::ORCA_DEFAULT_FILAMENT_PLACEHOLDER)
+        return "Name is unavailable.";
+    if (name.front() == ' ') return "The name is not allowed to start with space character.";
+    if (name.back() == ' ') return "The name is not allowed to end with space character.";
+    if (collection.get_preset_name_by_alias(name) != name)
+        return "The name cannot be the same as a preset alias name.";
+    return nullptr;
+}
+
+orca_result orca_presets_save_user(orca_presets *presets, int32_t kind,
+                                   const char *name, uint8_t detach) {
+    constexpr const char *operation = "orca_presets_save_user";
+    if (!presets)
+        return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation, "presets handle is null");
+    if (!name)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation, "name is null");
+    Slic3r::PresetCollection *collection = nullptr;
+    if (!orcapad_preset_kind_collection(kind, presets, &collection))
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation, "preset kind is invalid");
+
+    return orcapad_guard(operation, [&]() -> orca_result {
+        Slic3r::PresetBundle &bundle = *presets->bundle;
+        const std::string preset_name(name);
+        if (const char *invalid = orcapad_invalid_preset_name(*collection, preset_name))
+            return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation, invalid);
+        Slic3r::Preset *existing = collection->find_preset(preset_name, false);
+        if (existing && existing->name == preset_name && !existing->can_overwrite())
+            return orcapad_fail(ORCA_STATUS_INVALID_CONFIGURATION, operation,
+                                "Overwriting a system profile is not allowed.");
+        const bool exists = existing && existing->name == preset_name;
+
+        // Orca (Tab::save_preset): a new filament derived from a system
+        // preset is restricted to the current printer unless already scoped
+        Slic3r::Preset &edited = collection->get_edited_preset();
+        if (kind == 1 && !exists && edited.is_system) {
+            const Slic3r::Preset &printer = bundle.printers.get_selected_preset_base();
+            auto *compatible = edited.config.option<Slic3r::ConfigOptionStrings>("compatible_printers");
+            if (compatible && compatible->values.empty())
+                compatible->values.push_back(printer.name);
+        }
+
+        collection->save_current_preset(preset_name, detach != 0, false, nullptr);
+        Slic3r::Preset *saved = collection->find_preset(preset_name, false, true);
+        if (!saved || saved->name != preset_name || saved->is_system)
+            return orcapad_fail(ORCA_STATUS_ENGINE_FAILURE, operation,
+                                "engine did not create the user preset");
+        saved->sync_info = exists ? "update" : "create";
+        saved->save_info();
+        if (kind == 1) bundle.set_filament_preset(0, preset_name);
+        bundle.update_compatible(Slic3r::PresetSelectCompatibleType::Never);
+        return orcapad_ok();
+    });
+}
+
+orca_result orca_presets_delete_user(orca_presets *presets, int32_t kind,
+                                     const char *name) {
+    constexpr const char *operation = "orca_presets_delete_user";
+    if (!presets)
+        return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation, "presets handle is null");
+    if (!name || !name[0])
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation, "name is empty");
+    Slic3r::PresetCollection *collection = nullptr;
+    if (!orcapad_preset_kind_collection(kind, presets, &collection))
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation, "preset kind is invalid");
+
+    return orcapad_guard(operation, [&]() -> orca_result {
+        Slic3r::PresetBundle &bundle = *presets->bundle;
+        Slic3r::Preset *preset = collection->find_preset(name, false, true);
+        if (!preset || preset->name != name)
+            return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation, "preset was not found");
+        if (!preset->can_overwrite() || preset->is_external)
+            return orcapad_fail(ORCA_STATUS_INVALID_CONFIGURATION, operation,
+                                "only user presets can be deleted");
+        for (const Slic3r::Preset &other : *collection)
+            if (other.inherits() == preset->name)
+                return orcapad_fail(ORCA_STATUS_INVALID_CONFIGURATION, operation,
+                                    "Presets inherited by other presets cannot be deleted!");
+        const bool selected = collection->get_selected_preset().name == preset->name;
+        if (selected) {
+            if (!collection->delete_current_preset())
+                return orcapad_fail(ORCA_STATUS_ENGINE_FAILURE, operation,
+                                    "engine refused to delete the selected preset");
+        } else if (!collection->delete_preset(preset->name)) {
+            return orcapad_fail(ORCA_STATUS_ENGINE_FAILURE, operation,
+                                "engine refused to delete the preset");
+        }
+        if (kind == 1)
+            bundle.set_filament_preset(0, bundle.filaments.get_selected_preset_name());
+        bundle.update_compatible(Slic3r::PresetSelectCompatibleType::Never);
         return orcapad_ok();
     });
 }

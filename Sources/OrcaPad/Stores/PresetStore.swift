@@ -323,7 +323,67 @@ final class PresetStore {
     /// open). Only valid inside `withExclusiveSession`.
     func reloadFromEngine() async {
         precondition(isSelecting, "reloadFromEngine requires an exclusive preset session")
-        guard let engine else { return }
+        if await refreshFromEngine() {
+            status.report(.presets, "presets: project settings loaded")
+        }
+    }
+
+    // MARK: User presets (desktop Save / Delete preset)
+
+    func origin(of kind: PresetKind) -> PresetOrigin? {
+        let name: String
+        let entries: [PresetEntry]
+        switch kind {
+        case .machine: name = selection.machine; entries = machines
+        case .filament: name = selection.filament; entries = filaments
+        case .process: name = selection.process; entries = processes
+        }
+        return entries.first { $0.name == name }?.origin
+    }
+
+    func saveUserPreset(kind: PresetKind, name: String, detach: Bool) async {
+        guard let engine, isReady, !isSelecting else {
+            status.report(.presets, "save preset blocked: presets are busy")
+            return
+        }
+        isSelecting = true
+        defer { isSelecting = false }
+        let result = await BackgroundWork.run(operation: "save user preset") {
+            try engine.saveUser(kind: kind, name: name, detach: detach).get()
+        }
+        switch result {
+        case .success:
+            if await refreshFromEngine() {
+                status.report(.presets, "preset saved: \(name)")
+            }
+        case .failure(let failure):
+            status.report(.presets, failure: failure)
+        }
+    }
+
+    func deleteUserPreset(kind: PresetKind, name: String) async {
+        guard let engine, isReady, !isSelecting else {
+            status.report(.presets, "delete preset blocked: presets are busy")
+            return
+        }
+        isSelecting = true
+        defer { isSelecting = false }
+        let result = await BackgroundWork.run(operation: "delete user preset") {
+            try engine.deleteUser(kind: kind, name: name).get()
+        }
+        switch result {
+        case .success:
+            if await refreshFromEngine() {
+                status.report(.presets, "preset deleted: \(name)")
+            }
+        case .failure(let failure):
+            status.report(.presets, failure: failure)
+        }
+    }
+
+    /// Re-reads every listing, the selection, bed, plate type and dumps.
+    private func refreshFromEngine() async -> Bool {
+        guard let engine else { return false }
         let result = await BackgroundWork.run(operation: "reload presets") {
             let machines = try engine.entries(kind: .machine).get()
             let filaments = try engine.entries(kind: .filament).get()
@@ -374,9 +434,10 @@ final class PresetStore {
                 } ?? false
             }
             if durable { persist(payload.selection) }
-            status.report(.presets, "presets: project settings loaded")
+            return true
         case .failure(let failure):
             status.report(.presets, failure: failure)
+            return false
         }
     }
 
