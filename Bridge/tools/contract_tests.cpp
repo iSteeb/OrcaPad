@@ -234,7 +234,7 @@ static void test_md5_shim() {
 
 static void test_abi_version() {
     CHECK_EQ(orca_bridge_abi_version(), ORCA_BRIDGE_ABI_VERSION);
-    CHECK_EQ(ORCA_BRIDGE_ABI_VERSION, 8);
+    CHECK_EQ(ORCA_BRIDGE_ABI_VERSION, 9);
 }
 
 static void test_document_lifecycle(const std::string &dir) {
@@ -265,11 +265,10 @@ static void test_document_lifecycle(const std::string &dir) {
     orca_scene_snapshot_dispose(nullptr); // null-safe
 
     // slicing an empty document is a typed failure
-    double time_estimate = 0;
-    int64_t bytes = 0;
+    orca_slice_report empty_report;
     GUARD(g6, orca_plater_slice_to_gcode(plater, (dir + "/empty.gcode").c_str(),
-                                         nullptr, nullptr, &time_estimate,
-                                         &bytes));
+                                         nullptr, nullptr, nullptr,
+                                         &empty_report));
     expect_code(g6, ORCA_STATUS_INVALID_MODEL, "slice empty document");
     expect_owned_diagnostic(g6, "slice empty document");
 
@@ -887,6 +886,7 @@ static void test_presets(const std::string &data_dir) {
 struct ProgressRecord {
     std::atomic<int> calls{0};
     std::atomic<int> max_percent{0};
+    std::atomic<int> min_percent{1000};
 };
 
 static void progress_trampoline(int32_t percent, const char *message,
@@ -897,22 +897,36 @@ static void progress_trampoline(int32_t percent, const char *message,
     const int current = percent;
     if (current > record->max_percent.load())
         record->max_percent.store(current);
+    if (current < record->min_percent.load())
+        record->min_percent.store(current);
     (void)message;
 }
 
 static void check_slice_outputs(const char *gcode_path,
                                 const ResultGuard &guard,
-                                double time_estimate, int64_t bytes,
+                                orca_slice_report &report,
                                 ProgressRecord &progress, const char *what) {
     expect_ok(guard, what);
     if (!guard.ok()) return;
-    CHECK(time_estimate > 0.0);
-    CHECK(bytes > 0);
+    CHECK(report.time_estimate_s > 0.0);
+    CHECK(report.gcode_bytes > 0);
     struct stat status;
     CHECK(stat(gcode_path, &status) == 0);
-    CHECK_EQ(status.st_size, bytes);
+    CHECK_EQ(status.st_size, report.gcode_bytes);
     CHECK(progress.calls.load() > 0);
     CHECK(progress.max_percent.load() >= 99);
+    CHECK(progress.min_percent.load() >= 0); // warning statuses never leak
+    CHECK(report.warning_count == 0 || report.warnings != nullptr);
+    for (uint32_t i = 0; i < report.warning_count; ++i) {
+        const orca_slice_warning &w = report.warnings[i];
+        CHECK(w.level >= ORCA_SLICE_WARNING_TIP && w.level <= ORCA_SLICE_WARNING_CRITICAL);
+        CHECK(w.source >= ORCA_SLICE_SOURCE_VALIDATE && w.source <= ORCA_SLICE_SOURCE_CONFLICT);
+        CHECK(w.code.data && w.message.data && w.detail.data);
+        CHECK(w.code.length > 0 || w.message.length > 0);
+    }
+    orca_slice_report_dispose(&report);
+    CHECK(report.warnings == nullptr && report.warning_count == 0);
+    orca_slice_report_dispose(&report); // idempotent
 }
 
 static void test_preset_metadata(const std::string &data_dir) {
@@ -1238,12 +1252,11 @@ static void test_slice_defaults(const std::string &dir) {
 
     const std::string gcode = dir + "/defaults.gcode";
     ProgressRecord progress;
-    double time_estimate = 0;
-    int64_t bytes = 0;
+    orca_slice_report report;
     GUARD(g3, orca_plater_slice_to_gcode(
                   plater, gcode.c_str(), progress_trampoline, &progress,
-                  &time_estimate, &bytes));
-    check_slice_outputs(gcode.c_str(), g3, time_estimate, bytes, progress,
+                  nullptr, &report));
+    check_slice_outputs(gcode.c_str(), g3, report, progress,
                         "slice defaults");
 
     // interop lock: the preset-free overlay must land in the exported config
@@ -1267,15 +1280,15 @@ static void test_slice_defaults(const std::string &dir) {
 
     // invalid outputs/paths are typed rejections
     GUARD(g4, orca_plater_slice_to_gcode(plater, "", progress_trampoline,
-                                         &progress, &time_estimate, &bytes));
+                                         &progress, nullptr, &report));
     expect_code(g4, ORCA_STATUS_INVALID_ARGUMENT, "slice empty path");
     GUARD(g5, orca_plater_slice_to_gcode(plater, gcode.c_str(),
                                          progress_trampoline, &progress,
-                                         nullptr, &bytes));
+                                         nullptr, nullptr));
     expect_code(g5, ORCA_STATUS_INVALID_ARGUMENT, "slice null out");
     GUARD(g6, orca_plater_slice_to_gcode(nullptr, gcode.c_str(),
                                          progress_trampoline, &progress,
-                                         &time_estimate, &bytes));
+                                         nullptr, &report));
     expect_code(g6, ORCA_STATUS_INVALID_HANDLE, "slice null plater");
 
     orca_plater_free(plater);
@@ -1292,12 +1305,19 @@ static void test_slice_with_presets(const std::string &dir,
     GUARD(g0, orca_plater_new(&plater));
     expect_ok(g0, "plater_new");
     const std::string gcode = dir + "/presets.gcode";
-    double time_estimate = 0;
-    int64_t bytes = 0;
+    orca_slice_report report;
     GUARD(g1, orca_plater_slice_to_gcode_with_presets(
                   plater, nullptr, gcode.c_str(), nullptr, nullptr,
-                  &time_estimate, &bytes));
+                  nullptr, &report));
     expect_code(g1, ORCA_STATUS_INVALID_HANDLE, "slice null presets");
+
+    // A real compatible system triple: the fresh bundle's "- default -"
+    // printer fails Print::validate exactly as it would on desktop (so do
+    // some vendor profiles, e.g. Anycubic Vyper — no G92 E0 layer reset).
+    GUARD(gsel, orca_presets_select(presets, "Bambu Lab X1 Carbon 0.4 nozzle",
+                                    "Bambu PLA Basic @BBL X1C",
+                                    "0.20mm Standard @BBL X1C"));
+    expect_ok(gsel, "select X1C triple");
 
     const std::string cube = write_cube_stl(dir, "orcapad-cube6.stl");
     orca_object_id object_id = 0;
@@ -1308,8 +1328,8 @@ static void test_slice_with_presets(const std::string &dir,
     ProgressRecord progress;
     GUARD(g3, orca_plater_slice_to_gcode_with_presets(
                   plater, presets, gcode.c_str(), progress_trampoline,
-                  &progress, &time_estimate, &bytes));
-    check_slice_outputs(gcode.c_str(), g3, time_estimate, bytes, progress,
+                  &progress, nullptr, &report));
+    check_slice_outputs(gcode.c_str(), g3, report, progress,
                         "slice with presets");
     CHECK_EQ(snapshot_revision(plater), revision); // slices never mutate
 
@@ -1331,25 +1351,122 @@ static void test_slice_with_presets(const std::string &dir,
         CHECK(saw_printable_area);
     }
 
+    // Print::validate warnings are surfaced in the report (Orca: Lightning
+    // base pattern with normal supports falls back to Rectilinear)
+    GUARD(gw1, orca_presets_set_value(presets, 2, "enable_support", "1"));
+    expect_ok(gw1, "enable support");
+    GUARD(gw2, orca_presets_set_value(presets, 2, "support_type", "normal(auto)"));
+    expect_ok(gw2, "normal supports");
+    GUARD(gw3, orca_presets_set_value(presets, 2, "support_base_pattern", "lightning"));
+    expect_ok(gw3, "lightning base");
+    GUARD(gw4, orca_plater_slice_to_gcode_with_presets(
+                  plater, presets, gcode.c_str(), nullptr, nullptr, nullptr, &report));
+    expect_ok(gw4, "slice with validate warning");
+    bool saw_validate_warning = false;
+    for (uint32_t i = 0; i < report.warning_count; ++i) {
+        const orca_slice_warning &w = report.warnings[i];
+        if (w.source == ORCA_SLICE_SOURCE_VALIDATE &&
+            strcmp(w.code.data, "support_base_pattern") == 0 &&
+            strstr(w.message.data, "Lightning") != nullptr)
+            saw_validate_warning = true;
+    }
+    CHECK(saw_validate_warning);
+    orca_slice_report_dispose(&report);
+    GUARD(gw5, orca_presets_reset_kind(presets, 2));
+    expect_ok(gw5, "reset process");
+
+    // Print::validate errors refuse the slice with the engine's message:
+    // the "- default -" machine (relative E, no G92 E0 layer reset)
+    orca_presets *raw = nullptr;
+    GUARD(gr, orca_presets_new(data_dir.c_str(), &raw));
+    expect_ok(gr, "presets_new raw");
+    GUARD(gv, orca_plater_slice_to_gcode_with_presets(
+                  plater, raw, gcode.c_str(), nullptr, nullptr, nullptr, &report));
+    expect_code(gv, ORCA_STATUS_INVALID_CONFIGURATION, "validate rejects default printer");
+    expect_owned_diagnostic(gv, "validate rejects default printer");
+    orca_presets_free(raw);
+
     orca_plater_free(plater);
     orca_presets_free(presets);
+}
+
+struct CancelOnProgress {
+    orca_slice_job *job;
+    std::atomic<int> calls{0};
+};
+
+static void cancel_trampoline(int32_t percent, const char *, void *context) {
+    auto *record = static_cast<CancelOnProgress *>(context);
+    // cancel from inside the slicing thread once real work started
+    if (percent >= 5 && record->calls.fetch_add(1) == 0)
+        orca_slice_job_cancel(record->job);
+}
+
+static void test_slice_cancel(const std::string &dir) {
+    GUARD(g0, orca_slice_job_new(nullptr));
+    expect_code(g0, ORCA_STATUS_INVALID_ARGUMENT, "job_new(null)");
+    orca_slice_job_cancel(nullptr); // null-safe
+    orca_slice_job_free(nullptr);   // null-safe
+
+    const std::string cube = write_cube_stl(dir, "orcapad-cube8.stl");
+    orca_plater *plater = nullptr;
+    GUARD(g1, orca_plater_new(&plater));
+    expect_ok(g1, "plater_new");
+    orca_object_id object_id = 0;
+    orca_revision revision = 0;
+    GUARD(g2, orca_plater_add_stl(plater, cube.c_str(), 100.0, 100.0, &object_id, &revision));
+    expect_ok(g2, "add cube");
+    const std::string gcode = dir + "/cancel.gcode";
+
+    // cancelled before start: immediate typed cancellation
+    orca_slice_job *job = nullptr;
+    GUARD(g3, orca_slice_job_new(&job));
+    expect_ok(g3, "job_new");
+    orca_slice_job_cancel(job);
+    orca_slice_report report;
+    GUARD(g4, orca_plater_slice_to_gcode(plater, gcode.c_str(), nullptr, nullptr,
+                                         job, &report));
+    expect_code(g4, ORCA_STATUS_CANCELLED, "slice pre-cancelled");
+    CHECK(report.warnings == nullptr && report.gcode_bytes == 0);
+    orca_slice_job_free(job);
+
+    // cancelled mid-slice from the progress callback
+    orca_slice_job *job2 = nullptr;
+    GUARD(g5, orca_slice_job_new(&job2));
+    expect_ok(g5, "job_new 2");
+    CancelOnProgress record{job2};
+    GUARD(g6, orca_plater_slice_to_gcode(plater, gcode.c_str(), cancel_trampoline,
+                                         &record, job2, &report));
+    expect_code(g6, ORCA_STATUS_CANCELLED, "slice cancelled mid-run");
+    orca_slice_job_free(job2);
+
+    // a fresh job slices normally afterwards (no sticky engine state)
+    orca_slice_job *job3 = nullptr;
+    GUARD(g7, orca_slice_job_new(&job3));
+    expect_ok(g7, "job_new 3");
+    ProgressRecord progress;
+    GUARD(g8, orca_plater_slice_to_gcode(plater, gcode.c_str(), progress_trampoline,
+                                         &progress, job3, &report));
+    check_slice_outputs(gcode.c_str(), g8, report, progress, "slice after cancel");
+    orca_slice_job_free(job3);
+    CHECK_EQ(snapshot_revision(plater), revision);
+    orca_plater_free(plater);
 }
 
 static void test_standalone_slice(const std::string &dir) {
     const std::string cube = write_cube_stl(dir, "orcapad-cube7.stl");
     const std::string gcode = dir + "/standalone.gcode";
     ProgressRecord progress;
-    double time_estimate = 0;
-    int64_t bytes = 0;
+    orca_slice_report report;
     GUARD(g1, orca_slice_to_gcode(cube.c_str(), gcode.c_str(),
                                   progress_trampoline, &progress,
-                                  &time_estimate, &bytes));
-    check_slice_outputs(gcode.c_str(), g1, time_estimate, bytes, progress,
+                                  nullptr, &report));
+    check_slice_outputs(gcode.c_str(), g1, report, progress,
                         "standalone slice");
 
     GUARD(g2, orca_slice_to_gcode((dir + "/missing.stl").c_str(),
                                   gcode.c_str(), nullptr, nullptr,
-                                  &time_estimate, &bytes));
+                                  nullptr, &report));
     expect_code(g2, ORCA_STATUS_IO_FAILURE, "standalone slice missing input");
 }
 
@@ -1494,6 +1611,7 @@ int main() {
     test_slice_defaults(dir);
     test_slice_with_presets(dir, data_dir);
     test_standalone_slice(dir);
+    test_slice_cancel(dir);
     test_gcode_toolpath(dir);
 
     fprintf(stderr, "\n═══ contract tests: %d checks, %d failures ═══\n",

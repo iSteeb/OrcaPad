@@ -41,28 +41,40 @@ struct PrepareTabView: View {
 
     // MARK: Slice action (desktop parity: top toolbar)
 
+    @ViewBuilder
     private var sliceButton: some View {
-        Button {
-            Task {
-                await environment.slicing.run(
-                    document: environment.document,
-                    presets: presets
-                )
+        if environment.slicing.isSlicing {
+            Button {
+                environment.slicing.cancel()
+            } label: {
+                HStack(spacing: 6) {
+                    ProgressView(
+                        value: Double(environment.slicing.progress?.percent ?? 0),
+                        total: 100
+                    )
+                    .frame(width: 64)
+                    Image(systemName: "xmark.circle.fill")
+                }
             }
-        } label: {
-            if let progress = environment.slicing.progress {
-                ProgressView(value: Double(progress.percent), total: 100)
-                    .frame(width: 72)
-            } else {
+            .accessibilityLabel("Cancel slicing")
+        } else {
+            Button {
+                Task {
+                    await environment.slicing.run(
+                        document: environment.document,
+                        presets: presets
+                    )
+                }
+            } label: {
                 Label("Slice", systemImage: "scissors")
                     .font(.headline)
             }
+            .disabled(
+                environment.document.scene?.objects.isEmpty != false ||
+                    environment.document.isBusy ||
+                    presets.isSelecting
+            )
         }
-        .disabled(
-            environment.document.scene?.objects.isEmpty != false ||
-                environment.document.isBusy ||
-                presets.isSelecting
-        )
     }
 
     // MARK: Editor
@@ -216,6 +228,7 @@ struct PrepareTabView: View {
                 }
                 .font(.caption.weight(.semibold))
             }
+            SliceWarningsList(warnings: outcome.result.warnings)
         }
     }
 }
@@ -264,5 +277,58 @@ private struct PlateTypeRow: View {
     /// Engine BedType v (1-based) ↔ schema enum index v-1 (count verified).
     private func label(_ value: Int32, _ labels: [String]) -> String {
         labels[Int(value) - 1]
+    }
+}
+
+/// Desktop slicing notifications parity: engine warnings after a slice, with
+/// the desktop's texts for coded G-code warnings (Plater.cpp
+/// get_slice_warning_string, GLCanvas3D.cpp conflict text).
+struct SliceWarningsList: View {
+    let warnings: [SliceWarning]
+
+    init(warnings: [SliceWarning]) {
+        // Desktop shows no text for "not_generate_timelapse" (Plater.cpp).
+        self.warnings = warnings.filter { $0.code != "not_generate_timelapse" }
+    }
+
+    var body: some View {
+        if !warnings.isEmpty {
+            VStack(alignment: .leading, spacing: 6) {
+                ForEach(Array(warnings.enumerated()), id: \.offset) { _, warning in
+                    HStack(alignment: .firstTextBaseline, spacing: 6) {
+                        Image(systemName: warning.level == .critical
+                              ? "exclamationmark.octagon.fill"
+                              : warning.level == .warning ? "exclamationmark.triangle.fill" : "info.circle")
+                            .foregroundStyle(warning.level == .critical ? Color.red
+                                             : warning.level == .warning ? Color.orange : Color.secondary)
+                        Text(Self.text(for: warning))
+                            .font(.caption)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+            }
+            .padding(.top, 6)
+        }
+    }
+
+    static func text(for warning: SliceWarning) -> String {
+        let params = warning.detail.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        switch warning.code {
+        case "bed_temperature_too_high_than_filament":
+            return "The current hot bed temperature is relatively high. The nozzle may be clogged when printing this filament in a closed enclosure. Please open the front door and/or remove the upper glass."
+        case "the_actual_nozzle_hrc_smaller_than_the_required_nozzle_hrc":
+            return "The nozzle hardness required by the filament is higher than the default nozzle hardness of the printer. Please replace the hardened nozzle or filament, otherwise, the nozzle will be attrited or damaged."
+        case "not_support_traditional_timelapse":
+            return "Enabling traditional timelapse photography may cause surface imperfections. It is recommended to change to smooth mode."
+        case "smooth_timelapse_without_prime_tower":
+            return "Smooth mode for timelapse is enabled, but the prime tower is off, which may cause print defects. Please enable the prime tower, re-slice and print again."
+        case "gcode_path_conflict" where params.count == 4:
+            let z = Double(params[2]).map { String(format: "%.2f", $0) } ?? params[2]
+            return "Conflicts of G-code paths have been found at layer \(params[3]), Z = \(z)mm. Please separate the conflicted objects farther (\(params[0]) <-> \(params[1]))."
+        default:
+            let base = warning.message.isEmpty ? warning.code : warning.message
+            return warning.source == .objectStep && !warning.detail.isEmpty
+                ? "\(warning.detail): \(base)" : base
+        }
     }
 }

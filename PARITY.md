@@ -86,8 +86,8 @@ yet in `Bridge/engine-sources.sh`), **Client-reimpl** (desktop logic lives in
 | Move scrubber | `GCodeViewer` sequential slider | `PreviewTabView.swift:118` | ✅ | — |
 | G-code line window | `GCodeViewer.hpp:112-154` | none found | ❌ | ABI: `gcode_id` per segment + file mapping |
 | Slice progress | notification/progress bar | `SliceService.swift:23`, `PrepareTabView.swift:53` | ✅ | — |
-| Cancel slicing | `BackgroundSlicingProcess` | none found | ❌ | Bridge (`PrintBase::cancel`) |
-| Slicing warnings / errors list | `NotificationManager.hpp:85` | none found (only hard failures surface) | ❌ | ABI: `Print::validate` warnings, processor warnings |
+| Cancel slicing | `BackgroundSlicingProcess` | ABI v9 `orca_slice_job` (`PrintBase::cancel`, thread-safe); cancel button in Prepare toolbar (`PrepareTabView.swift`) | ✅ | — |
+| Slicing warnings / errors list | `NotificationManager.hpp:85`, `Plater.cpp:5608` | ABI v9 `orca_slice_report`: `Print::validate` (errors refuse the slice, warnings listed), print/object step warnings, G-code processor warnings, path conflicts; `SliceWarningsList` with desktop texts | ✅ | — |
 | Export / share G-code | `Plater.cpp:14857` | `ShareLink` in `PreviewTabView.swift` file actions + Prepare slice footer (Save to Files, AirDrop, apps) | ✅ | — |
 | Open external G-code (viewer mode) | `PartPlate.cpp:5969` | `PreviewTabView.swift` `.fileImporter` (`.gcode/.g/.gco/.ngc`) → `orca_gcode_load` | ✅ (Files "Open in" document types still missing) | — |
 | G-code thumbnails | `Plater.cpp` thumbnail callback | `orca_bridge.cpp:1489` passes `nullptr` | ❌ | Client renders offscreen in Metal + ABI callback (`Thumbnails.cpp` is compiled) |
@@ -114,7 +114,7 @@ yet in `Bridge/engine-sources.sh`), **Client-reimpl** (desktop logic lives in
 
 1. ~~**Bed type (`curr_bed_type`)**~~ ✅ done (ABI v8).
 2. ~~Export / share G-code and open external G-code~~ ✅ done (also fixed: re-slicing to the same path never refreshed Preview; imported objects were named "orcapad-import").
-3. **Slice cancel + warnings list**: Bridge (`PrintBase::cancel`, validate warnings). This folds into immutable slice jobs.
+3. ~~Slice cancel + warnings list~~ ✅ done (ABI v9; slices now run `Print::validate` like desktop — previously OrcaPad exported G-code desktop would refuse).
 4. **3MF load/save**: Closure work with vendored dependencies only. It unlocks projects, multi-plate persistence and Bambu-style files.
 5. **User presets (C5b)** + unsaved-changes prompt + physical printers: Bridge over compiled `Preset.cpp`.
 6. **Arrange / orient / lay-flat**: needs NLopt for Arrange; `Orient.cpp` is a small closure step; lay-flat is client logic on the v7 rotate.

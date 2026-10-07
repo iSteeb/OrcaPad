@@ -7,7 +7,7 @@ extern "C" {
 #endif
 
 /// Version of the C ABI contract in this header. Callers verify it at runtime.
-#define ORCA_BRIDGE_ABI_VERSION ((uint32_t)8)
+#define ORCA_BRIDGE_ABI_VERSION ((uint32_t)9)
 
 typedef int32_t orca_status_code;
 #define ORCA_STATUS_OK                     ((orca_status_code)0)
@@ -291,24 +291,67 @@ orca_result orca_presets_current(orca_presets *presets, int32_t kind,
 /// message strings are borrowed and valid only for the callback.
 typedef void (*orca_progress_fn)(int32_t percent, const char *message, void *ctx);
 
-/// Full slice: STL in → G-code file out, through OrcaSlicer's real pipeline.
-/// All slice calls are blocking and must run off the main thread. Output
-/// values are initialized defensively and valid only when the result is OK.
+/// Cancellation token for one slice call (desktop "Cancel" parity). Create
+/// before slicing, pass to the slice call, and `cancel` from ANY thread while
+/// it runs (never takes the engine lock). Cancelling before the slice starts
+/// makes it return ORCA_STATUS_CANCELLED immediately. Free only after the
+/// slice call returned.
+typedef struct orca_slice_job orca_slice_job;
+orca_result orca_slice_job_new(orca_slice_job **out_job);
+void orca_slice_job_cancel(orca_slice_job *job);
+void orca_slice_job_free(orca_slice_job *job);
+
+#define ORCA_SLICE_WARNING_TIP      ((int32_t)0)
+#define ORCA_SLICE_WARNING_WARNING  ((int32_t)1)
+#define ORCA_SLICE_WARNING_CRITICAL ((int32_t)2)
+
+#define ORCA_SLICE_SOURCE_VALIDATE     ((int32_t)1) // Print::validate warning
+#define ORCA_SLICE_SOURCE_PRINT_STEP   ((int32_t)2) // Print step warnings
+#define ORCA_SLICE_SOURCE_OBJECT_STEP  ((int32_t)3) // PrintObject step warnings
+#define ORCA_SLICE_SOURCE_GCODE        ((int32_t)4) // GCodeProcessorResult::warnings
+#define ORCA_SLICE_SOURCE_CONFLICT     ((int32_t)5) // G-code path conflict
+
+/// One engine-reported slicing warning. `code` is the engine identifier
+/// (G-code warning id such as "bed_temperature_too_high_than_filament",
+/// validate opt_key, or "gcode_path_conflict") and may be empty; `message` is
+/// engine text and may be empty for coded G-code warnings; `detail` carries
+/// the object name or newline-joined params.
+typedef struct {
+    int32_t           level;
+    int32_t           source;
+    orca_owned_string code;
+    orca_owned_string message;
+    orca_owned_string detail;
+} orca_slice_warning;
+
+/// Caller-owned slice outcome; valid only when the slice result is OK.
+typedef struct {
+    double              time_estimate_s;   // normal mode
+    int64_t             gcode_bytes;
+    uint32_t            warning_count;
+    orca_slice_warning *warnings;
+} orca_slice_report;
+void orca_slice_report_dispose(orca_slice_report *report);
+
+/// Full slice: model in → validated (Print::validate: errors are
+/// ORCA_STATUS_INVALID_CONFIGURATION with the engine message) → processed →
+/// G-code file out. Blocking; run off the main thread. `job` may be null.
+/// Cancellation returns ORCA_STATUS_CANCELLED.
 orca_result orca_slice_to_gcode(const char *stl_path, const char *gcode_path,
                                 orca_progress_fn progress, void *ctx,
-                                double *out_time_estimate_s,
-                                int64_t *out_gcode_bytes);
+                                orca_slice_job *job,
+                                orca_slice_report *out_report);
 
 orca_result orca_plater_slice_to_gcode(orca_plater *plater,
                                        const char *gcode_path,
                                        orca_progress_fn progress, void *ctx,
-                                       double *out_time_estimate_s,
-                                       int64_t *out_gcode_bytes);
+                                       orca_slice_job *job,
+                                       orca_slice_report *out_report);
 
 orca_result orca_plater_slice_to_gcode_with_presets(
     orca_plater *plater, orca_presets *presets, const char *gcode_path,
-    orca_progress_fn progress, void *ctx, double *out_time_estimate_s,
-    int64_t *out_gcode_bytes);
+    orca_progress_fn progress, void *ctx, orca_slice_job *job,
+    orca_slice_report *out_report);
 
 #if defined(__cplusplus)
 }

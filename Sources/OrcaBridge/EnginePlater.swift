@@ -192,24 +192,20 @@ public final class EnginePlater: @unchecked Sendable {
 
     public func slice(
         to outputPath: String,
+        job: SliceJob,
         progress: @escaping @Sendable (Int, String) -> Void
     ) throws -> SliceResult {
         try lock.withLock {
             try Self.withProgressContext(progress) { callback, context in
-                var time = 0.0
-                var bytes: Int64 = 0
+                var report = orca_slice_report()
+                defer { orca_slice_report_dispose(&report) }
                 let result = outputPath.withCString { outputPointer in
                     orca_plater_slice_to_gcode(
-                        handle,
-                        outputPointer,
-                        callback,
-                        context,
-                        &time,
-                        &bytes
+                        handle, outputPointer, callback, context, job.handle, &report
                     )
                 }
                 try BridgeResult.consume(result, operation: "slice document")
-                return SliceResult(timeEstimateSeconds: time, gcodeBytes: bytes)
+                return try SliceResult(decoding: report, operation: "slice document")
             }
         }
     }
@@ -217,28 +213,21 @@ public final class EnginePlater: @unchecked Sendable {
     public func slice(
         to outputPath: String,
         presets: EnginePresets,
+        job: SliceJob,
         progress: @escaping @Sendable (Int, String) -> Void
     ) throws -> SliceResult {
         try Self.withLockedHandles(plater: self, presets: presets) { platerHandle, presetHandle in
             try Self.withProgressContext(progress) { callback, context in
-                var time = 0.0
-                var bytes: Int64 = 0
+                var report = orca_slice_report()
+                defer { orca_slice_report_dispose(&report) }
                 let result = outputPath.withCString { outputPointer in
                     orca_plater_slice_to_gcode_with_presets(
-                        platerHandle,
-                        presetHandle,
-                        outputPointer,
-                        callback,
-                        context,
-                        &time,
-                        &bytes
+                        platerHandle, presetHandle, outputPointer,
+                        callback, context, job.handle, &report
                     )
                 }
-                try BridgeResult.consume(
-                    result,
-                    operation: "slice document with presets"
-                )
-                return SliceResult(timeEstimateSeconds: time, gcodeBytes: bytes)
+                try BridgeResult.consume(result, operation: "slice document with presets")
+                return try SliceResult(decoding: report, operation: "slice document with presets")
             }
         }
     }
@@ -496,9 +485,84 @@ public final class EnginePlater: @unchecked Sendable {
     }
 }
 
+/// Cancellation token for one slice (desktop "Cancel"). `cancel()` is safe
+/// from any thread while the slice runs; it never takes the engine lock.
+public final class SliceJob: @unchecked Sendable {
+    fileprivate let handle: OpaquePointer
+
+    public init() throws {
+        var raw: OpaquePointer?
+        try BridgeResult.consume(orca_slice_job_new(&raw), operation: "create slice job")
+        guard let raw else {
+            throw BridgeError.local(
+                .internalInvariant,
+                operation: "create slice job",
+                diagnostic: "Bridge returned OK without a slice job"
+            )
+        }
+        handle = raw
+    }
+
+    public func cancel() { orca_slice_job_cancel(handle) }
+
+    deinit { orca_slice_job_free(handle) }
+}
+
+public struct SliceWarning: Sendable, Hashable {
+    public enum Level: Int32, Sendable { case tip = 0, warning = 1, critical = 2 }
+    public enum Source: Int32, Sendable {
+        case validate = 1, printStep = 2, objectStep = 3, gcode = 4, conflict = 5
+    }
+    public let level: Level
+    public let source: Source
+    /// Engine identifier (G-code warning id, validate opt_key, or
+    /// "gcode_path_conflict"); may be empty.
+    public let code: String
+    /// Engine text; may be empty for coded G-code warnings.
+    public let message: String
+    /// Object name or newline-joined params.
+    public let detail: String
+}
+
 public struct SliceResult: Sendable {
     public let timeEstimateSeconds: Double
     public let gcodeBytes: Int64
+    public let warnings: [SliceWarning]
+
+    init(decoding report: orca_slice_report, operation: String) throws {
+        guard report.time_estimate_s.isFinite, report.time_estimate_s >= 0,
+              report.gcode_bytes >= 0,
+              report.warning_count == 0 || report.warnings != nil else {
+            throw BridgeError.local(
+                .internalInvariant, operation: operation,
+                diagnostic: "\(operation): Bridge returned an inconsistent slice report"
+            )
+        }
+        var warnings: [SliceWarning] = []
+        warnings.reserveCapacity(Int(report.warning_count))
+        for index in 0..<Int(report.warning_count) {
+            // Strings are consumed IN PLACE through the report's buffer (each
+            // is reset to empty), so the caller's orca_slice_report_dispose
+            // never double-frees them.
+            let slot = report.warnings.advanced(by: index)
+            guard let level = SliceWarning.Level(rawValue: slot.pointee.level),
+                  let source = SliceWarning.Source(rawValue: slot.pointee.source) else {
+                throw BridgeError.local(
+                    .internalInvariant, operation: operation,
+                    diagnostic: "\(operation): unknown warning level \(slot.pointee.level) / source \(slot.pointee.source)"
+                )
+            }
+            let code = try consumeBridgeString(&slot.pointee.code, operation: operation).get()
+            let message = try consumeBridgeString(&slot.pointee.message, operation: operation).get()
+            let detail = try consumeBridgeString(&slot.pointee.detail, operation: operation).get()
+            warnings.append(SliceWarning(
+                level: level, source: source, code: code, message: message, detail: detail
+            ))
+        }
+        timeEstimateSeconds = report.time_estimate_s
+        gcodeBytes = report.gcode_bytes
+        self.warnings = warnings
+    }
 }
 
 private final class ProgressBox: @unchecked Sendable {

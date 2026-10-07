@@ -51,6 +51,10 @@
 
 ## DISCOVERIES
 
+- [2026-10-13 CODE] OrcaPad never ran Print::validate before ABI v9; now it
+  does. Upstream Anycubic Vyper profile FAILS desktop validation (no G92 E0
+  in before_layer_change_gcode) — upstream profile PR candidate.
+
 - [2026-10-13 CODE] Bridge never sets project `curr_bed_type`; GCode.cpp:2154
   picks bed temps by it, default btPC → all slices use Cool Plate temps.
   Desktop calib models are .drc (draco not vendored); 3MF needs only vendored

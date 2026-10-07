@@ -23,6 +23,7 @@ final class SliceService {
     private let status: StatusCenter
     private var nextJobID: UInt64 = 0
     private var activeJobID: UInt64?
+    private var activeJob: SliceJob?
     private(set) var progress: SliceProgress?
     private(set) var lastOutcome: CompletedSlice?
     private(set) var lastFailure: AppFailure?
@@ -54,9 +55,19 @@ final class SliceService {
             return
         }
 
+        let job: SliceJob
+        do {
+            job = try SliceJob()
+        } catch {
+            let failure = AppFailure.wrap(error, operation: "create slice job")
+            lastFailure = failure
+            status.report(.slice, failure: failure)
+            return
+        }
         nextJobID += 1
         let jobID = nextJobID
         activeJobID = jobID
+        activeJob = job
         progress = SliceProgress(percent: 0, message: "starting")
         lastFailure = nil
         let instanceCount = input.snapshot.objects.reduce(0) {
@@ -91,16 +102,19 @@ final class SliceService {
                 return try input.plater.slice(
                     to: outputURL.path,
                     presets: presetEngine,
+                    job: job,
                     progress: progressCallback
                 )
             }
             return try input.plater.slice(
                 to: outputURL.path,
+                job: job,
                 progress: progressCallback
             )
         }
 
         activeJobID = nil
+        activeJob = nil
         progress = nil
         switch result {
         case .success(let sliceResult):
@@ -114,15 +128,31 @@ final class SliceService {
             lastOutcome = outcome
             let minutes = Int(sliceResult.timeEstimateSeconds / 60)
             let kilobytes = sliceResult.gcodeBytes / 1024
+            let warningNote = sliceResult.warnings.isEmpty
+                ? "" : " · \(sliceResult.warnings.count) warning(s)"
             status.report(
                 .slice,
                 "\(instanceCount) instance(s): G-code ready\n" +
-                    "\(kilobytes) KB · ~\(minutes) min print · " +
-                    "Files → On My iPhone → OrcaPad"
+                    "\(kilobytes) KB · ~\(minutes) min print\(warningNote)"
             )
         case .failure(let failure):
-            lastFailure = failure
-            status.report(.slice, failure: failure)
+            if case .bridge(let error) = failure, error.status == .cancelled {
+                // Explicit recovery: user cancellation is not a failure; the
+                // previous outcome stays valid for its own revision.
+                status.report(.slice, "slice cancelled")
+            } else {
+                lastFailure = failure
+                status.report(.slice, failure: failure)
+            }
         }
+    }
+
+    var isSlicing: Bool { activeJob != nil }
+
+    /// Desktop "Cancel" during slicing: cooperative engine cancellation.
+    func cancel() {
+        guard let activeJob else { return }
+        status.update(.slice, "cancelling…")
+        activeJob.cancel()
     }
 }

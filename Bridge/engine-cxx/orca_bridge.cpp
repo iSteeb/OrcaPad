@@ -1560,61 +1560,233 @@ static void orcapad_config_overlays(Slic3r::DynamicPrintConfig &config) {
         }
         nt->values = { int(Slic3r::NozzleType::ntBrass) };
     }
+    // Raw defaults use relative E without a per-layer reset, which
+    // Print::validate rejects (Print.cpp: G92 E0 required in
+    // before/layer_change_gcode for Marlin flavours). Common system
+    // profiles carry exactly this layer_change_gcode.
+    config.set_key_value("layer_change_gcode", new Slic3r::ConfigOptionString("G92 E0"));
+}
+
+// --- slice jobs (cancellation) -------------------------------------------
+
+struct orca_slice_job {
+    std::mutex mutex;
+    bool cancelled = false;
+    Slic3r::PrintBase *active = nullptr;
+};
+
+orca_result orca_slice_job_new(orca_slice_job **out_job) {
+    constexpr const char *operation = "orca_slice_job_new";
+    if (out_job) *out_job = nullptr;
+    if (!out_job)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "output pointer is null");
+    try {
+        *out_job = new orca_slice_job();
+        return orcapad_ok();
+    } catch (const std::bad_alloc &) {
+        return orcapad_fail(ORCA_STATUS_OUT_OF_MEMORY, operation,
+                            "allocation failed");
+    }
+}
+
+void orca_slice_job_cancel(orca_slice_job *job) {
+    if (!job) return;
+    std::lock_guard<std::mutex> lock(job->mutex);
+    job->cancelled = true;
+    if (job->active) job->active->cancel(); // atomic store, thread safe
+}
+
+void orca_slice_job_free(orca_slice_job *job) { delete job; }
+
+/// Registers `print` with the job for the duration of a slice.
+class OrcapadJobRegistration {
+public:
+    OrcapadJobRegistration(orca_slice_job *job, Slic3r::PrintBase &print)
+        : m_job(job) {
+        if (!m_job) return;
+        std::lock_guard<std::mutex> lock(m_job->mutex);
+        m_job->active = &print;
+        if (m_job->cancelled) print.cancel();
+    }
+    ~OrcapadJobRegistration() {
+        if (!m_job) return;
+        std::lock_guard<std::mutex> lock(m_job->mutex);
+        m_job->active = nullptr;
+    }
+    OrcapadJobRegistration(const OrcapadJobRegistration &) = delete;
+    OrcapadJobRegistration &operator=(const OrcapadJobRegistration &) = delete;
+
+private:
+    orca_slice_job *m_job;
+};
+
+// --- slice report ---------------------------------------------------------
+
+struct OrcapadWarning {
+    int32_t level;
+    int32_t source;
+    std::string code;
+    std::string message;
+    std::string detail;
+};
+
+void orca_slice_report_dispose(orca_slice_report *report) {
+    if (!report) return;
+    for (uint32_t i = 0; i < report->warning_count && report->warnings; ++i) {
+        orca_owned_string_dispose(&report->warnings[i].code);
+        orca_owned_string_dispose(&report->warnings[i].message);
+        orca_owned_string_dispose(&report->warnings[i].detail);
+    }
+    std::free(report->warnings);
+    *report = orca_slice_report{};
+}
+
+static int32_t orcapad_warning_level(Slic3r::PrintStateBase::WarningLevel level) {
+    return level == Slic3r::PrintStateBase::WarningLevel::CRITICAL
+               ? ORCA_SLICE_WARNING_CRITICAL
+               : ORCA_SLICE_WARNING_WARNING;
+}
+
+static void orcapad_collect_step_warnings(const Slic3r::Print &print,
+                                          std::vector<OrcapadWarning> &out) {
+    for (int step = 0; step < int(Slic3r::psCount); ++step)
+        for (const auto &warning :
+             print.step_state_with_warnings(Slic3r::PrintStep(step)).warnings)
+            out.push_back({orcapad_warning_level(warning.level),
+                           ORCA_SLICE_SOURCE_PRINT_STEP, "", warning.message, ""});
+    for (const Slic3r::PrintObject *object : print.objects()) {
+        const std::string name =
+            object->model_object() ? object->model_object()->name : std::string();
+        for (int step = 0; step < int(Slic3r::posCount); ++step)
+            for (const auto &warning : object->step_state_with_warnings(
+                     Slic3r::PrintObjectStep(step)).warnings)
+                out.push_back({orcapad_warning_level(warning.level),
+                               ORCA_SLICE_SOURCE_OBJECT_STEP, "", warning.message, name});
+    }
+}
+
+static bool orcapad_fill_report(const std::vector<OrcapadWarning> &warnings,
+                                double time_estimate, int64_t bytes,
+                                orca_slice_report *out) {
+    orca_slice_report report{};
+    report.time_estimate_s = time_estimate;
+    report.gcode_bytes = bytes;
+    if (!warnings.empty()) {
+        report.warnings = static_cast<orca_slice_warning *>(
+            std::calloc(warnings.size(), sizeof(orca_slice_warning)));
+        if (!report.warnings) return false;
+    }
+    for (const OrcapadWarning &warning : warnings) {
+        orca_slice_warning &slot = report.warnings[report.warning_count++];
+        slot.level = warning.level;
+        slot.source = warning.source;
+        slot.code = orcapad_empty_string();
+        slot.message = orcapad_empty_string();
+        slot.detail = orcapad_empty_string();
+        if (!orcapad_copy_string(warning.code.c_str(), &slot.code) ||
+            !orcapad_copy_string(warning.message.c_str(), &slot.message) ||
+            !orcapad_copy_string(warning.detail.c_str(), &slot.detail)) {
+            orca_slice_report_dispose(&report);
+            return false;
+        }
+    }
+    *out = report;
+    return true;
 }
 
 static orca_result orcapad_run_print(const char *operation,
                                      Slic3r::Print &print,
                                      const char *gcode_path,
                                      orca_progress_fn progress, void *ctx,
-                                     double *out_time_estimate_s,
-                                     int64_t *out_gcode_bytes) {
+                                     orca_slice_job *job,
+                                     orca_slice_report *out_report) {
     return orcapad_guard(operation, [&]() -> orca_result {
-        print.set_status_callback(
-            [progress, ctx](const Slic3r::PrintBase::SlicingStatus &status) {
-                if (progress)
-                    progress(static_cast<int32_t>(status.percent),
-                             status.text.c_str(), ctx);
-            });
+        OrcapadJobRegistration registration(job, print);
+        if (print.canceled())
+            return orcapad_fail(ORCA_STATUS_CANCELLED, operation,
+                                "slice was cancelled before it started");
+        std::vector<OrcapadWarning> warnings;
+        try {
+            // Desktop BackgroundSlicingProcess::validate: errors refuse the
+            // slice, warnings are surfaced.
+            Slic3r::StringObjectException validate_warning;
+            const Slic3r::StringObjectException error = print.validate(&validate_warning);
+            if (!error.string.empty())
+                return orcapad_fail(ORCA_STATUS_INVALID_CONFIGURATION, operation,
+                                    error.string.c_str());
+            if (!validate_warning.string.empty())
+                warnings.push_back({ORCA_SLICE_WARNING_WARNING, ORCA_SLICE_SOURCE_VALIDATE,
+                                    validate_warning.opt_key, validate_warning.string, ""});
 
-        if (progress) progress(3, "slicing", ctx);
-        print.process();
+            print.set_status_callback(
+                [progress, ctx](const Slic3r::PrintBase::SlicingStatus &status) {
+                    // warning-update statuses carry percent -1 and no progress
+                    if (progress && status.percent >= 0)
+                        progress(static_cast<int32_t>(status.percent),
+                                 status.text.c_str(), ctx);
+                });
 
-        if (progress) progress(98, "exporting gcode", ctx);
-        Slic3r::GCodeProcessorResult processor_result;
-        const std::string final_path =
-            print.export_gcode(gcode_path, &processor_result, nullptr);
-        if (final_path.empty())
-            return orcapad_fail(ORCA_STATUS_ENGINE_FAILURE, operation,
-                                "engine returned an empty G-code path");
+            if (progress) progress(3, "slicing", ctx);
+            print.process();
 
-        struct stat file_status;
-        if (stat(final_path.c_str(), &file_status) != 0)
-            return orcapad_fail(ORCA_STATUS_IO_FAILURE, operation,
-                                "exported G-code could not be inspected");
-        if (file_status.st_size < 0)
-            return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
-                                "exported G-code has a negative size");
-        if (processor_result.print_statistics.modes.empty())
-            return orcapad_fail(ORCA_STATUS_ENGINE_FAILURE, operation,
-                                "engine returned no print-time estimate");
+            if (progress) progress(98, "exporting gcode", ctx);
+            Slic3r::GCodeProcessorResult processor_result;
+            const std::string final_path =
+                print.export_gcode(gcode_path, &processor_result, nullptr);
+            if (final_path.empty())
+                return orcapad_fail(ORCA_STATUS_ENGINE_FAILURE, operation,
+                                    "engine returned an empty G-code path");
 
-        *out_gcode_bytes = static_cast<int64_t>(file_status.st_size);
-        *out_time_estimate_s =
-            processor_result.print_statistics.modes.front().time;
-        if (progress) progress(100, "done", ctx);
-        return orcapad_ok();
+            struct stat file_status;
+            if (stat(final_path.c_str(), &file_status) != 0)
+                return orcapad_fail(ORCA_STATUS_IO_FAILURE, operation,
+                                    "exported G-code could not be inspected");
+            if (file_status.st_size < 0)
+                return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
+                                    "exported G-code has a negative size");
+            if (processor_result.print_statistics.modes.empty())
+                return orcapad_fail(ORCA_STATUS_ENGINE_FAILURE, operation,
+                                    "engine returned no print-time estimate");
+
+            orcapad_collect_step_warnings(print, warnings);
+            for (const auto &warning : processor_result.warnings) {
+                std::string detail;
+                for (const std::string &param : warning.params)
+                    detail += (detail.empty() ? "" : "\n") + param;
+                warnings.push_back({warning.level, ORCA_SLICE_SOURCE_GCODE,
+                                    warning.msg, "", detail});
+            }
+            if (const auto conflict = print.get_conflict_result()) {
+                warnings.push_back({ORCA_SLICE_WARNING_CRITICAL, ORCA_SLICE_SOURCE_CONFLICT,
+                                    "gcode_path_conflict", "",
+                                    conflict->_objName1 + "\n" + conflict->_objName2 + "\n" +
+                                        std::to_string(conflict->_height) + "\n" +
+                                        std::to_string(conflict->layer)});
+            }
+
+            if (!orcapad_fill_report(
+                    warnings, processor_result.print_statistics.modes.front().time,
+                    static_cast<int64_t>(file_status.st_size), out_report))
+                return orcapad_fail(ORCA_STATUS_OUT_OF_MEMORY, operation,
+                                    "could not allocate slice report");
+            if (progress) progress(100, "done", ctx);
+            return orcapad_ok();
+        } catch (const Slic3r::CanceledException &) {
+            return orcapad_fail(ORCA_STATUS_CANCELLED, operation,
+                                "slice was cancelled");
+        }
     });
 }
 
 orca_result orca_slice_to_gcode(const char *stl_path, const char *gcode_path,
                                 orca_progress_fn progress, void *ctx,
-                                double *out_time_estimate_s,
-                                int64_t *out_gcode_bytes) {
+                                orca_slice_job *job,
+                                orca_slice_report *out_report) {
     constexpr const char *operation = "orca_slice_to_gcode";
-    if (out_time_estimate_s) *out_time_estimate_s = -1.0;
-    if (out_gcode_bytes) *out_gcode_bytes = -1;
+    if (out_report) *out_report = orca_slice_report{};
     if (!stl_path || !stl_path[0] || !gcode_path || !gcode_path[0] ||
-        !out_time_estimate_s || !out_gcode_bytes)
+        !out_report)
         return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
                             "path is empty or output pointer is null");
     struct stat path_status;
@@ -1638,23 +1810,21 @@ orca_result orca_slice_to_gcode(const char *stl_path, const char *gcode_path,
         print.apply(model, std::move(config));
         print.is_BBL_printer() = false;
         return orcapad_run_print(operation, print, gcode_path, progress, ctx,
-                                 out_time_estimate_s, out_gcode_bytes);
+                                 job, out_report);
     });
 }
 
 orca_result orca_plater_slice_to_gcode(orca_plater *plater,
                                        const char *gcode_path,
                                        orca_progress_fn progress, void *ctx,
-                                       double *out_time_estimate_s,
-                                       int64_t *out_gcode_bytes) {
+                                       orca_slice_job *job,
+                                       orca_slice_report *out_report) {
     constexpr const char *operation = "orca_plater_slice_to_gcode";
-    if (out_time_estimate_s) *out_time_estimate_s = -1.0;
-    if (out_gcode_bytes) *out_gcode_bytes = -1;
+    if (out_report) *out_report = orca_slice_report{};
     if (!plater)
         return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation,
                             "plater handle is null");
-    if (!gcode_path || !gcode_path[0] || !out_time_estimate_s ||
-        !out_gcode_bytes)
+    if (!gcode_path || !gcode_path[0] || !out_report)
         return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
                             "path is empty or output pointer is null");
     if (plater->model.objects.empty())
@@ -1670,26 +1840,24 @@ orca_result orca_plater_slice_to_gcode(orca_plater *plater,
         print.apply(plater->model, std::move(config));
         print.is_BBL_printer() = false;
         return orcapad_run_print(operation, print, gcode_path, progress, ctx,
-                                 out_time_estimate_s, out_gcode_bytes);
+                                 job, out_report);
     });
 }
 
 orca_result orca_plater_slice_to_gcode_with_presets(
     orca_plater *plater, orca_presets *presets, const char *gcode_path,
-    orca_progress_fn progress, void *ctx, double *out_time_estimate_s,
-    int64_t *out_gcode_bytes) {
+    orca_progress_fn progress, void *ctx, orca_slice_job *job,
+    orca_slice_report *out_report) {
     constexpr const char *operation =
         "orca_plater_slice_to_gcode_with_presets";
-    if (out_time_estimate_s) *out_time_estimate_s = -1.0;
-    if (out_gcode_bytes) *out_gcode_bytes = -1;
+    if (out_report) *out_report = orca_slice_report{};
     if (!plater)
         return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation,
                             "plater handle is null");
     if (!presets)
         return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation,
                             "presets handle is null");
-    if (!gcode_path || !gcode_path[0] || !out_time_estimate_s ||
-        !out_gcode_bytes)
+    if (!gcode_path || !gcode_path[0] || !out_report)
         return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
                             "path is empty or output pointer is null");
     if (plater->model.objects.empty())
@@ -1703,6 +1871,6 @@ orca_result orca_plater_slice_to_gcode_with_presets(
         print.apply(plater->model, std::move(config));
         print.is_BBL_printer() = presets->bundle->is_bbl_vendor();
         return orcapad_run_print(operation, print, gcode_path, progress, ctx,
-                                 out_time_estimate_s, out_gcode_bytes);
+                                 job, out_report);
     });
 }
