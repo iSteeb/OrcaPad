@@ -33,6 +33,9 @@ in ~/xtool-cheatsheet.md — link, don't duplicate.)
 - Blocking engine and filesystem work crosses the single typed
   `BackgroundWork` boundary; `@MainActor` stores own observable state and busy
   gates so commands reject rather than silently queue.
+- The status/debug overlay is hidden by default [USER]; pressing the Device
+  tab button 5x within 3 s toggles it (RootView counts selection-binding
+  setter calls, which fire on re-presses). Never surface it by default.
 - Build output always redirected to a file: `xtool dev build > /tmp/orcapad-build.log 2>&1`
 - Test/build policy lives in AGENTS.md's "Builds, tests, and audits" matrix.
   The engine compile list is shared (`Bridge/engine-sources.sh`) — never fork
