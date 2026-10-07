@@ -278,6 +278,57 @@ static bool orcapad_has_exact_system_preset(
     return preset && preset->is_system && preset->name == name;
 }
 
+// --- plate (bed) type: desktop Sidebar::update_presets / reset_bed_type_combox_choices
+
+static orca_bed_type_state orcapad_bed_type_state(Slic3r::PresetBundle &bundle) {
+    orca_bed_type_state state{};
+    state.count = static_cast<int32_t>(Slic3r::btCount);
+    const Slic3r::Preset &printer = bundle.printers.get_selected_preset();
+    Slic3r::Preset &edited = bundle.printers.get_edited_preset();
+    state.machine_default = static_cast<int32_t>(edited.get_default_bed_type(&bundle));
+    const Slic3r::DynamicPrintConfig &config = edited.config;
+    const bool multi = config.has("support_multi_bed_types") &&
+                       config.opt_bool("support_multi_bed_types");
+    state.selectable = (bundle.is_bbl_vendor() || multi) ? 1 : 0;
+
+    const Slic3r::VendorProfile::PrinterModel *model =
+        Slic3r::PresetUtils::system_printer_model(printer);
+    if (!model) {
+        if (const Slic3r::Preset *parent = bundle.printers.get_selected_preset_parent())
+            model = Slic3r::PresetUtils::system_printer_model(*parent);
+    }
+    const Slic3r::ConfigOptionDef *def = Slic3r::print_config_def.get("curr_bed_type");
+    if (!def)
+        throw std::logic_error("curr_bed_type is not defined by print_config_def");
+    int32_t value = 0;
+    for (const std::string &label : def->enum_labels) {
+        ++value;
+        if (value >= state.count) break;
+        const bool unsupported = model &&
+            std::find(model->not_support_bed_types.begin(),
+                      model->not_support_bed_types.end(), label) !=
+                model->not_support_bed_types.end();
+        if (!unsupported) state.supported_mask |= (1u << value);
+    }
+
+    const auto *current = bundle.project_config.option<
+        Slic3r::ConfigOptionEnum<Slic3r::BedType>>("curr_bed_type");
+    state.current = current ? static_cast<int32_t>(current->value) : 0;
+    return state;
+}
+
+static void orcapad_apply_bed_type(Slic3r::PresetBundle &bundle, Slic3r::BedType type) {
+    bundle.project_config.set_key_value(
+        "curr_bed_type", new Slic3r::ConfigOptionEnum<Slic3r::BedType>(type));
+}
+
+static void orcapad_apply_default_bed_type(Slic3r::PresetBundle &bundle) {
+    const orca_bed_type_state state = orcapad_bed_type_state(bundle);
+    if (state.machine_default <= 0 || state.machine_default >= state.count)
+        throw std::logic_error("machine default bed type is out of range");
+    orcapad_apply_bed_type(bundle, static_cast<Slic3r::BedType>(state.machine_default));
+}
+
 orca_result orca_presets_new(const char *data_dir_path, orca_presets **out) {
     constexpr const char *operation = "orca_presets_new";
     if (out) *out = nullptr;
@@ -304,6 +355,7 @@ orca_result orca_presets_new(const char *data_dir_path, orca_presets **out) {
             if (preset.is_system) preset.is_visible = true;
         presets->bundle->update_compatible(
             Slic3r::PresetSelectCompatibleType::Always);
+        orcapad_apply_default_bed_type(*presets->bundle);
         *out = presets.release();
         return orcapad_ok();
     });
@@ -400,6 +452,9 @@ orca_result orca_presets_select(orca_presets *presets, const char *machine,
             candidate->prints.get_selected_preset().name != process)
             return orcapad_fail(ORCA_STATUS_INVALID_CONFIGURATION, operation,
                                 "preset combination is not selectable");
+
+        if (presets->bundle->printers.get_selected_preset().name != machine)
+            orcapad_apply_default_bed_type(*candidate);
 
         presets->bundle.swap(candidate);
         return orcapad_ok();
@@ -530,6 +585,47 @@ orca_result orca_presets_print_volume(orca_presets *presets,
         *out_min_y = min_y;
         *out_max_x = max_x;
         *out_max_y = max_y;
+        return orcapad_ok();
+    });
+}
+
+orca_result orca_presets_bed_type(orca_presets *presets,
+                                  orca_bed_type_state *out_state) {
+    constexpr const char *operation = "orca_presets_bed_type";
+    if (out_state) *out_state = orca_bed_type_state{};
+    if (!presets)
+        return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation,
+                            "presets handle is null");
+    if (!out_state)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "output pointer is null");
+    return orcapad_guard(operation, [&]() -> orca_result {
+        const orca_bed_type_state state = orcapad_bed_type_state(*presets->bundle);
+        if (state.current <= 0 || state.current >= state.count)
+            return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
+                                "project curr_bed_type is unset or out of range");
+        *out_state = state;
+        return orcapad_ok();
+    });
+}
+
+orca_result orca_presets_set_bed_type(orca_presets *presets, int32_t bed_type) {
+    constexpr const char *operation = "orca_presets_set_bed_type";
+    if (!presets)
+        return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation,
+                            "presets handle is null");
+    return orcapad_guard(operation, [&]() -> orca_result {
+        const orca_bed_type_state state = orcapad_bed_type_state(*presets->bundle);
+        if (bed_type <= 0 || bed_type >= state.count)
+            return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                                "bed type is out of range");
+        if (!(state.supported_mask & (1u << bed_type)))
+            return orcapad_fail(ORCA_STATUS_INVALID_CONFIGURATION, operation,
+                                "printer model does not support this bed type");
+        if (!state.selectable && bed_type != state.machine_default)
+            return orcapad_fail(ORCA_STATUS_INVALID_CONFIGURATION, operation,
+                                "machine does not offer selectable bed types");
+        orcapad_apply_bed_type(*presets->bundle, static_cast<Slic3r::BedType>(bed_type));
         return orcapad_ok();
     });
 }

@@ -26,6 +26,18 @@ public struct PrintVolume: Equatable, Sendable {
     public var centerY: Double { (minY + maxY) / 2 }
 }
 
+/// Plate (bed) type state; values are the engine's `Slic3r::BedType`
+/// (1 = Cool Plate …). Labels come from the `curr_bed_type` schema option.
+public struct BedTypeState: Equatable, Sendable {
+    public let current: Int32
+    public let machineDefault: Int32
+    /// Valid values: 1..<count (the engine's btCount).
+    public let count: Int32
+    /// Desktop shows the plate selector only when true.
+    public let selectable: Bool
+    public let supported: [Int32]
+}
+
 /// Swift wrapper over the engine's system-preset bundle. Loading walks the
 /// bundled profile tree and is blocking; create it off the main thread.
 public final class EnginePresets: @unchecked Sendable {
@@ -246,6 +258,47 @@ public final class EnginePresets: @unchecked Sendable {
             ))
         }
         return .success(PrintVolume(minX: minX, minY: minY, maxX: maxX, maxY: maxY))
+    }
+
+    public func bedType() -> Result<BedTypeState, BridgeError> {
+        let operation = "EnginePresets.bedType"
+        lock.lock(); defer { lock.unlock() }
+        guard let handle else { return .failure(invalidHandle(operation)) }
+        var raw = orca_bed_type_state()
+        if let error = bridgeFailure(operation: operation, call: {
+            orca_presets_bed_type(handle, &raw)
+        }) {
+            return .failure(error)
+        }
+        guard raw.count > 1, raw.count <= 32,
+              (1..<raw.count).contains(raw.current),
+              (1..<raw.count).contains(raw.machine_default) else {
+            return .failure(.local(
+                .internalInvariant,
+                operation: operation,
+                diagnostic: "\(operation): Bridge returned an out-of-range bed type state"
+            ))
+        }
+        let supported = (1..<raw.count).filter { raw.supported_mask & (1 << UInt32($0)) != 0 }
+        return .success(BedTypeState(
+            current: raw.current,
+            machineDefault: raw.machine_default,
+            count: raw.count,
+            selectable: raw.selectable != 0,
+            supported: supported
+        ))
+    }
+
+    public func setBedType(_ value: Int32) -> Result<Void, BridgeError> {
+        let operation = "EnginePresets.setBedType"
+        lock.lock(); defer { lock.unlock() }
+        guard let handle else { return .failure(invalidHandle(operation)) }
+        if let error = bridgeFailure(operation: operation, call: {
+            orca_presets_set_bed_type(handle, value)
+        }) {
+            return .failure(error)
+        }
+        return .success(())
     }
 
     /// The complete resolved configuration exactly as slicing will consume

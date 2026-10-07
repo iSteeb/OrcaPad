@@ -25,9 +25,41 @@ private struct PresetLoadPayload: Sendable {
     let processes: [PresetEntry]
     let selection: PresetSelection
     let printVolume: PrintVolume
+    let bedType: BedTypeState
     let editedConfigs: [PresetKind: [String: String]]
     let systemConfigs: [PresetKind: [String: String]]
     let warning: AppFailure?
+}
+
+/// Desktop `app_config` per-printer `curr_bed_type` memory: the engine resets
+/// the plate type to the machine default on machine change, then the user's
+/// last choice for that machine is re-applied when still valid.
+private enum BedTypeMemory {
+    static let key = "preset.bedTypes"
+
+    static func load() -> [String: Int32] {
+        let raw = UserDefaults.standard.dictionary(forKey: key) as? [String: Int] ?? [:]
+        return raw.mapValues(Int32.init)
+    }
+
+    static func store(_ memory: [String: Int32]) {
+        UserDefaults.standard.set(memory.mapValues(Int.init), forKey: key)
+    }
+
+    /// Re-applies the remembered choice. Returns the resulting engine state
+    /// and whether the remembered value was stale (no longer offered).
+    static func apply(
+        _ remembered: Int32?,
+        engine: EnginePresets
+    ) throws -> (BedTypeState, stale: Bool) {
+        let state = try engine.bedType().get()
+        guard let remembered, remembered != state.current else { return (state, false) }
+        guard state.selectable, state.supported.contains(remembered) else {
+            return (state, true)
+        }
+        try engine.setBedType(remembered).get()
+        return (try engine.bedType().get(), false)
+    }
 }
 
 @MainActor
@@ -56,6 +88,9 @@ final class PresetStore {
     private(set) var isSelecting = false
     /// Selected machine's print volume; nil until presets are ready.
     private(set) var printVolume: PrintVolume?
+    /// Project plate type (`curr_bed_type`); nil until presets are ready.
+    private(set) var bedType: BedTypeState?
+    private var bedTypeMemory = BedTypeMemory.load()
     /// Per-kind edited (working) and selected-system config dumps. Diffing the
     /// two is how the editor detects modified values — engine truth, no
     /// client-side default tables.
@@ -93,6 +128,7 @@ final class PresetStore {
                 forKey: DefaultsKey.process
             ) ?? ""
         )
+        let memory = bedTypeMemory
         let result = await BackgroundWork.run(operation: "load presets") {
             let dataDirectory = try EnginePaths.preparePresetDataDirectory()
             let engine = try EnginePresets.create(
@@ -131,6 +167,15 @@ final class PresetStore {
                 ? try engine.entries(kind: .process).get()
                 : processes
             let volume = try engine.printVolume().get()
+            let (bedType, staleBedType) = try BedTypeMemory.apply(
+                memory[selected.machine], engine: engine
+            )
+            if staleBedType, warning == nil {
+                warning = .invariant(
+                    operation: "restore plate type",
+                    diagnostic: "remembered plate type is no longer offered by \(selected.machine)"
+                )
+            }
             var edited: [PresetKind: [String: String]] = [:]
             var system: [PresetKind: [String: String]] = [:]
             for kind in [PresetKind.machine, .filament, .process] {
@@ -144,6 +189,7 @@ final class PresetStore {
                 processes: refreshedProcesses,
                 selection: selected,
                 printVolume: volume,
+                bedType: bedType,
                 editedConfigs: edited,
                 systemConfigs: system,
                 warning: warning
@@ -158,6 +204,8 @@ final class PresetStore {
             processes = payload.processes
             selection = payload.selection
             printVolume = payload.printVolume
+            bedType = payload.bedType
+            rememberBedType(payload.bedType, machine: payload.selection.machine)
             editedConfigs = payload.editedConfigs
             systemConfigs = payload.systemConfigs
             persist(payload.selection)
@@ -200,6 +248,7 @@ final class PresetStore {
         }
 
         let requested = candidate
+        let remembered = bedTypeMemory[requested.machine]
         isSelecting = true
         let result = await BackgroundWork.run(operation: "select presets") {
             try engine.select(
@@ -207,6 +256,7 @@ final class PresetStore {
                 filament: requested.filament,
                 process: requested.process
             ).get()
+            let bedType = try BedTypeMemory.apply(remembered, engine: engine)
             // Selection changes invalidate process compatibility, the bed,
             // and the edited/system config pair (selecting resets the edited
             // working copy). Re-read engine state; the client never guesses.
@@ -220,7 +270,8 @@ final class PresetStore {
                 try engine.entries(kind: .process).get(),
                 try engine.printVolume().get(),
                 edited,
-                system
+                system,
+                bedType
             )
         }
         isSelecting = false
@@ -229,11 +280,21 @@ final class PresetStore {
             let refreshedProcesses,
             let volume,
             let edited,
-            let system
+            let system,
+            let bed
         )):
             selection = requested
             processes = refreshedProcesses
             printVolume = volume
+            bedType = bed.0
+            if bed.stale {
+                bedTypeMemory[requested.machine] = nil
+                BedTypeMemory.store(bedTypeMemory)
+                status.report(.presets, failure: .invariant(
+                    operation: "restore plate type",
+                    diagnostic: "remembered plate type is no longer offered by \(requested.machine)"
+                ))
+            }
             editedConfigs = edited
             systemConfigs = system
             persist(requested)
@@ -241,6 +302,36 @@ final class PresetStore {
         case .failure(let failure):
             status.report(.presets, failure: failure)
         }
+    }
+
+    // MARK: Plate type (desktop sidebar "Plate type")
+
+    func setBedType(_ value: Int32) async {
+        guard let engine, isReady, !isSelecting else {
+            status.report(.presets, "plate type change blocked: presets are busy")
+            return
+        }
+        let machine = selection.machine
+        let result = await BackgroundWork.run(operation: "set plate type") {
+            try engine.setBedType(value).get()
+            return try engine.bedType().get()
+        }
+        switch result {
+        case .success(let state):
+            bedType = state
+            bedTypeMemory[machine] = state.current
+            BedTypeMemory.store(bedTypeMemory)
+            status.update(.presets, "presets: plate type set")
+        case .failure(let failure):
+            status.report(.presets, failure: failure)
+        }
+    }
+
+    private func rememberBedType(_ state: BedTypeState, machine: String) {
+        guard bedTypeMemory[machine] != nil, bedTypeMemory[machine] != state.current else { return }
+        // Stale memory (value no longer offered): drop it; load() reported it.
+        bedTypeMemory[machine] = nil
+        BedTypeMemory.store(bedTypeMemory)
     }
 
     // MARK: Desktop-parity config overrides

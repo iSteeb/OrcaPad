@@ -234,7 +234,7 @@ static void test_md5_shim() {
 
 static void test_abi_version() {
     CHECK_EQ(orca_bridge_abi_version(), ORCA_BRIDGE_ABI_VERSION);
-    CHECK_EQ(ORCA_BRIDGE_ABI_VERSION, 7);
+    CHECK_EQ(ORCA_BRIDGE_ABI_VERSION, 8);
 }
 
 static void test_document_lifecycle(const std::string &dir) {
@@ -1128,6 +1128,98 @@ static void test_preset_overrides(const std::string &data_dir) {
     orca_presets_free(presets);
 }
 
+static bool resolved_contains(orca_presets *presets, const char *needle) {
+    orca_owned_string json;
+    GUARD(g, orca_presets_resolved_config(presets, &json));
+    expect_ok(g, "resolved config");
+    const bool found = strstr(json.data ? json.data : "", needle) != nullptr;
+    orca_owned_string_dispose(&json);
+    return found;
+}
+
+static orca_bed_type_state bed_state(orca_presets *presets, const char *what) {
+    orca_bed_type_state state{};
+    GUARD(g, orca_presets_bed_type(presets, &state));
+    expect_ok(g, what);
+    return state;
+}
+
+// Desktop Sidebar::update_presets parity: curr_bed_type follows the machine
+// default on machine change, user choice persists otherwise, and slicing
+// (full_config) sees it — bed temperatures are keyed by it (GCode.cpp).
+static void test_bed_type(const std::string &data_dir) {
+    orca_presets *presets = nullptr;
+    GUARD(g0, orca_presets_new(data_dir.c_str(), &presets));
+    expect_ok(g0, "presets_new");
+
+    orca_bed_type_state state{};
+    GUARD(g1, orca_presets_bed_type(nullptr, &state));
+    expect_code(g1, ORCA_STATUS_INVALID_HANDLE, "bed_type(null)");
+    GUARD(g2, orca_presets_bed_type(presets, nullptr));
+    expect_code(g2, ORCA_STATUS_INVALID_ARGUMENT, "bed_type(null out)");
+    GUARD(g3, orca_presets_set_bed_type(nullptr, 1));
+    expect_code(g3, ORCA_STATUS_INVALID_HANDLE, "set_bed_type(null)");
+
+    state = bed_state(presets, "initial bed type");
+    CHECK_EQ(state.count, 7);
+    CHECK(state.current >= 1 && state.current < state.count);
+    CHECK_EQ(state.current, state.machine_default);
+
+    orca_owned_string filament, process;
+    GUARD(gf, orca_presets_list_name(presets, 1, 0, &filament));
+    expect_ok(gf, "filament names[0]");
+    GUARD(gp, orca_presets_list_name(presets, 2, 0, &process));
+    expect_ok(gp, "process names[0]");
+
+    // single-bed machine (no default_bed_type): engine default btPEI (3)
+    GUARD(g4, orca_presets_select(presets, "Anycubic Vyper 0.4 nozzle",
+                                  filament.data, process.data));
+    expect_ok(g4, "select Vyper");
+    state = bed_state(presets, "Vyper bed type");
+    CHECK_EQ(state.machine_default, 3);
+    CHECK_EQ(state.current, 3);
+    CHECK_EQ((int)state.selectable, 0);
+    CHECK_EQ(state.supported_mask, 0x7Eu);
+    CHECK(resolved_contains(presets, "\"curr_bed_type\":\"High Temp Plate\""));
+    GUARD(g5, orca_presets_set_bed_type(presets, 1));
+    expect_code(g5, ORCA_STATUS_INVALID_CONFIGURATION, "set on non-selectable");
+    GUARD(g6, orca_presets_set_bed_type(presets, 3));
+    expect_ok(g6, "set default on non-selectable");
+    GUARD(g7, orca_presets_set_bed_type(presets, 0));
+    expect_code(g7, ORCA_STATUS_INVALID_ARGUMENT, "set btDefault");
+    GUARD(g8, orca_presets_set_bed_type(presets, 7));
+    expect_code(g8, ORCA_STATUS_INVALID_ARGUMENT, "set btCount");
+
+    // multi-bed machine with numeric default_bed_type "4" (Textured PEI)
+    GUARD(g9, orca_presets_select(presets, "WonderMaker ZR 0.4 nozzle",
+                                  filament.data, process.data));
+    expect_ok(g9, "select WonderMaker");
+    state = bed_state(presets, "WonderMaker bed type");
+    CHECK_EQ(state.machine_default, 4);
+    CHECK_EQ(state.current, 4);
+    CHECK_EQ((int)state.selectable, 1);
+    GUARD(g10, orca_presets_set_bed_type(presets, 1));
+    expect_ok(g10, "set Cool Plate");
+    CHECK_EQ(bed_state(presets, "after set").current, 1);
+    CHECK(resolved_contains(presets, "\"curr_bed_type\":\"Cool Plate\""));
+
+    // same machine re-selected: the user choice persists
+    GUARD(g11, orca_presets_select(presets, "WonderMaker ZR 0.4 nozzle",
+                                   filament.data, process.data));
+    expect_ok(g11, "reselect WonderMaker");
+    CHECK_EQ(bed_state(presets, "after reselect").current, 1);
+
+    // machine change: reset to the new machine's default
+    GUARD(g12, orca_presets_select(presets, "Anycubic Vyper 0.4 nozzle",
+                                   filament.data, process.data));
+    expect_ok(g12, "back to Vyper");
+    CHECK_EQ(bed_state(presets, "after machine change").current, 3);
+
+    orca_owned_string_dispose(&filament);
+    orca_owned_string_dispose(&process);
+    orca_presets_free(presets);
+}
+
 static void test_slice_defaults(const std::string &dir) {
     const std::string cube = write_cube_stl(dir, "orcapad-cube5.stl");
     orca_plater *plater = nullptr;
@@ -1398,6 +1490,7 @@ int main() {
     test_print_volume(data_dir);
     test_resolved_config(data_dir);
     test_preset_overrides(data_dir);
+    test_bed_type(data_dir);
     test_slice_defaults(dir);
     test_slice_with_presets(dir, data_dir);
     test_standalone_slice(dir);

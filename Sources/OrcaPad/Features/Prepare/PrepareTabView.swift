@@ -114,6 +114,12 @@ struct PrepareTabView: View {
             } label: {
                 settingsLabel("Printer settings", kind: .machine)
             }
+            if let bedType = presets.bedType {
+                PlateTypeRow(state: bedType) { value in
+                    Task { await presets.setBedType(value) }
+                }
+                .disabled(presets.isSelecting)
+            }
             if let volume = presets.printVolume {
                 LabeledContent("Print volume") {
                     Text(String(format: "%.0f × %.0f mm", volume.width, volume.depth))
@@ -204,5 +210,52 @@ struct PrepareTabView: View {
                     "\(Int(outcome.result.timeEstimateSeconds / 60)) min"
             )
         }
+    }
+}
+
+/// Desktop sidebar "Plate type" (project `curr_bed_type`): bed temperatures
+/// are chosen by it. Machines without selectable plates show the engine's
+/// fixed default read-only. Labels come from the engine schema.
+private struct PlateTypeRow: View {
+    let state: BedTypeState
+    let onSelect: (Int32) -> Void
+
+    var body: some View {
+        switch ConfigSchema.index {
+        case .failure(let failure):
+            Label(failure.localizedDescription, systemImage: "exclamationmark.triangle")
+                .foregroundStyle(.red)
+        case .success(let index):
+            let labels = index["curr_bed_type"]?.enumLabels ?? []
+            if labels.count != Int(state.count) - 1 {
+                Label(
+                    "Plate type: schema has \(labels.count) labels, engine has \(state.count - 1) types",
+                    systemImage: "exclamationmark.triangle"
+                )
+                .foregroundStyle(.red)
+            } else if state.selectable {
+                Picker(selection: Binding(
+                    get: { state.current },
+                    set: { onSelect($0) }
+                )) {
+                    ForEach(state.supported, id: \.self) { value in
+                        Text(label(value, labels)).tag(value)
+                    }
+                } label: {
+                    Label("Plate type", systemImage: "square.grid.3x3.square")
+                }
+            } else {
+                LabeledContent {
+                    Text(label(state.current, labels)).foregroundStyle(.secondary)
+                } label: {
+                    Label("Plate type", systemImage: "square.grid.3x3.square")
+                }
+            }
+        }
+    }
+
+    /// Engine BedType v (1-based) ↔ schema enum index v-1 (count verified).
+    private func label(_ value: Int32, _ labels: [String]) -> String {
+        labels[Int(value) - 1]
     }
 }

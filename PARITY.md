@@ -46,7 +46,7 @@ yet in `Bridge/engine-sources.sh`), **Client-reimpl** (desktop logic lives in
 | Printer / process selection, vendor grouping | `PresetComboBoxes.cpp` | `GroupedPickerList.swift`, `PrepareTabView.swift` | ✅ | — |
 | Compatibility filtering | `Preset.cpp` is_compatible | `PrepareTabView.swift:164` | ✅ | — |
 | Nozzle diameter combo | `Plater.cpp:489,1862` | variants are separate printer presets | 🟡 | UI |
-| **Bed / plate type (`curr_bed_type`)** | `Plater.cpp:1990-2010` → `GCode.cpp:2154` (bed temperature key) | none found; the bridge never sets it | ❌ **correctness:** bed temperatures always come from the Cool Plate default (`PrintConfig.cpp:~1098`, `btPC`) | Bridge + UI |
+| Bed / plate type (`curr_bed_type`) | `Plater.cpp:1990-2010,2512-2544` → `GCode.cpp:2154` | ABI v8 `orca_presets_bed_type`/`set_bed_type`; `PrepareTabView.swift` PlateTypeRow; per-printer memory in `PresetStore.swift` | ✅ engine default on machine change (`Preset::get_default_bed_type`), model-supported list, read-only when not selectable | — |
 | Multiple filaments / extruders, colors, AMS sync | `Plater.cpp:3101,3191,3204,3500` | one filament only | ❌ | Bridge (`PresetBundle` filament vector) + UI |
 | Simple / Advanced / Expert modes | `Tab.cpp:1270` | `ConfigSchema.swift:119-129` | ✅ | — |
 | Desktop page/optgroup layout | `Tab.cpp` | `Resources/settings-layout.json` (extracted) | ✅ | — |
@@ -112,7 +112,7 @@ yet in `Bridge/engine-sources.sh`), **Client-reimpl** (desktop logic lives in
 
 ## Highest-value outstanding items (recommended order)
 
-1. **Bed type (`curr_bed_type`)**: a correctness bug today, because bed temperatures silently use Cool Plate values. Small fix: Bridge + one picker.
+1. ~~**Bed type (`curr_bed_type`)**~~ ✅ done (ABI v8).
 2. **Export / share G-code** and **open external G-code**: UI-only. Without them the core loop never leaves the device.
 3. **Slice cancel + warnings list**: Bridge (`PrintBase::cancel`, validate warnings). This folds into immutable slice jobs.
 4. **3MF load/save**: Closure work with vendored dependencies only. It unlocks projects, multi-plate persistence and Bambu-style files.

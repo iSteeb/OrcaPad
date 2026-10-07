@@ -7,7 +7,7 @@ extern "C" {
 #endif
 
 /// Version of the C ABI contract in this header. Callers verify it at runtime.
-#define ORCA_BRIDGE_ABI_VERSION ((uint32_t)7)
+#define ORCA_BRIDGE_ABI_VERSION ((uint32_t)8)
 
 typedef int32_t orca_status_code;
 #define ORCA_STATUS_OK                     ((orca_status_code)0)
@@ -182,6 +182,26 @@ void orca_preset_entry_dispose(orca_preset_entry *entry);
 orca_result orca_presets_print_volume(orca_presets *presets,
                                       double *out_min_x, double *out_min_y,
                                       double *out_max_x, double *out_max_y);
+
+/// Plate (bed) type state — desktop sidebar "plate type" parity. Values are
+/// the engine's `Slic3r::BedType` (1 = Cool Plate … btCount-1); slicing reads
+/// bed temperatures through the project option `curr_bed_type`.
+typedef struct {
+    int32_t  current;          // project curr_bed_type
+    int32_t  machine_default;  // Preset::get_default_bed_type of the machine
+    int32_t  count;            // engine btCount (valid values: 1..count-1)
+    uint8_t  selectable;       // BBL vendor or support_multi_bed_types
+    uint8_t  reserved[3];
+    uint32_t supported_mask;   // bit v set ⇔ BedType v offered for the model
+} orca_bed_type_state;
+
+orca_result orca_presets_bed_type(orca_presets *presets,
+                                  orca_bed_type_state *out_state);
+/// Sets project curr_bed_type. Rejects values outside 1..count-1, values the
+/// printer model does not support, and any non-default value on machines
+/// without selectable plate types. Selecting a different machine resets the
+/// value to that machine's default (desktop Sidebar::update_presets).
+orca_result orca_presets_set_bed_type(orca_presets *presets, int32_t bed_type);
 
 /// The complete resolved configuration exactly as slicing will consume it
 /// (`PresetBundle::full_config()` of the current selection), serialized to a
