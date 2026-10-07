@@ -31,8 +31,16 @@ final class PrintHostService {
         }
     }
 
+    /// A completed upload (shown by the send sheet).
+    struct Receipt: Equatable, Sendable {
+        let printer: String
+        let file: String
+        let startedPrint: Bool
+    }
+
     private let status: StatusCenter
     private(set) var isUploading = false
+    private(set) var lastReceipt: Receipt?
 
     init(status: StatusCenter) {
         self.status = status
@@ -50,11 +58,14 @@ final class PrintHostService {
             return
         }
         isUploading = true
+        lastReceipt = nil
         defer { isUploading = false }
         do {
-            let request = try Self.request(
-                for: printer, file: gcode, startPrint: startPrint
-            )
+            // Reading a multi-megabyte G-code file must not block the main
+            // actor; the request builder is pure and nonisolated.
+            let request = try await Task.detached(priority: .userInitiated) {
+                try Self.request(for: printer, file: gcode, startPrint: startPrint)
+            }.value
             status.report(.device, "\(printer.name): uploading \(gcode.lastPathComponent)…")
             let (data, response) = try await URLSession.shared.data(for: request)
             if let http = response as? HTTPURLResponse,
@@ -63,6 +74,9 @@ final class PrintHostService {
             }
             status.report(.device, "\(printer.name): upload complete")
             _ = data // OctoPrint/Moonraker return JSON status; nothing to show yet
+            lastReceipt = Receipt(
+                printer: printer.name, file: gcode.lastPathComponent, startedPrint: startPrint
+            )
         } catch let error as UploadError {
             status.report(.device, failure: AppFailure.wrap(error, operation: "upload gcode"))
         } catch {
@@ -75,7 +89,7 @@ final class PrintHostService {
     ///   `select`/`print` (OctoPrint.cpp put).
     /// - Moonraker: `POST /server/files/upload`, multipart `print`
     ///   (Moonraker.cpp put).
-    private static func request(
+    nonisolated private static func request(
         for printer: EnginePresets.PhysicalPrinterRecord,
         file: URL,
         startPrint: Bool

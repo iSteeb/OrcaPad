@@ -41,6 +41,12 @@
 
 ## PROGRESS
 
+- [2026-10-07 CODE][TOOL] Parity checker (`2974b83`): 551 desktop items, 152
+  features, PARITY.md generated + gated. ABI v17: physical printer
+  print_host_webui; Device tab = printer web UI (PrinterWebSession/WKWebView)
+  + PrinterStore (printer orchestration moved out of the view), send sheet,
+  failure banner (StatusCenter.alert), LAN ATS keys. Host tests 50,641 PASS.
+
 - [2026-10-07 CODE][TOOL] ABI v8–v16 (`7ada690`…`8edb8a6`): plate type, slice
   jobs/validate/warnings, import_model, projects, user presets, arrange/orient/
   lay flat, preview v14, physical printers + upload, thumbnails. Host contract

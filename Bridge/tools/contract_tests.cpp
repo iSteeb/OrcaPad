@@ -273,7 +273,7 @@ static void test_md5_shim() {
 
 static void test_abi_version() {
     CHECK_EQ(orca_bridge_abi_version(), ORCA_BRIDGE_ABI_VERSION);
-    CHECK_EQ(ORCA_BRIDGE_ABI_VERSION, 16);
+    CHECK_EQ(ORCA_BRIDGE_ABI_VERSION, 17);
 }
 
 static void test_document_lifecycle(const std::string &dir) {
@@ -1839,17 +1839,25 @@ static void test_physical_printers(const std::string &data_dir) {
     CHECK_EQ(count, 0);
 
     GUARD(e1, orca_physical_printer_upsert(presets, "Vyper", "not_a_host",
-                                           "http://192.168.1.5", "key", "Anycubic Vyper 0.4 nozzle"));
+                                           "http://192.168.1.5", "", "key", "Anycubic Vyper 0.4 nozzle"));
     expect_code(e1, ORCA_STATUS_INVALID_ARGUMENT, "bad host type");
     GUARD(e2, orca_physical_printer_upsert(presets, "Vyper", "octoprint",
-                                           "ftp://x", "key", "Anycubic Vyper 0.4 nozzle"));
+                                           "ftp://x", "", "key", "Anycubic Vyper 0.4 nozzle"));
     expect_code(e2, ORCA_STATUS_INVALID_ARGUMENT, "non-http url");
     GUARD(e3, orca_physical_printer_upsert(presets, "Vyper", "octoprint",
-                                           "http://192.168.1.5", "key", "__missing__"));
+                                           "http://192.168.1.5", "", "key", "__missing__"));
     expect_code(e3, ORCA_STATUS_NOT_FOUND, "missing preset");
+    GUARD(e5, orca_physical_printer_upsert(presets, "Vyper", "moonraker",
+                                           "http://192.168.1.5:7125", "mainsail.local", "",
+                                           "Anycubic Vyper 0.4 nozzle"));
+    expect_code(e5, ORCA_STATUS_INVALID_ARGUMENT, "non-http web UI");
+    GUARD(e6, orca_physical_printer_upsert(presets, "Vyper", "moonraker",
+                                           "http://192.168.1.5", nullptr, "",
+                                           "Anycubic Vyper 0.4 nozzle"));
+    expect_code(e6, ORCA_STATUS_INVALID_ARGUMENT, "null web UI");
 
     GUARD(g2, orca_physical_printer_upsert(presets, "Vyper", "octoprint",
-                                           "http://192.168.1.5", "secret", "Anycubic Vyper 0.4 nozzle"));
+                                           "http://192.168.1.5", "", "secret", "Anycubic Vyper 0.4 nozzle"));
     expect_ok(g2, "upsert");
     GUARD(g3, orca_physical_printer_count(presets, &count));
     expect_ok(g3, "count after upsert");
@@ -1860,17 +1868,21 @@ static void test_physical_printers(const std::string &data_dir) {
     CHECK(strcmp(entry.name.data, "Vyper") == 0);
     CHECK(strcmp(entry.host_type.data, "octoprint") == 0);
     CHECK(strcmp(entry.url.data, "http://192.168.1.5") == 0);
+    CHECK(strcmp(entry.webui.data, "") == 0);
     CHECK(strcmp(entry.api_key.data, "secret") == 0);
     CHECK(strcmp(entry.preset_names.data, "Anycubic Vyper 0.4 nozzle") == 0);
     orca_physical_printer_dispose(&entry);
 
     // update in place
     GUARD(g5, orca_physical_printer_upsert(presets, "Vyper", "moonraker",
-                                           "http://192.168.1.9", "k2", "Anycubic Vyper 0.4 nozzle"));
+                                           "http://192.168.1.9:7125", "http://192.168.1.9", "k2",
+                                           "Anycubic Vyper 0.4 nozzle"));
     expect_ok(g5, "upsert update");
     GUARD(g6, orca_physical_printer_list(presets, 0, &entry));
     expect_ok(g6, "list after update");
     CHECK(strcmp(entry.host_type.data, "moonraker") == 0);
+    CHECK(strcmp(entry.url.data, "http://192.168.1.9:7125") == 0);
+    CHECK(strcmp(entry.webui.data, "http://192.168.1.9") == 0);
     orca_physical_printer_dispose(&entry);
     orca_presets_free(presets);
 
@@ -1884,6 +1896,7 @@ static void test_physical_printers(const std::string &data_dir) {
     GUARD(g9, orca_physical_printer_list(fresh, 0, &entry));
     expect_ok(g9, "list fresh");
     CHECK(strcmp(entry.host_type.data, "moonraker") == 0);
+    CHECK(strcmp(entry.webui.data, "http://192.168.1.9") == 0);
     orca_physical_printer_dispose(&entry);
     GUARD(g10, orca_physical_printer_delete(fresh, "Vyper"));
     expect_ok(g10, "delete");

@@ -7,7 +7,7 @@ extern "C" {
 #endif
 
 /// Version of the C ABI contract in this header. Callers verify it at runtime.
-#define ORCA_BRIDGE_ABI_VERSION ((uint32_t)16)
+#define ORCA_BRIDGE_ABI_VERSION ((uint32_t)17)
 
 typedef int32_t orca_status_code;
 #define ORCA_STATUS_OK                     ((orca_status_code)0)
@@ -222,6 +222,8 @@ typedef struct {
     orca_owned_string name;
     orca_owned_string host_type;
     orca_owned_string url;          // print_host, e.g. http://192.168.1.2
+    orca_owned_string webui;        // print_host_webui ("" = the Device tab
+                                    // shows `url`, PrintHost::get_print_host_webui)
     orca_owned_string api_key;      // printhost_apikey
     orca_owned_string preset_names; // '\n'-joined printer presets
 } orca_physical_printer;
@@ -232,8 +234,11 @@ orca_result orca_physical_printer_list(orca_presets *presets, int32_t index,
                                        orca_physical_printer *out_printer);
 /// Creates or updates the physical printer `name` and ties it to printer
 /// preset `preset_name`. Rejects unknown host types and non-http(s) URLs.
+/// `webui_url` (print_host_webui, the desktop "Device UI" field) may be
+/// empty; a non-empty value must be http(s) as well.
 orca_result orca_physical_printer_upsert(orca_presets *presets, const char *name,
                                          const char *host_type, const char *url,
+                                         const char *webui_url,
                                          const char *api_key,
                                          const char *preset_name);
 orca_result orca_physical_printer_delete(orca_presets *presets, const char *name);

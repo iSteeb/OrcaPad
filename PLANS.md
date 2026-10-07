@@ -90,9 +90,10 @@ Device, each tab a clean feature module over the same stores.
       surface extracted from upstream (551 items, 14 surfaces), manifest
       evidence verified, PARITY.md generated + commit-gated
 - [ ] Parity backlog: generated PARITY.md "Remaining work" (priority order)
-- [ ] Device tab: printer web UI — allowed by user 2026-10-07 (scoped
-      AGENTS.md exception: the printer's OWN web page, desktop
-      PrinterWebView parity); not built yet
+- [x] Device tab: printer web UI (user-allowed 2026-10-07, scoped AGENTS.md
+      exception): selected physical printer's own page in a WKWebView,
+      device UI URL = print_host_webui (ABI v17), native picker/reload/
+      send/manage around it; LAN ATS + local-network keys in App-Info.plist
 
 **Accept:** device walkthrough of all four tabs; edits in Prepare change the
 sliced gcode (verified in Preview + resolved config); Preview scrubs layers.

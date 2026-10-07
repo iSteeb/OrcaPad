@@ -245,3 +245,10 @@ in ~/xtool-cheatsheet.md — link, don't duplicate.)
   Swift imports C fixed-size arrays as tuples — index them via byte offsets.
 - Never use `rm -rf ./*` style cleanup [USER 2026-10-07]: create a fresh
   scratch dir instead of emptying one.
+- Edits whose oldText contains non-ASCII punctuation (em dash, ellipsis,
+  arrows) repeatedly came out corrupted (a stray "\r" + garbage, or no
+  match). Anchor edits on ASCII-only substrings, or rewrite the lines with a
+  small checked Python script, then grep the result.
+- iOS 17+ ATS blocks plain-HTTP IP-address hosts by default; LAN printers
+  need NSAllowsLocalNetworking + private CIDR NSExceptionDomains (and
+  NSAllowsArbitraryLoadsInWebContent for the printer web view).

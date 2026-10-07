@@ -1087,11 +1087,11 @@ priority = 220
 id = "device.printer-webui"
 area = "device"
 title = "Printer web UI in the Device tab (Mainsail / Fluidd / OctoPrint)"
-status = "missing"
+status = "done"
 source = "src/slic3r/GUI/PrinterWebView.hpp:class PrinterWebView"
-work = "UI"
-priority = 0
-note = "scoped AGENTS.md exception (user, 2026-10-07)"
+evidence = ["client:final class PrinterWebSession", 'client:func webUIURL\(for', "bridge:print_host_webui",
+            "abi:orca_physical_printer_list"]
+note = "scoped AGENTS.md exception (user, 2026-10-07); device UI URL = print_host_webui (ABI v17)"
 
 [[feature]]
 id = "device.upload"

@@ -48,6 +48,14 @@ struct StatusEntry: Identifiable, Sendable {
     var id: StatusSubsystem { subsystem }
 }
 
+/// The latest failure, shown to the user as a dismissible banner (the
+/// debug overlay is hidden by default, so failures must surface here).
+struct StatusAlert: Identifiable, Equatable, Sendable {
+    let id: UInt64
+    let subsystem: StatusSubsystem
+    let message: String
+}
+
 @MainActor
 @Observable
 final class StatusCenter {
@@ -79,10 +87,19 @@ final class StatusCenter {
         entries[subsystem] = text
     }
 
+    private(set) var alert: StatusAlert?
+    private var alertSerial: UInt64 = 0
+
     func report(_ subsystem: StatusSubsystem, failure: AppFailure) {
         let message = failure.localizedDescription
         entries[subsystem] = message
         logger.error("[\(subsystem.rawValue, privacy: .public)] \(message, privacy: .public)")
+        alertSerial += 1
+        alert = StatusAlert(id: alertSerial, subsystem: subsystem, message: message)
+    }
+
+    func dismissAlert(_ id: UInt64) {
+        if alert?.id == id { alert = nil }
     }
 }
 

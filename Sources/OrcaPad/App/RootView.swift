@@ -40,6 +40,17 @@ struct RootView: View {
         .overlay(alignment: .topLeading) {
             if showDebugOverlay { statusOverlay }
         }
+        .overlay(alignment: .top) {
+            if let alert = environment.status.alert {
+                FailureBanner(alert: alert) {
+                    environment.status.dismissAlert(alert.id)
+                }
+                .padding(.top, 6)
+                .padding(.horizontal, 16)
+                .transition(.move(edge: .top).combined(with: .opacity))
+            }
+        }
+        .animation(.snappy, value: environment.status.alert)
         .preferredColorScheme(.dark)
     }
 
@@ -64,6 +75,41 @@ struct RootView: View {
         if devicePresses.count >= Self.debugTogglePresses {
             devicePresses.removeAll()
             showDebugOverlay.toggle()
+        }
+    }
+
+    /// Failure banner: every typed failure reaches the user, not only the
+    /// hidden debug overlay and os_log.
+    private struct FailureBanner: View {
+        let alert: StatusAlert
+        let dismiss: () -> Void
+
+        var body: some View {
+            HStack(alignment: .top, spacing: 10) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.yellow)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(alert.subsystem.rawValue.capitalized)
+                        .font(.caption.weight(.semibold))
+                    Text(alert.message)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(4)
+                        .textSelection(.enabled)
+                }
+                Spacer(minLength: 4)
+                Button(action: dismiss) {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.title3)
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Dismiss")
+            }
+            .padding(12)
+            .frame(maxWidth: 560)
+            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14))
+            .overlay(RoundedRectangle(cornerRadius: 14).stroke(.red.opacity(0.45)))
         }
     }
 

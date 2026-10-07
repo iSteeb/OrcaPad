@@ -2179,6 +2179,7 @@ void orca_physical_printer_dispose(orca_physical_printer *printer) {
     orca_owned_string_dispose(&printer->name);
     orca_owned_string_dispose(&printer->host_type);
     orca_owned_string_dispose(&printer->url);
+    orca_owned_string_dispose(&printer->webui);
     orca_owned_string_dispose(&printer->api_key);
     orca_owned_string_dispose(&printer->preset_names);
     *printer = orca_physical_printer{};
@@ -2216,6 +2217,12 @@ orca_result orca_physical_printer_list(orca_presets *presets, int32_t index,
                                 "physical printer index was not found");
         const Slic3r::PhysicalPrinter &printer =
             printers[static_cast<size_t>(index)];
+        // const opt_string() dereferences a missing option: check first so a
+        // malformed persisted printer is a typed failure, not a crash.
+        for (const char *key : {"host_type", "print_host", "print_host_webui", "printhost_apikey"})
+            if (!printer.config.has(key))
+                return orcapad_fail(ORCA_STATUS_INVALID_CONFIGURATION, operation,
+                                    (std::string("physical printer lacks option ") + key).c_str());
         orca_physical_printer entry;
         std::string presets_list;
         for (const std::string &preset : printer.get_preset_names())
@@ -2225,6 +2232,7 @@ orca_result orca_physical_printer_list(orca_presets *presets, int32_t index,
                 printer.config.opt_serialize("host_type").c_str(),
                 &entry.host_type) ||
             !orcapad_copy_string(printer.config.opt_string("print_host").c_str(), &entry.url) ||
+            !orcapad_copy_string(printer.config.opt_string("print_host_webui").c_str(), &entry.webui) ||
             !orcapad_copy_string(printer.config.opt_string("printhost_apikey").c_str(), &entry.api_key) ||
             !orcapad_copy_string(presets_list.c_str(), &entry.preset_names)) {
             orca_physical_printer_dispose(&entry);
@@ -2238,19 +2246,25 @@ orca_result orca_physical_printer_list(orca_presets *presets, int32_t index,
 
 orca_result orca_physical_printer_upsert(orca_presets *presets, const char *name,
                                          const char *host_type, const char *url,
+                                         const char *webui_url,
                                          const char *api_key,
                                          const char *preset_name) {
     constexpr const char *operation = "orca_physical_printer_upsert";
     if (!presets)
         return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation, "presets handle is null");
     if (!name || !name[0] || !host_type || !host_type[0] || !url || !url[0] ||
-        !api_key || !preset_name || !preset_name[0])
+        !webui_url || !api_key || !preset_name || !preset_name[0])
         return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
-                            "name, host type, url, api key or preset name is empty");
-    const std::string url_value(url);
-    if (url_value.rfind("http://", 0) != 0 && url_value.rfind("https://", 0) != 0)
+                            "name, host type, url, web UI, api key or preset name is missing");
+    const auto is_http = [](const std::string &value) {
+        return value.rfind("http://", 0) == 0 || value.rfind("https://", 0) == 0;
+    };
+    if (!is_http(url))
         return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
                             "print host URL must start with http:// or https://");
+    if (webui_url[0] && !is_http(webui_url))
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "device UI URL must be empty or start with http:// or https://");
     return orcapad_guard(operation, [&]() -> orca_result {
         if (!orcapad_valid_host_type(host_type))
             return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
@@ -2278,6 +2292,7 @@ orca_result orca_physical_printer_upsert(orca_presets *presets, const char *name
                                 "host type option is missing from the printer config");
         }
         printer.config.opt_string("print_host") = url;
+        printer.config.opt_string("print_host_webui") = webui_url;
         printer.config.opt_string("printhost_apikey") = api_key;
         printer.add_preset(preset);
         printer.update_preset_names_in_config();

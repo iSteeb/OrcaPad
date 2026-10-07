@@ -420,17 +420,23 @@ public final class EnginePresets: @unchecked Sendable {
         public let name: String
         /// Engine `host_type` enum value ("octoprint", "moonraker", …).
         public let hostType: String
+        /// `print_host`: where uploads go.
         public let url: String
+        /// `print_host_webui`: the printer's own web interface when it is not
+        /// served at `url` (empty = use `url`, desktop get_print_host_webui).
+        public let webUI: String
         public let apiKey: String
         /// Printer presets usable through this host.
         public let presetNames: [String]
 
         public init(
-            name: String, hostType: String, url: String, apiKey: String, presetNames: [String]
+            name: String, hostType: String, url: String, webUI: String, apiKey: String,
+            presetNames: [String]
         ) {
             self.name = name
             self.hostType = hostType
             self.url = url
+            self.webUI = webUI
             self.apiKey = apiKey
             self.presetNames = presetNames
         }
@@ -457,37 +463,38 @@ public final class EnginePresets: @unchecked Sendable {
             defer { orca_physical_printer_dispose(&raw) }
             // Strings are consumed in place (reset to empty), so the deferred
             // dispose never double-frees them.
-            let name: String, host: String, url: String, key: String, presets: String
-            switch (
+            var fields: [String] = []
+            for result in [
                 consumeBridgeString(&raw.name, operation: operation),
                 consumeBridgeString(&raw.host_type, operation: operation),
                 consumeBridgeString(&raw.url, operation: operation),
+                consumeBridgeString(&raw.webui, operation: operation),
                 consumeBridgeString(&raw.api_key, operation: operation),
-                consumeBridgeString(&raw.preset_names, operation: operation)
-            ) {
-            case (.success(let n), .success(let h), .success(let u), .success(let k), .success(let p)):
-                (name, host, url, key, presets) = (n, h, u, k, p)
-            case (.failure(let error), _, _, _, _), (_, .failure(let error), _, _, _),
-                 (_, _, .failure(let error), _, _), (_, _, _, .failure(let error), _),
-                 (_, _, _, _, .failure(let error)):
-                return .failure(error)
+                consumeBridgeString(&raw.preset_names, operation: operation),
+            ] {
+                switch result {
+                case .success(let value): fields.append(value)
+                case .failure(let error): return .failure(error)
+                }
             }
             records.append(PhysicalPrinterRecord(
-                name: name, hostType: host, url: url, apiKey: key,
-                presetNames: presets.split(separator: "\n").map(String.init)
+                name: fields[0], hostType: fields[1], url: fields[2], webUI: fields[3],
+                apiKey: fields[4],
+                presetNames: fields[5].split(separator: "\n").map(String.init)
             ))
         }
         return .success(records)
     }
 
     public func upsertPhysicalPrinter(
-        name: String, hostType: String, url: String, apiKey: String, presetName: String
+        name: String, hostType: String, url: String, webUI: String, apiKey: String,
+        presetName: String
     ) -> Result<Void, BridgeError> {
         let operation = "EnginePresets.upsertPhysicalPrinter"
         lock.lock(); defer { lock.unlock() }
         guard let handle else { return .failure(invalidHandle(operation)) }
         if let error = bridgeFailure(operation: operation, call: {
-            orca_physical_printer_upsert(handle, name, hostType, url, apiKey, presetName)
+            orca_physical_printer_upsert(handle, name, hostType, url, webUI, apiKey, presetName)
         }) {
             return .failure(error)
         }

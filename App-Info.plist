@@ -7,5 +7,47 @@
 	<true/>
 	<key>LSSupportsOpeningDocumentsInPlace</key>
 	<true/>
+	<!-- Printers on the LAN (Moonraker/Klipper, OctoPrint) speak plain HTTP.
+	     iOS 17+ ATS blocks IP-address hosts unless listed: allow the private,
+	     link-local and CGNAT/Tailscale ranges, unqualified and .local names
+	     (NSAllowsLocalNetworking), and any printer page inside the Device
+	     tab web view (desktop PrinterWebView loads whatever the user set). -->
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+		<key>NSAllowsArbitraryLoadsInWebContent</key>
+		<true/>
+		<key>NSExceptionDomains</key>
+		<dict>
+			<key>10.0.0.0/8</key>
+			<dict>
+				<key>NSExceptionAllowsInsecureHTTPLoads</key>
+				<true/>
+			</dict>
+			<key>172.16.0.0/12</key>
+			<dict>
+				<key>NSExceptionAllowsInsecureHTTPLoads</key>
+				<true/>
+			</dict>
+			<key>192.168.0.0/16</key>
+			<dict>
+				<key>NSExceptionAllowsInsecureHTTPLoads</key>
+				<true/>
+			</dict>
+			<key>169.254.0.0/16</key>
+			<dict>
+				<key>NSExceptionAllowsInsecureHTTPLoads</key>
+				<true/>
+			</dict>
+			<key>100.64.0.0/10</key>
+			<dict>
+				<key>NSExceptionAllowsInsecureHTTPLoads</key>
+				<true/>
+			</dict>
+		</dict>
+	</dict>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>OrcaPad connects to 3D printers on your network to send G-code and show their web interface.</string>
 </dict>
 </plist>

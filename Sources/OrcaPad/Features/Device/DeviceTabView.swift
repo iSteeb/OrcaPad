@@ -1,196 +1,400 @@
 import OrcaBridge
 import SwiftUI
 
-/// Device tab (desktop Monitor/PhysicalPrinterDialog parity, native
-/// reimplementation): manage physical printers (engine-backed storage) and
-/// send sliced G-code to OctoPrint/Moonraker hosts.
+/// Device tab, desktop Device page parity: the selected physical printer's
+/// own web interface (desktop `PrinterWebView`, the scoped AGENTS.md
+/// exception) wrapped in native controls: printer picker, reload, open in
+/// the browser, send the sliced G-code, and printer management (desktop
+/// PhysicalPrinterDialog). Presentation only: printers live in
+/// `PrinterStore`, uploads in `PrintHostService`.
 struct DeviceTabView: View {
     @Environment(AppEnvironment.self) private var environment
-    @State private var printers: [EnginePresets.PhysicalPrinterRecord] = []
-    @State private var editorPresented = false
-    @State private var editing: EnginePresets.PhysicalPrinterRecord?
-    @State private var startPrint = true
+    @Environment(\.openURL) private var openURL
+    @State private var session = PrinterWebSession()
+    @State private var editorTarget: EditorTarget?
+    @State private var managePresented = false
+    @State private var sendPresented = false
 
-    private var presets: PresetStore { environment.presets }
+    private var store: PrinterStore { environment.printers }
+
+    private var selected: PrinterStore.Record? {
+        store.selectedPrinter(machinePreset: environment.presets.selection.machine)
+    }
+
+    private var selectedURL: URL? {
+        guard let selected, case .success(let url) = PrinterStore.webUIURL(for: selected) else {
+            return nil
+        }
+        return url
+    }
 
     var body: some View {
         NavigationStack {
-            Group {
-                if printers.isEmpty {
+            content
+                .navigationTitle(selected?.name ?? "Device")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar { toolbar }
+                .sheet(item: $editorTarget) { target in
+                    PhysicalPrinterEditor(
+                        existing: target.record,
+                        defaultPreset: environment.presets.selection.machine
+                    ) { record in
+                        Task { await save(record) }
+                    }
+                }
+                .sheet(isPresented: $managePresented) {
+                    PrinterManagementSheet(
+                        onAdd: { editorTarget = .add },
+                        onEdit: { editorTarget = .edit($0) },
+                        onDelete: { name in Task { await delete(name) } }
+                    )
+                }
+                .sheet(isPresented: $sendPresented) {
+                    if let selected {
+                        SendGcodeSheet(printer: selected)
+                    }
+                }
+                .task(id: environment.presets.isReady) { await reload() }
+        }
+    }
+
+    // MARK: Content
+
+    @ViewBuilder
+    private var content: some View {
+        if !store.isLoaded {
+            ProgressView("Loading printers…")
+        } else if let printer = selected {
+            switch PrinterStore.webUIURL(for: printer) {
+            case .success(let url):
+                webContent(printer: printer, url: url)
+            case .failure(let error):
+                ContentUnavailableView {
+                    Label("Cannot show \(printer.name)", systemImage: "exclamationmark.triangle")
+                } description: {
+                    Text(error.localizedDescription)
+                } actions: {
+                    Button("Edit printer") { editorTarget = .edit(printer) }
+                }
+            }
+        } else {
+            ContentUnavailableView {
+                Label("No printers", systemImage: "printer")
+            } description: {
+                Text("Add your printer (Moonraker/Klipper or OctoPrint) to use its web interface here and send G-code from OrcaPad.")
+            } actions: {
+                Button("Add printer") { editorTarget = .add }
+                    .buttonStyle(.borderedProminent)
+            }
+        }
+    }
+
+    private func webContent(printer: PrinterStore.Record, url: URL) -> some View {
+        PrinterWebView(session: session)
+            .overlay(alignment: .top) {
+                if session.isLoading {
+                    ProgressView()
+                        .padding(8)
+                        .background(.ultraThinMaterial, in: Capsule())
+                        .padding(.top, 8)
+                }
+            }
+            .overlay {
+                if let failure = session.failure {
                     ContentUnavailableView {
-                        Label("No printers", systemImage: "printer")
+                        Label("\(printer.name) is unreachable", systemImage: "wifi.exclamationmark")
                     } description: {
-                        Text("Add a physical printer to send G-code straight from OrcaPad (OctoPrint, Moonraker/Klipper).")
+                        Text("\(failure.url.absoluteString)\n\(failure.message)")
                     } actions: {
-                        Button("Add printer") {
-                            editing = nil
-                            editorPresented = true
-                        }
-                    }
-                } else {
-                    list
-                }
-            }
-            .navigationTitle("Device")
-            .toolbar {
-                ToolbarItem(placement: .primaryAction) {
-                    Button {
-                        editing = nil
-                        editorPresented = true
-                    } label: {
-                        Label("Add printer", systemImage: "plus")
-                    }
-                    .disabled(presets.isSelecting)
-                }
-            }
-            .sheet(isPresented: $editorPresented) {
-                PhysicalPrinterEditor(existing: editing) { record, delete in
-                    Task { await apply(record, delete: delete) }
-                }
-            }
-            .task(id: presets.isReady) { await reload() }
-        }
-    }
-
-    private var list: some View {
-        List {
-            Section {
-                ForEach(printers, id: \.name) { printer in
-                    VStack(alignment: .leading, spacing: 4) {
-                        HStack {
-                            Label(printer.name, systemImage: iconName(printer.hostType))
-                                .font(.headline)
-                            Spacer()
-                            Menu {
-                                Button {
-                                    editing = printer
-                                    editorPresented = true
-                                } label: {
-                                    Label("Edit", systemImage: "pencil")
-                                }
-                                Button(role: .destructive) {
-                                    Task {
-                                        await apply(printer, delete: true)
-                                    }
-                                } label: {
-                                    Label("Delete", systemImage: "trash")
-                                }
-                            } label: {
-                                Image(systemName: "ellipsis.circle")
-                            }
-                        }
-                        Text("\(Self.hostLabel(printer.hostType)) · \(printer.url)")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                        Text(printer.presetNames.joined(separator: ", "))
-                            .font(.caption2)
-                            .foregroundStyle(.tertiary)
-                        if let gcode = environment.slicing.lastOutcome?.outputURL {
-                            Toggle("Start print after upload", isOn: $startPrint)
-                                .font(.caption)
-                            Button {
-                                let upload = (gcode, printer, startPrint)
-                                Task {
-                                    await environment.printHost.upload(
-                                        upload.0, to: upload.1, startPrint: upload.2
-                                    )
-                                }
-                            } label: {
-                                Label(
-                                    "Send \(gcode.lastPathComponent)",
-                                    systemImage: "paperplane"
-                                )
-                                .font(.subheadline.weight(.semibold))
-                            }
+                        Button("Retry") { session.reload() }
                             .buttonStyle(.borderedProminent)
-                            .disabled(environment.printHost.isUploading)
-                        }
+                        Button("Edit printer") { editorTarget = .edit(printer) }
                     }
-                    .padding(.vertical, 2)
-                }
-            } header: {
-                Text("Physical printers")
-            } footer: {
-                if environment.slicing.lastOutcome == nil {
-                    Text("Slice a plate first — its G-code can be sent to any printer here.")
+                    .background(.background)
                 }
             }
+            .task(id: url) {
+                session.show(PrinterStore.webUIRequest(for: printer, url: url))
+            }
+    }
+
+    // MARK: Toolbar
+
+    @ToolbarContentBuilder
+    private var toolbar: some ToolbarContent {
+        ToolbarItem(placement: .topBarLeading) {
+            Menu {
+                ForEach(store.printers, id: \.name) { printer in
+                    Button {
+                        store.select(printer.name)
+                    } label: {
+                        if printer.name == selected?.name {
+                            Label(printer.name, systemImage: "checkmark")
+                        } else {
+                            Text(printer.name)
+                        }
+                    }
+                }
+                if !store.printers.isEmpty { Divider() }
+                Button {
+                    editorTarget = .add
+                } label: {
+                    Label("Add printer…", systemImage: "plus")
+                }
+                Button {
+                    managePresented = true
+                } label: {
+                    Label("Manage printers…", systemImage: "list.bullet")
+                }
+                .disabled(store.printers.isEmpty)
+            } label: {
+                Label("Printers", systemImage: "printer")
+            }
+            .disabled(store.isSaving)
+        }
+        ToolbarItemGroup(placement: .topBarTrailing) {
+            Button {
+                session.reload()
+            } label: {
+                Label("Reload", systemImage: "arrow.clockwise")
+            }
+            .disabled(selectedURL == nil)
+            Button {
+                if let selectedURL { openURL(selectedURL) }
+            } label: {
+                Label("Open in browser", systemImage: "safari")
+            }
+            .disabled(selectedURL == nil)
+            Button {
+                sendPresented = true
+            } label: {
+                Label("Send G-code", systemImage: "paperplane")
+            }
+            .disabled(
+                selected == nil || environment.slicing.lastOutcome?.outputURL == nil
+                    || environment.printHost.isUploading
+            )
         }
     }
 
-    private func iconName(_ hostType: String) -> String {
+    // MARK: Actions
+
+    private func reload() async {
+        guard let engine = environment.presets.engineForSlicing else { return }
+        await store.reload(presets: engine)
+    }
+
+    private func save(_ record: PrinterStore.Record) async {
+        guard let engine = environment.presets.engineForSlicing else {
+            environment.status.report(.device, failure: .invariant(
+                operation: "save printer", diagnostic: "presets are not loaded"))
+            return
+        }
+        await store.save(record, presets: engine)
+    }
+
+    private func delete(_ name: String) async {
+        guard let engine = environment.presets.engineForSlicing else {
+            environment.status.report(.device, failure: .invariant(
+                operation: "delete printer", diagnostic: "presets are not loaded"))
+            return
+        }
+        await store.delete(name, presets: engine)
+    }
+}
+
+/// Sheet routing for the printer editor.
+private enum EditorTarget: Identifiable {
+    case add
+    case edit(PrinterStore.Record)
+
+    var id: String {
+        switch self {
+        case .add: return "+add"
+        case .edit(let record): return record.name
+        }
+    }
+
+    var record: PrinterStore.Record? {
+        if case .edit(let record) = self { return record }
+        return nil
+    }
+}
+
+/// Host types OrcaPad can upload to (PrintHostService); the engine knows
+/// more, which stay typed rejections until implemented.
+enum PrinterHostKind {
+    static let supported: [(value: String, label: String)] = [
+        ("moonraker", "Moonraker (Klipper)"),
+        ("octoprint", "OctoPrint"),
+    ]
+
+    static func label(_ hostType: String) -> String {
+        supported.first { $0.value == hostType }?.label ?? hostType
+    }
+
+    static func symbol(_ hostType: String) -> String {
         switch hostType {
         case "moonraker": return "antenna.radiowaves.left.and.right"
         case "octoprint": return "server.rack"
         default: return "printer"
         }
     }
-
-    static func hostLabel(_ hostType: String) -> String {
-        switch hostType {
-        case "moonraker": return "Moonraker (Klipper)"
-        case "octoprint": return "OctoPrint"
-        default: return hostType
-        }
-    }
-
-    private func reload() async {
-        guard let engine = presets.engineForSlicing else { return }
-        let result = await BackgroundWork.run(operation: "load physical printers") {
-            try engine.physicalPrinters().get()
-        }
-        switch result {
-        case .success(let records):
-            printers = records
-        case .failure(let failure):
-            environment.status.report(.device, failure: failure)
-        }
-    }
-
-    private func apply(
-        _ record: EnginePresets.PhysicalPrinterRecord,
-        delete: Bool
-    ) async {
-        guard let engine = presets.engineForSlicing else {
-            environment.status.report(.device, "presets are not loaded")
-            return
-        }
-        let result = await BackgroundWork.run(operation: "save physical printer") {
-            if delete {
-                return try engine.deletePhysicalPrinter(name: record.name).get()
-            }
-            return try engine.upsertPhysicalPrinter(
-                name: record.name,
-                hostType: record.hostType,
-                url: record.url,
-                apiKey: record.apiKey,
-                presetName: record.presetNames.first ?? presets.selection.machine
-            ).get()
-        }
-        switch result {
-        case .success:
-            await reload()
-        case .failure(let failure):
-            environment.status.report(.device, failure: failure)
-        }
-    }
 }
 
-/// Desktop PhysicalPrinterDialog: name, host type, URL, API key.
-private struct PhysicalPrinterEditor: View {
-    let existing: EnginePresets.PhysicalPrinterRecord?
-    let onDone: (EnginePresets.PhysicalPrinterRecord, _ delete: Bool) -> Void
+/// Printer list with edit / delete (desktop physical printer combo + dialog).
+private struct PrinterManagementSheet: View {
+    let onAdd: () -> Void
+    let onEdit: (PrinterStore.Record) -> Void
+    let onDelete: (String) -> Void
 
     @Environment(AppEnvironment.self) private var environment
     @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            List {
+                ForEach(environment.printers.printers, id: \.name) { printer in
+                    VStack(alignment: .leading, spacing: 3) {
+                        Label(printer.name, systemImage: PrinterHostKind.symbol(printer.hostType))
+                            .font(.headline)
+                        Text("\(PrinterHostKind.label(printer.hostType)) · \(printer.url)")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        if !printer.webUI.isEmpty {
+                            Text("Device UI: \(printer.webUI)")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        Text(printer.presetNames.joined(separator: ", "))
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                    }
+                    .swipeActions {
+                        Button(role: .destructive) {
+                            onDelete(printer.name)
+                        } label: {
+                            Label("Delete", systemImage: "trash")
+                        }
+                        Button {
+                            dismiss()
+                            onEdit(printer)
+                        } label: {
+                            Label("Edit", systemImage: "pencil")
+                        }
+                    }
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        environment.printers.select(printer.name)
+                        dismiss()
+                    }
+                }
+            }
+            .navigationTitle("Printers")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }
+                }
+                ToolbarItem(placement: .primaryAction) {
+                    Button {
+                        dismiss()
+                        onAdd()
+                    } label: {
+                        Label("Add printer", systemImage: "plus")
+                    }
+                }
+            }
+        }
+        .presentationDetents([.medium, .large])
+    }
+}
+
+/// Desktop PrintHostSendDialog: upload the last sliced G-code to the
+/// selected printer, optionally starting the print.
+private struct SendGcodeSheet: View {
+    let printer: PrinterStore.Record
+
+    @Environment(AppEnvironment.self) private var environment
+    @Environment(\.dismiss) private var dismiss
+    @State private var startPrint = true
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                if let gcode = environment.slicing.lastOutcome?.outputURL {
+                    Section {
+                        LabeledContent("File", value: gcode.lastPathComponent)
+                        LabeledContent("Printer", value: printer.name)
+                        LabeledContent("Host", value: "\(PrinterHostKind.label(printer.hostType)) · \(printer.url)")
+                        Toggle("Start print after upload", isOn: $startPrint)
+                    }
+                    Section {
+                        Button {
+                            let target = (gcode, printer, startPrint)
+                            Task {
+                                await environment.printHost.upload(
+                                    target.0, to: target.1, startPrint: target.2)
+                            }
+                        } label: {
+                            HStack {
+                                Label("Send", systemImage: "paperplane.fill")
+                                Spacer()
+                                if environment.printHost.isUploading { ProgressView() }
+                            }
+                        }
+                        .disabled(environment.printHost.isUploading)
+                    } footer: {
+                        if let receipt = environment.printHost.lastReceipt,
+                           receipt.printer == printer.name,
+                           receipt.file == gcode.lastPathComponent {
+                            Label(
+                                receipt.startedPrint
+                                    ? "Uploaded; the print is starting."
+                                    : "Uploaded to the printer's file list.",
+                                systemImage: "checkmark.circle.fill"
+                            )
+                            .foregroundStyle(.green)
+                        }
+                    }
+                } else {
+                    Text("Slice a plate first: its G-code can then be sent to \(printer.name).")
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .navigationTitle("Send to printer")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }
+                }
+            }
+        }
+        .presentationDetents([.medium])
+    }
+}
+
+/// Desktop PhysicalPrinterDialog: name, host type, host URL, device UI URL,
+/// API key.
+private struct PhysicalPrinterEditor: View {
+    let existing: PrinterStore.Record?
+    let defaultPreset: String
+    let onDone: (PrinterStore.Record) -> Void
+
+    @Environment(\.dismiss) private var dismiss
     @State private var name = ""
-    @State private var hostType = "octoprint"
+    @State private var hostType = "moonraker"
     @State private var url = ""
+    @State private var webUI = ""
     @State private var apiKey = ""
 
+    private static func isHTTP(_ value: String) -> Bool {
+        value.hasPrefix("http://") || value.hasPrefix("https://")
+    }
+
     private var canSave: Bool {
-        !name.trimmingCharacters(in: .whitespaces).isEmpty &&
-            (url.hasPrefix("http://") || url.hasPrefix("https://"))
+        !name.trimmingCharacters(in: .whitespaces).isEmpty && Self.isHTTP(url)
+            && (webUI.isEmpty || Self.isHTTP(webUI))
     }
 
     var body: some View {
@@ -199,24 +403,33 @@ private struct PhysicalPrinterEditor: View {
                 Section("Printer") {
                     TextField("Name", text: $name)
                         .autocorrectionDisabled()
+                        .disabled(existing != nil)
                     Picker("Host type", selection: $hostType) {
-                        Text("OctoPrint").tag("octoprint")
-                        Text("Moonraker (Klipper)").tag("moonraker")
+                        ForEach(PrinterHostKind.supported, id: \.value) { kind in
+                            Text(kind.label).tag(kind.value)
+                        }
+                        // An engine host type OrcaPad cannot upload to yet is
+                        // kept as-is, never silently rewritten.
+                        if let existing,
+                           !PrinterHostKind.supported.contains(where: { $0.value == existing.hostType }) {
+                            Text("\(existing.hostType) (upload not supported yet)").tag(existing.hostType)
+                        }
                     }
                 }
                 Section {
-                    TextField("URL", text: $url)
+                    TextField("Host URL", text: $url)
                         .keyboardType(.URL)
                         .autocorrectionDisabled()
                         .textInputAutocapitalization(.never)
-                        .onChange(of: url) { _, value in
-                            if !value.hasPrefix("http") { url = "http://\(value)" }
-                        }
+                    TextField("Device UI URL (optional)", text: $webUI)
+                        .keyboardType(.URL)
+                        .autocorrectionDisabled()
+                        .textInputAutocapitalization(.never)
                     SecureField("API key (optional)", text: $apiKey)
                 } header: {
                     Text("Connection")
                 } footer: {
-                    Text("Example: http://192.168.1.50 (OctoPrint) or http://192.168.1.51 (Moonraker).")
+                    Text("Host URL receives uploads, e.g. http://192.168.1.51 (Moonraker behind Mainsail/Fluidd) or http://192.168.1.51:7125 (Moonraker directly). Device UI URL is the web page shown in this tab when it differs from the host URL, e.g. http://192.168.1.51 for Mainsail.")
                 }
             }
             .navigationTitle(existing == nil ? "Add printer" : "Edit printer")
@@ -227,27 +440,41 @@ private struct PhysicalPrinterEditor: View {
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Save") {
-                        onDone(EnginePresets.PhysicalPrinterRecord(
+                        onDone(PrinterStore.Record(
                             name: name.trimmingCharacters(in: .whitespaces),
                             hostType: hostType,
-                            url: url,
+                            url: Self.normalized(url),
+                            webUI: Self.normalized(webUI),
                             apiKey: apiKey,
-                            presetNames: [environment.presets.selection.machine]
-                        ), false)
+                            presetNames: existing?.presetNames ?? [defaultPreset]
+                        ))
                         dismiss()
                     }
                     .disabled(!canSave)
                 }
             }
+            .onChange(of: url) { _, value in
+                if !value.isEmpty, !value.hasPrefix("http") { url = "http://\(value)" }
+            }
+            .onChange(of: webUI) { _, value in
+                if !value.isEmpty, !value.hasPrefix("http") { webUI = "http://\(value)" }
+            }
             .onAppear {
                 if let existing {
                     name = existing.name
-                    hostType = existing.hostType == "moonraker" ? "moonraker" : "octoprint"
+                    hostType = existing.hostType
                     url = existing.url
+                    webUI = existing.webUI
                     apiKey = existing.apiKey
                 }
             }
         }
         .presentationDetents([.medium, .large])
+    }
+
+    private static func normalized(_ value: String) -> String {
+        var trimmed = value.trimmingCharacters(in: .whitespaces)
+        while trimmed.hasSuffix("/") { trimmed.removeLast() }
+        return trimmed
     }
 }
