@@ -1793,7 +1793,60 @@ struct orca_slice_job {
     std::mutex mutex;
     bool cancelled = false;
     Slic3r::PrintBase *active = nullptr;
+    uint32_t thumbnail_size = 0;
+    std::vector<uint8_t> thumbnail_rgba; // top-down
 };
+
+/// Box-filters a square top-down RGBA image into a `width`×`height`
+/// ThumbnailData (aspect-fit, transparent letterbox) with BOTTOM-UP rows —
+/// the GL convention both upstream encoders flip back
+/// (tdefl_write_image_to_png_file_in_memory_ex(..., flip = 1)).
+static Slic3r::ThumbnailData orcapad_thumbnail(uint32_t source_size,
+                                               const std::vector<uint8_t> &source,
+                                               unsigned int width, unsigned int height) {
+    Slic3r::ThumbnailData data;
+    data.set(width, height);
+    std::fill(data.pixels.begin(), data.pixels.end(), 0);
+    const unsigned int edge = std::min(width, height);
+    const unsigned int off_x = (width - edge) / 2, off_y = (height - edge) / 2;
+    const double scale = double(source_size) / double(edge);
+    for (unsigned int y = 0; y < edge; ++y) {
+        const unsigned int sy0 = unsigned(y * scale);
+        const unsigned int sy1 = std::max(sy0 + 1, std::min(source_size, unsigned((y + 1) * scale)));
+        for (unsigned int x = 0; x < edge; ++x) {
+            const unsigned int sx0 = unsigned(x * scale);
+            const unsigned int sx1 = std::max(sx0 + 1, std::min(source_size, unsigned((x + 1) * scale)));
+            unsigned int sum[4] = {0, 0, 0, 0}, n = 0;
+            for (unsigned int sy = sy0; sy < sy1; ++sy)
+                for (unsigned int sx = sx0; sx < sx1; ++sx, ++n)
+                    for (int c = 0; c < 4; ++c)
+                        sum[c] += source[(size_t(sy) * source_size + sx) * 4 + c];
+            // destination row flipped: top-down source → bottom-up data
+            const size_t row = size_t(height - 1 - (off_y + y));
+            unsigned char *dst = &data.pixels[(row * width + off_x + x) * 4];
+            for (int c = 0; c < 4; ++c) dst[c] = (unsigned char)(sum[c] / std::max(n, 1u));
+        }
+    }
+    return data;
+}
+
+orca_result orca_slice_job_set_thumbnail(orca_slice_job *job, uint32_t size,
+                                         const uint8_t *rgba) {
+    constexpr const char *operation = "orca_slice_job_set_thumbnail";
+    if (!job)
+        return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation, "slice job is null");
+    if (!rgba || size < 16 || size > 2048)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "thumbnail must be 16..2048 px square RGBA");
+    try {
+        std::lock_guard<std::mutex> lock(job->mutex);
+        job->thumbnail_rgba.assign(rgba, rgba + size_t(size) * size * 4);
+        job->thumbnail_size = size;
+        return orcapad_ok();
+    } catch (const std::bad_alloc &) {
+        return orcapad_fail(ORCA_STATUS_OUT_OF_MEMORY, operation, "allocation failed");
+    }
+}
 
 orca_result orca_slice_job_new(orca_slice_job **out_job) {
     constexpr const char *operation = "orca_slice_job_new";
@@ -1952,8 +2005,25 @@ static orca_result orcapad_run_print(const char *operation,
 
             if (progress) progress(98, "exporting gcode", ctx);
             Slic3r::GCodeProcessorResult processor_result;
+            Slic3r::ThumbnailsGeneratorCallback thumbnails = nullptr;
+            if (job) {
+                std::lock_guard<std::mutex> lock(job->mutex);
+                if (job->thumbnail_size > 0) {
+                    const uint32_t size = job->thumbnail_size;
+                    const std::vector<uint8_t> source = job->thumbnail_rgba;
+                    thumbnails = [size, source](const Slic3r::ThumbnailsParams &params) {
+                        Slic3r::ThumbnailsList list;
+                        for (const Slic3r::Vec2d &dim : params.sizes) {
+                            const unsigned w = unsigned(dim.x()), h = unsigned(dim.y());
+                            if (w == 0 || h == 0) continue;
+                            list.push_back(orcapad_thumbnail(size, source, w, h));
+                        }
+                        return list;
+                    };
+                }
+            }
             const std::string final_path =
-                print.export_gcode(gcode_path, &processor_result, nullptr);
+                print.export_gcode(gcode_path, &processor_result, thumbnails);
             if (final_path.empty())
                 return orcapad_fail(ORCA_STATUS_ENGINE_FAILURE, operation,
                                     "engine returned an empty G-code path");
@@ -2337,7 +2407,8 @@ orca_result orca_project_open(orca_plater *plater, orca_presets *presets,
 }
 
 orca_result orca_project_save(orca_plater *plater, orca_presets *presets,
-                              const char *path) {
+                              const char *path, uint32_t thumbnail_size,
+                              const uint8_t *thumbnail_rgba) {
     constexpr const char *operation = "orca_project_save";
     if (!plater)
         return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation, "plater handle is null");
@@ -2352,6 +2423,9 @@ orca_result orca_project_save(orca_plater *plater, orca_presets *presets,
     if (plater->model.objects.empty())
         return orcapad_fail(ORCA_STATUS_INVALID_MODEL, operation,
                             "document contains no model object");
+    if (thumbnail_rgba && (thumbnail_size < 16 || thumbnail_size > 2048))
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "thumbnail must be 16..2048 px square RGBA");
 
     return orcapad_guard(operation, [&]() -> orca_result {
         Slic3r::PresetBundle &bundle = *presets->bundle;
@@ -2387,6 +2461,14 @@ orca_result orca_project_save(orca_plater *plater, orca_presets *presets,
         params.plate_data_list = plates;
         params.project_presets = embedded.list;
         params.config = &config;
+        // desktop plate thumbnail (PartPlate::thumbnail_data, 512²)
+        Slic3r::ThumbnailData plate_thumbnail;
+        if (thumbnail_rgba) {
+            const std::vector<uint8_t> source(
+                thumbnail_rgba, thumbnail_rgba + size_t(thumbnail_size) * thumbnail_size * 4);
+            plate_thumbnail = orcapad_thumbnail(thumbnail_size, source, 512, 512);
+            params.thumbnail_data.push_back(&plate_thumbnail);
+        }
         params.strategy = Slic3r::SaveStrategy::Zip64;
         if (!Slic3r::store_bbs_3mf(params))
             return orcapad_fail(ORCA_STATUS_IO_FAILURE, operation,

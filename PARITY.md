@@ -90,7 +90,7 @@ yet in `Bridge/engine-sources.sh`), **Client-reimpl** (desktop logic lives in
 | Slicing warnings / errors list | `NotificationManager.hpp:85`, `Plater.cpp:5608` | ABI v9 `orca_slice_report`: `Print::validate` (errors refuse the slice, warnings listed), print/object step warnings, G-code processor warnings, path conflicts; `SliceWarningsList` with desktop texts | ✅ | — |
 | Export / share G-code | `Plater.cpp:14857` | `ShareLink` in `PreviewTabView.swift` file actions + Prepare slice footer (Save to Files, AirDrop, apps) | ✅ | — |
 | Open external G-code (viewer mode) | `PartPlate.cpp:5969` | `PreviewTabView.swift` `.fileImporter` (`.gcode/.g/.gco/.ngc`) → `orca_gcode_load` | ✅ (Files "Open in" document types still missing) | — |
-| G-code thumbnails | `Plater.cpp` thumbnail callback | `orca_bridge.cpp:1489` passes `nullptr` | ❌ | Client renders offscreen in Metal + ABI callback (`Thumbnails.cpp` is compiled) |
+| G-code + project thumbnails | `Plater.cpp` thumbnail callback, `PartPlate` thumbnail | ABI v16: client renders the plate offscreen (`ThumbnailService` → headless `Renderer`), Bridge box-filters to every size the engine's `thumbnails` config requests and to the 512² 3MF plate image | ✅ (BBL printers: engine writes no G-code thumbnail, by design) | — |
 
 ## 4. Device / files / app
 

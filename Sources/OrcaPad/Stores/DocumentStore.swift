@@ -150,15 +150,23 @@ final class DocumentStore {
         }
     }
 
-    func saveProject(named name: String, presets: EnginePresets) async {
-        guard let plater, !isBusy else {
+    func saveProject(named name: String, presets: EnginePresets, bed: EngineBed) async {
+        guard let plater, let scene, !isBusy else {
             status.report(.document, "save project blocked: document is busy")
+            return
+        }
+        // Desktop stores a plate thumbnail in every project (Metadata/plate_1.png).
+        let thumbnail: (size: Int, rgba: [UInt8])
+        do {
+            thumbnail = (ThumbnailService.size, try ThumbnailService.render(scene: scene, bed: bed))
+        } catch {
+            status.report(.document, failure: AppFailure.wrap(error, operation: "render project thumbnail"))
             return
         }
         isMutating = true
         let result = await BackgroundWork.run(operation: "save project") {
             let url = try EnginePaths.projectURL(name: name)
-            try plater.saveProject(path: url.path, presets: presets)
+            try plater.saveProject(path: url.path, presets: presets, thumbnail: thumbnail)
             return url
         }
         isMutating = false

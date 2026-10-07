@@ -42,8 +42,9 @@ final class AppEnvironment {
             status.report(.document, "save project blocked: presets are not ready")
             return
         }
+        let bed = presets.printVolume.map(EngineBed.init) ?? EngineBed.fallback
         await presets.withExclusiveSession {
-            await document.saveProject(named: name, presets: engine)
+            await document.saveProject(named: name, presets: engine, bed: bed)
         }
     }
 

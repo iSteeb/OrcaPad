@@ -11,6 +11,7 @@
 // iOS archive, asserts enabled).
 
 #include "orca_bridge.h"
+#include "miniz.h"
 
 #include <atomic>
 #include <cerrno>
@@ -272,7 +273,7 @@ static void test_md5_shim() {
 
 static void test_abi_version() {
     CHECK_EQ(orca_bridge_abi_version(), ORCA_BRIDGE_ABI_VERSION);
-    CHECK_EQ(ORCA_BRIDGE_ABI_VERSION, 15);
+    CHECK_EQ(ORCA_BRIDGE_ABI_VERSION, 16);
 }
 
 static void test_document_lifecycle(const std::string &dir) {
@@ -1624,15 +1625,30 @@ static void test_project_roundtrip(const std::string &dir, const std::string &da
     expect_ok(g3, "rotate second");
 
     const std::string project = dir + "/roundtrip.3mf";
-    GUARD(e1, orca_project_save(nullptr, presets, project.c_str()));
+    GUARD(e1, orca_project_save(nullptr, presets, project.c_str(), 0, nullptr));
     expect_code(e1, ORCA_STATUS_INVALID_HANDLE, "save(null plater)");
-    GUARD(e2, orca_project_save(plater, presets, (dir + "/x.stl").c_str()));
+    GUARD(e2, orca_project_save(plater, presets, (dir + "/x.stl").c_str(), 0, nullptr));
     expect_code(e2, ORCA_STATUS_INVALID_ARGUMENT, "save(non-3mf)");
-    GUARD(g4, orca_project_save(plater, presets, project.c_str()));
+    // a synthetic 64² top-down gradient as the client-rendered plate image
+    std::vector<uint8_t> image(64 * 64 * 4);
+    for (size_t i = 0; i < image.size(); i += 4) {
+        image[i] = uint8_t(i / 4 % 64 * 4); image[i + 1] = 128;
+        image[i + 2] = uint8_t(i / 4 / 64 * 4); image[i + 3] = 255;
+    }
+    GUARD(e5, orca_project_save(plater, presets, project.c_str(), 8, image.data()));
+    expect_code(e5, ORCA_STATUS_INVALID_ARGUMENT, "save(tiny thumbnail)");
+    GUARD(g4, orca_project_save(plater, presets, project.c_str(), 64, image.data()));
     expect_ok(g4, "save project");
     CHECK_EQ(snapshot_revision(plater), revision); // saving is not a mutation
     struct stat status;
     CHECK(stat(project.c_str(), &status) == 0 && status.st_size > 0);
+    {
+        mz_zip_archive zip;
+        memset(&zip, 0, sizeof zip);
+        CHECK(mz_zip_reader_init_file(&zip, project.c_str(), 0));
+        CHECK(mz_zip_reader_locate_file(&zip, "Metadata/plate_1.png", nullptr, 0) >= 0);
+        mz_zip_reader_end(&zip);
+    }
 
     orca_scene_snapshot before = take_snapshot(plater);
 
@@ -1938,6 +1954,36 @@ static void test_slice_cancel(const std::string &dir) {
                                          &progress, job3, &report));
     check_slice_outputs(gcode.c_str(), g8, report, progress, "slice after cancel");
     orca_slice_job_free(job3);
+
+    // G-code thumbnails from the job's plate image (default config:
+    // 48x48/PNG,300x300/PNG on the non-BBL defaults path)
+    orca_slice_job *job4 = nullptr;
+    GUARD(g9, orca_slice_job_new(&job4));
+    expect_ok(g9, "job_new 4");
+    std::vector<uint8_t> image(128 * 128 * 4, 200);
+    GUARD(et, orca_slice_job_set_thumbnail(job4, 4, image.data()));
+    expect_code(et, ORCA_STATUS_INVALID_ARGUMENT, "thumbnail too small");
+    GUARD(g10, orca_slice_job_set_thumbnail(job4, 128, image.data()));
+    expect_ok(g10, "set thumbnail");
+    ProgressRecord progress4;
+    GUARD(g11, orca_plater_slice_to_gcode(plater, gcode.c_str(), progress_trampoline,
+                                          &progress4, job4, &report));
+    check_slice_outputs(gcode.c_str(), g11, report, progress4, "slice with thumbnail");
+    orca_slice_job_free(job4);
+    {
+        FILE *file = fopen(gcode.c_str(), "r");
+        CHECK(file != nullptr);
+        bool small = false, large = false;
+        char line[512];
+        while (file && fgets(line, sizeof line, file)) {
+            if (strstr(line, "; thumbnail begin 48x48")) small = true;
+            if (strstr(line, "; thumbnail begin 300x300")) large = true;
+            if (small && large) break;
+        }
+        if (file) fclose(file);
+        CHECK(small);
+        CHECK(large);
+    }
     CHECK_EQ(snapshot_revision(plater), revision);
     orca_plater_free(plater);
 }

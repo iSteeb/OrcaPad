@@ -368,6 +368,121 @@ final class Renderer: NSObject, MTKViewDelegate {
         camera.yaw = -0.65
     }
 
+    // MARK: Thumbnails (offscreen, desktop G-code/3MF plate thumbnails)
+
+    enum ThumbnailError: LocalizedError {
+        case emptyScene
+        case resource(String)
+
+        var errorDescription: String? {
+            switch self {
+            case .emptyScene: return "thumbnail: scene has no objects"
+            case .resource(let what): return "thumbnail: could not create \(what)"
+            }
+        }
+    }
+
+    /// Renders the objects (no bed, no gizmo, transparent background) from
+    /// the default iso view, tightly framed, into a `size`×`size` image.
+    /// Returns top-down RGBA8 rows. Uses this renderer's own pipelines, so
+    /// the offscreen formats are exactly the canvas formats (BGRA8, depth32,
+    /// 4× MSAA). Main-thread confined like everything in the renderer.
+    func renderThumbnail(size: Int, colorFormat: MTLPixelFormat) throws -> [UInt8] {
+        var bbMin = SIMD3<Float>(repeating: .infinity)
+        var bbMax = SIMD3<Float>(repeating: -.infinity)
+        for obj in objects {
+            for inst in obj.instances {
+                for x in [obj.bboxMin.x, obj.bboxMax.x] {
+                    for y in [obj.bboxMin.y, obj.bboxMax.y] {
+                        for z in [obj.bboxMin.z, obj.bboxMax.z] {
+                            let w = inst.model * SIMD4(x, y, z, 1)
+                            bbMin = simd_min(bbMin, SIMD3(w.x, w.y, w.z))
+                            bbMax = simd_max(bbMax, SIMD3(w.x, w.y, w.z))
+                        }
+                    }
+                }
+            }
+        }
+        guard bbMin.x.isFinite else { throw ThumbnailError.emptyScene }
+
+        let thumbCamera = OrbitCamera()
+        let extent = bbMax - bbMin
+        thumbCamera.target = (bbMin + bbMax) * 0.5
+        thumbCamera.distance = max(simd_length(extent) * 1.35, 20)
+        thumbCamera.yaw = -0.65
+        thumbCamera.pitch = 0.62
+        let viewProj = thumbCamera.projection(aspect: 1) * thumbCamera.viewMatrix
+
+        func texture(_ format: MTLPixelFormat, samples: Int, usage: MTLTextureUsage,
+                     storage: MTLStorageMode) throws -> MTLTexture {
+            let desc = MTLTextureDescriptor.texture2DDescriptor(
+                pixelFormat: format, width: size, height: size, mipmapped: false)
+            desc.textureType = samples > 1 ? .type2DMultisample : .type2D
+            desc.sampleCount = samples
+            desc.usage = usage
+            desc.storageMode = storage
+            guard let tex = device.makeTexture(descriptor: desc) else {
+                throw ThumbnailError.resource("\(format) texture")
+            }
+            return tex
+        }
+        let msaa = try texture(colorFormat, samples: 4, usage: .renderTarget, storage: .private)
+        let resolve = try texture(colorFormat, samples: 1, usage: [.renderTarget, .shaderRead], storage: .shared)
+        let depth = try texture(.depth32Float, samples: 4, usage: .renderTarget, storage: .private)
+
+        let pass = MTLRenderPassDescriptor()
+        pass.colorAttachments[0].texture = msaa
+        pass.colorAttachments[0].resolveTexture = resolve
+        pass.colorAttachments[0].loadAction = .clear
+        pass.colorAttachments[0].storeAction = .multisampleResolve
+        pass.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
+        pass.depthAttachment.texture = depth
+        pass.depthAttachment.loadAction = .clear
+        pass.depthAttachment.storeAction = .dontCare
+        pass.depthAttachment.clearDepth = 1
+
+        guard let commandBuffer = commandQueue.makeCommandBuffer(),
+              let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: pass) else {
+            throw ThumbnailError.resource("command encoder")
+        }
+        encoder.setRenderPipelineState(litPipeline)
+        encoder.setDepthStencilState(depthState)
+        encoder.setCullMode(.none)
+        for obj in objects where obj.indexCount > 0 {
+            encoder.setVertexBuffer(obj.vb, offset: 0, index: 0)
+            for inst in obj.instances {
+                var uniforms = cubeUniforms
+                uniforms.mvp = viewProj * inst.model
+                uniforms.model = inst.model
+                uniforms.color = Renderer.objectColor
+                encoder.setVertexBytes(&uniforms, length: MemoryLayout<CubeUniforms>.stride, index: 1)
+                encoder.setFragmentBytes(&uniforms, length: MemoryLayout<CubeUniforms>.stride, index: 1)
+                encoder.drawIndexedPrimitives(
+                    type: .triangle, indexCount: obj.indexCount, indexType: .uint32,
+                    indexBuffer: obj.ib, indexBufferOffset: 0)
+            }
+        }
+        encoder.endEncoding()
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+        if let error = commandBuffer.error {
+            throw ThumbnailError.resource("render (\(error.localizedDescription))")
+        }
+
+        var pixels = [UInt8](repeating: 0, count: size * size * 4)
+        pixels.withUnsafeMutableBytes { bytes in
+            resolve.getBytes(
+                bytes.baseAddress!, bytesPerRow: size * 4,
+                from: MTLRegionMake2D(0, 0, size, size), mipmapLevel: 0)
+        }
+        if colorFormat == .bgra8Unorm || colorFormat == .bgra8Unorm_srgb {
+            for i in stride(from: 0, to: pixels.count, by: 4) {
+                pixels.swapAt(i, i + 2) // BGRA → RGBA
+            }
+        }
+        return pixels
+    }
+
     // MARK: Picking / hit-testing (main thread, called from gestures)
 
     /// Screen point → world-space ray. `point` is in UIKit coordinates of

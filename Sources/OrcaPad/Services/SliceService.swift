@@ -64,6 +64,16 @@ final class SliceService {
             status.report(.slice, failure: failure)
             return
         }
+        // Desktop embeds plate thumbnails in every non-BBL G-code. Explicit
+        // recovery on failure: thumbnails are cosmetic metadata, the slice
+        // itself is unaffected — reported loudly, slicing proceeds without.
+        do {
+            let bed = presets.printVolume.map(EngineBed.init) ?? EngineBed.fallback
+            let rgba = try ThumbnailService.render(scene: input.snapshot, bed: bed)
+            try job.setThumbnail(size: ThumbnailService.size, rgba: rgba)
+        } catch {
+            status.report(.slice, failure: AppFailure.wrap(error, operation: "render G-code thumbnail"))
+        }
         nextJobID += 1
         let jobID = nextJobID
         activeJobID = jobID

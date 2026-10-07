@@ -7,7 +7,7 @@ extern "C" {
 #endif
 
 /// Version of the C ABI contract in this header. Callers verify it at runtime.
-#define ORCA_BRIDGE_ABI_VERSION ((uint32_t)15)
+#define ORCA_BRIDGE_ABI_VERSION ((uint32_t)16)
 
 typedef int32_t orca_status_code;
 #define ORCA_STATUS_OK                     ((orca_status_code)0)
@@ -340,9 +340,11 @@ orca_result orca_plater_arrange(orca_plater *plater, orca_presets *presets,
 /// Desktop "Save project": writes the document as a single-plate Orca 3MF
 /// (`store_bbs_3mf`) with the session's secure full config
 /// (`full_config_secure`, no print-host credentials) and project-embedded
-/// presets. Saving is not a mutation (revision unchanged).
+/// presets, plus the plate thumbnail when `thumbnail_rgba` is non-null
+/// (top-down RGBA8, `thumbnail_size` square). Saving is not a mutation.
 orca_result orca_project_save(orca_plater *plater, orca_presets *presets,
-                              const char *path);
+                              const char *path, uint32_t thumbnail_size,
+                              const uint8_t *thumbnail_rgba);
 
 /// Parsed G-code for the toolpath preview. Loading runs the full upstream
 /// GCodeProcessor over the file (CPU-heavy: run off the main thread; the
@@ -432,6 +434,13 @@ typedef struct orca_slice_job orca_slice_job;
 orca_result orca_slice_job_new(orca_slice_job **out_job);
 void orca_slice_job_cancel(orca_slice_job *job);
 void orca_slice_job_free(orca_slice_job *job);
+/// Plate image for G-code thumbnails (desktop renders the scene per size;
+/// OrcaPad renders once): `size`×`size` top-down RGBA8. The engine's own
+/// `thumbnails` config decides sizes/formats; the Bridge box-filters this
+/// image to each requested size. Without it, no thumbnails are written
+/// (BBL printers carry thumbnails in the 3MF instead — engine behaviour).
+orca_result orca_slice_job_set_thumbnail(orca_slice_job *job, uint32_t size,
+                                         const uint8_t *rgba);
 
 #define ORCA_SLICE_WARNING_TIP      ((int32_t)0)
 #define ORCA_SLICE_WARNING_WARNING  ((int32_t)1)

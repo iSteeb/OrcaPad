@@ -332,10 +332,29 @@ public final class EnginePlater: @unchecked Sendable {
     }
 
     /// Desktop "Save project" (single-plate Orca 3MF). Not a mutation.
-    public func saveProject(path: String, presets: EnginePresets) throws {
+    /// `thumbnail`: square top-down RGBA8 plate image (nil = none).
+    public func saveProject(
+        path: String,
+        presets: EnginePresets,
+        thumbnail: (size: Int, rgba: [UInt8])?
+    ) throws {
+        if let thumbnail, thumbnail.rgba.count != thumbnail.size * thumbnail.size * 4 {
+            throw BridgeError.local(
+                .invalidArgument, operation: "save project",
+                diagnostic: "thumbnail buffer size does not match \(thumbnail.size)²"
+            )
+        }
         try Self.withLockedHandles(plater: self, presets: presets) { platerHandle, presetHandle in
-            let result = path.withCString { pointer in
-                orca_project_save(platerHandle, presetHandle, pointer)
+            let result: orca_result = path.withCString { pointer in
+                guard let thumbnail else {
+                    return orca_project_save(platerHandle, presetHandle, pointer, 0, nil)
+                }
+                return thumbnail.rgba.withUnsafeBufferPointer { buffer in
+                    orca_project_save(
+                        platerHandle, presetHandle, pointer,
+                        UInt32(thumbnail.size), buffer.baseAddress
+                    )
+                }
             }
             try BridgeResult.consume(result, operation: "save project")
         }
@@ -625,6 +644,23 @@ public final class SliceJob: @unchecked Sendable {
     }
 
     public func cancel() { orca_slice_job_cancel(handle) }
+
+    /// Client-rendered plate image (square, top-down RGBA8) the engine turns
+    /// into the G-code thumbnails its `thumbnails` config asks for.
+    public func setThumbnail(size: Int, rgba: [UInt8]) throws {
+        guard rgba.count == size * size * 4 else {
+            throw BridgeError.local(
+                .invalidArgument, operation: "set slice thumbnail",
+                diagnostic: "thumbnail buffer is \(rgba.count) bytes, expected \(size * size * 4)"
+            )
+        }
+        try rgba.withUnsafeBufferPointer { buffer in
+            try BridgeResult.consume(
+                orca_slice_job_set_thumbnail(handle, UInt32(size), buffer.baseAddress),
+                operation: "set slice thumbnail"
+            )
+        }
+    }
 
     deinit { orca_slice_job_free(handle) }
 }
