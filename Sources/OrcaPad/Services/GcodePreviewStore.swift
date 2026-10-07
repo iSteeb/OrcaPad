@@ -9,6 +9,8 @@ enum ToolpathColorMode: String, CaseIterable, Identifiable, Sendable {
     case speed = "Speed"
     case layerHeight = "Layer Height"
     case lineWidth = "Line Width"
+    case fanSpeed = "Fan Speed"
+    case temperature = "Temperature"
 
     var id: String { rawValue }
 
@@ -17,6 +19,8 @@ enum ToolpathColorMode: String, CaseIterable, Identifiable, Sendable {
         case .feature: return ""
         case .speed: return "mm/s"
         case .layerHeight, .lineWidth: return "mm"
+        case .fanSpeed: return "%"
+        case .temperature: return "°C"
         }
     }
 }
@@ -66,6 +70,7 @@ final class GcodePreviewStore {
     struct RoleSummary: Identifiable, Sendable {
         let role: UInt8
         let segmentCount: Int
+        let timeSeconds: Float
         var id: UInt8 { role }
     }
 
@@ -78,6 +83,10 @@ final class GcodePreviewStore {
     private(set) var feedrateRange: ClosedRange<Float> = 0...1
     private(set) var heightRange: ClosedRange<Float> = 0...1
     private(set) var widthRange: ClosedRange<Float> = 0...1
+    private(set) var fanRange: ClosedRange<Float> = 0...1
+    private(set) var temperatureRange: ClosedRange<Float> = 0...1
+    /// Total extrusion time over all roles (legend percentages).
+    private(set) var extrusionSeconds: Float = 0
 
     // View state (desktop: vertical layer range slider + horizontal move bar)
     private(set) var lowerLayer = 0
@@ -140,6 +149,9 @@ final class GcodePreviewStore {
         var minimum = SIMD3<Float>(repeating: .infinity)
         var maximum = SIMD3<Float>(repeating: -.infinity)
         var roleCounts: [UInt8: Int] = [:]
+        var roleTimes: [UInt8: Float] = [:]
+        var fan = (Float.infinity, -Float.infinity)
+        var temperature = (Float.infinity, -Float.infinity)
         var feed = (Float.infinity, -Float.infinity)
         var height = (Float.infinity, -Float.infinity)
         var width = (Float.infinity, -Float.infinity)
@@ -148,6 +160,9 @@ final class GcodePreviewStore {
             maximum = simd_max(maximum, simd_max(segment.start, segment.end))
             guard segment.isExtrusion else { continue }
             roleCounts[segment.role, default: 0] += 1
+            roleTimes[segment.role, default: 0] += segment.timeSeconds
+            fan = (min(fan.0, segment.fanSpeed), max(fan.1, segment.fanSpeed))
+            temperature = (min(temperature.0, segment.temperature), max(temperature.1, segment.temperature))
             feed = (min(feed.0, segment.feedrate), max(feed.1, segment.feedrate))
             height = (min(height.0, segment.height), max(height.1, segment.height))
             width = (min(width.0, segment.width), max(width.1, segment.width))
@@ -161,11 +176,14 @@ final class GcodePreviewStore {
         boundsMin = minimum
         boundsMax = maximum
         roles = roleCounts
-            .map { RoleSummary(role: $0.key, segmentCount: $0.value) }
+            .map { RoleSummary(role: $0.key, segmentCount: $0.value, timeSeconds: roleTimes[$0.key] ?? 0) }
             .sorted { $0.role < $1.role }
         feedrateRange = range(feed)
         heightRange = range(height)
         widthRange = range(width)
+        fanRange = range(fan)
+        temperatureRange = range(temperature)
+        extrusionSeconds = roleTimes.values.reduce(0, +)
         hiddenRoles = []
         lowerLayer = 0
         upperLayer = max(toolpath.layers.count - 1, 0)

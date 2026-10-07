@@ -234,7 +234,7 @@ static void test_md5_shim() {
 
 static void test_abi_version() {
     CHECK_EQ(orca_bridge_abi_version(), ORCA_BRIDGE_ABI_VERSION);
-    CHECK_EQ(ORCA_BRIDGE_ABI_VERSION, 5);
+    CHECK_EQ(ORCA_BRIDGE_ABI_VERSION, 6);
 }
 
 static void test_document_lifecycle(const std::string &dir) {
@@ -1249,6 +1249,27 @@ static void test_gcode_toolpath(const std::string &dir) {
     CHECK(extrusion_seen);
     CHECK(travel_seen);
     CHECK(roles_seen); // feature classification survived the parse
+
+    // per-segment time/fan/temperature are sane and layer times aggregate
+    // exactly the segment times
+    double segment_time = 0.0, layer_time = 0.0;
+    bool fan_ok = true, temperature_ok = true, time_ok = true;
+    for (uint32_t i = 0; i < toolpath.segment_count; ++i) {
+        const orca_tp_segment &segment = toolpath.segments[i];
+        segment_time += segment.time_seconds;
+        if (!(segment.time_seconds >= 0.0f)) time_ok = false;
+        // GCodeProcessor maps M106 S0..255 via (100/255)*S in float, so full
+        // speed lands at 100.000008 — allow that rounding, nothing more.
+        if (!(segment.fan_speed >= 0.0f && segment.fan_speed <= 100.0f + 1e-3f)) fan_ok = false;
+        if (!(segment.temperature >= 0.0f && segment.temperature < 600.0f)) temperature_ok = false;
+    }
+    for (uint32_t i = 0; i < toolpath.layer_count; ++i)
+        layer_time += toolpath.layers[i].time_seconds;
+    CHECK(time_ok);
+    CHECK(fan_ok);
+    CHECK(temperature_ok);
+    CHECK_NEAR(segment_time, layer_time, 0.01 * (1.0 + layer_time));
+    CHECK(segment_time > 0.0);
 
     orca_gcode_free(parsed); // toolpath must stay valid after handle free
     CHECK(toolpath.segments[0].end[0] == toolpath.segments[0].end[0]);

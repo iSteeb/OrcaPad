@@ -250,6 +250,8 @@ final class ToolpathRenderer: NSObject, MTKViewDelegate {
         case .speed: return ToolpathPalette.gradient(normalized(segment.feedrate, store.feedrateRange))
         case .layerHeight: return ToolpathPalette.gradient(normalized(segment.height, store.heightRange))
         case .lineWidth: return ToolpathPalette.gradient(normalized(segment.width, store.widthRange))
+        case .fanSpeed: return ToolpathPalette.gradient(normalized(segment.fanSpeed, store.fanRange))
+        case .temperature: return ToolpathPalette.gradient(normalized(segment.temperature, store.temperatureRange))
         }
     }
 

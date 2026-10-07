@@ -15,6 +15,9 @@ public struct ToolpathSegment: Sendable {
     public let extruder: UInt8
     public let layerID: UInt16
     public let printZ: Float
+    public let timeSeconds: Float
+    public let fanSpeed: Float
+    public let temperature: Float
 
     public var isExtrusion: Bool { moveType == 10 } // EMoveType::Extrude
 }
@@ -95,7 +98,10 @@ public enum EngineGcode {
                 role: rawSegment.role,
                 extruder: rawSegment.extruder,
                 layerID: rawSegment.layer_id,
-                printZ: rawSegment.print_z
+                printZ: rawSegment.print_z,
+                timeSeconds: rawSegment.time_seconds,
+                fanSpeed: rawSegment.fan_speed,
+                temperature: rawSegment.temperature
             ))
         }
 

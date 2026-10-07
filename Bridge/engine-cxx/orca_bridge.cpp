@@ -1325,6 +1325,10 @@ orca_result orca_gcode_toolpath(orca_gcode *gcode,
             segment.layer_id = static_cast<uint16_t>(move.layer_id);
             segment.reserved = 0;
             segment.print_z = move.print_z;
+            segment.time_seconds = move.time[static_cast<size_t>(
+                Slic3r::PrintEstimatedStatistics::ETimeMode::Normal)];
+            segment.fan_speed = move.fan_speed;
+            segment.temperature = move.temperature;
             ++out;
             orca_tp_layer &layer = toolpath.layers[layer_index];
             layer.segment_count += 1;

@@ -7,7 +7,7 @@ extern "C" {
 #endif
 
 /// Version of the C ABI contract in this header. Callers verify it at runtime.
-#define ORCA_BRIDGE_ABI_VERSION ((uint32_t)5)
+#define ORCA_BRIDGE_ABI_VERSION ((uint32_t)6)
 
 typedef int32_t orca_status_code;
 #define ORCA_STATUS_OK                     ((orca_status_code)0)
@@ -217,6 +217,9 @@ typedef struct {
     uint16_t layer_id;
     uint16_t reserved;
     float    print_z;       // layer z, mm
+    float    time_seconds;  // estimated move time (normal mode)
+    float    fan_speed;     // part fan, percent
+    float    temperature;   // nozzle, degrees C
 } orca_tp_segment;
 
 typedef struct {

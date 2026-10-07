@@ -182,6 +182,10 @@ struct PreviewTabView: View {
                             Text(ToolpathRole.name(summary.role))
                                 .font(.caption2)
                                 .foregroundStyle(hidden ? .tertiary : .primary)
+                            Spacer(minLength: 6)
+                            Text(roleTime(summary))
+                                .font(.caption2.monospaced())
+                                .foregroundStyle(.secondary)
                         }
                     }
                     .buttonStyle(.plain)
@@ -192,11 +196,23 @@ struct PreviewTabView: View {
                 gradientLegend(store.heightRange, unit: store.colorMode.unit, digits: 2)
             case .lineWidth:
                 gradientLegend(store.widthRange, unit: store.colorMode.unit, digits: 2)
+            case .fanSpeed:
+                gradientLegend(store.fanRange, unit: store.colorMode.unit, digits: 0)
+            case .temperature:
+                gradientLegend(store.temperatureRange, unit: store.colorMode.unit, digits: 0)
             }
         }
         .padding(10)
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 10))
-        .frame(maxWidth: 200, alignment: .leading)
+        .frame(maxWidth: 240, alignment: .leading)
+    }
+
+    /// Desktop legend parity: per-feature time and share of extrusion time.
+    private func roleTime(_ summary: GcodePreviewStore.RoleSummary) -> String {
+        let minutes = Int((summary.timeSeconds / 60).rounded())
+        let share = store.extrusionSeconds > 0
+            ? summary.timeSeconds / store.extrusionSeconds * 100 : 0
+        return String(format: "%dm %4.1f%%", minutes, share)
     }
 
     private func gradientLegend(_ range: ClosedRange<Float>, unit: String, digits: Int) -> some View {
