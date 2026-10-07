@@ -25,6 +25,8 @@ private struct PresetLoadPayload: Sendable {
     let processes: [PresetEntry]
     let selection: PresetSelection
     let printVolume: PrintVolume
+    let editedConfigs: [PresetKind: [String: String]]
+    let systemConfigs: [PresetKind: [String: String]]
     let warning: AppFailure?
 }
 
@@ -54,6 +56,11 @@ final class PresetStore {
     private(set) var isSelecting = false
     /// Selected machine's print volume; nil until presets are ready.
     private(set) var printVolume: PrintVolume?
+    /// Per-kind edited (working) and selected-system config dumps. Diffing the
+    /// two is how the editor detects modified values — engine truth, no
+    /// client-side default tables.
+    private(set) var editedConfigs: [PresetKind: [String: String]] = [:]
+    private(set) var systemConfigs: [PresetKind: [String: String]] = [:]
 
     init(status: StatusCenter) {
         self.status = status
@@ -123,13 +130,22 @@ final class PresetStore {
             let refreshedProcesses = stored.isComplete && warning == nil
                 ? try engine.entries(kind: .process).get()
                 : processes
+            let volume = try engine.printVolume().get()
+            var edited: [PresetKind: [String: String]] = [:]
+            var system: [PresetKind: [String: String]] = [:]
+            for kind in [PresetKind.machine, .filament, .process] {
+                edited[kind] = try engine.configDump(kind: kind, edited: true).get()
+                system[kind] = try engine.configDump(kind: kind, edited: false).get()
+            }
             return PresetLoadPayload(
                 engine: engine,
                 machines: machines,
                 filaments: filaments,
                 processes: refreshedProcesses,
                 selection: selected,
-                printVolume: try engine.printVolume().get(),
+                printVolume: volume,
+                editedConfigs: edited,
+                systemConfigs: system,
                 warning: warning
             )
         }
@@ -142,6 +158,8 @@ final class PresetStore {
             processes = payload.processes
             selection = payload.selection
             printVolume = payload.printVolume
+            editedConfigs = payload.editedConfigs
+            systemConfigs = payload.systemConfigs
             persist(payload.selection)
             phase = .ready
             if let warning = payload.warning {
@@ -189,24 +207,139 @@ final class PresetStore {
                 filament: requested.filament,
                 process: requested.process
             ).get()
-            // Selection changes can invalidate process compatibility and
-            // the bed; re-read engine state so the client never guesses it.
+            // Selection changes invalidate process compatibility, the bed,
+            // and the edited/system config pair (selecting resets the edited
+            // working copy). Re-read engine state; the client never guesses.
+            var edited: [PresetKind: [String: String]] = [:]
+            var system: [PresetKind: [String: String]] = [:]
+            for kind in [PresetKind.machine, .filament, .process] {
+                edited[kind] = try engine.configDump(kind: kind, edited: true).get()
+                system[kind] = try engine.configDump(kind: kind, edited: false).get()
+            }
             return (
                 try engine.entries(kind: .process).get(),
-                try engine.printVolume().get()
+                try engine.printVolume().get(),
+                edited,
+                system
             )
         }
         isSelecting = false
         switch result {
-        case .success((let refreshedProcesses, let volume)):
+        case .success((
+            let refreshedProcesses,
+            let volume,
+            let edited,
+            let system
+        )):
             selection = requested
             processes = refreshedProcesses
             printVolume = volume
+            editedConfigs = edited
+            systemConfigs = system
             persist(requested)
             status.report(.presets, "presets: selection ready")
         case .failure(let failure):
             status.report(.presets, failure: failure)
         }
+    }
+
+    // MARK: Desktop-parity config overrides
+
+    /// Writes a serialized override into the edited preset of `kind` and
+    /// refreshes the engine dumps for that kind.
+    func setValue(
+        kind: PresetKind,
+        key: String,
+        serializedValue: String
+    ) async {
+        guard let engine, isReady, !isSelecting else {
+            status.report(.presets, "setting change blocked: presets are busy")
+            return
+        }
+        let result = await BackgroundWork.run(operation: "set config value") {
+            try engine.setValue(
+                kind: kind,
+                key: key,
+                serializedValue: serializedValue
+            ).get()
+            return (
+                try engine.configDump(kind: kind, edited: true).get(),
+                try engine.configDump(kind: kind, edited: false).get()
+            )
+        }
+        switch result {
+        case .success((let edited, let system)):
+            editedConfigs[kind] = edited
+            systemConfigs[kind] = system
+            status.update(.presets, "presets: \(key) modified")
+        case .failure(let failure):
+            status.report(.presets, failure: failure)
+        }
+    }
+
+    /// Restores one key of the edited preset of `kind` from its selection.
+    func resetValue(kind: PresetKind, key: String) async {
+        guard let engine, isReady, !isSelecting else {
+            status.report(.presets, "value reset blocked: presets are busy")
+            return
+        }
+        let result = await BackgroundWork.run(operation: "reset config value") {
+            try engine.resetValue(kind: kind, key: key).get()
+            return (
+                try engine.configDump(kind: kind, edited: true).get(),
+                try engine.configDump(kind: kind, edited: false).get()
+            )
+        }
+        switch result {
+        case .success((let edited, let system)):
+            editedConfigs[kind] = edited
+            systemConfigs[kind] = system
+        case .failure(let failure):
+            status.report(.presets, failure: failure)
+        }
+    }
+
+    /// Restores the whole edited preset of `kind` from its selection.
+    func resetKind(_ kind: PresetKind) async {
+        guard let engine, isReady, !isSelecting else {
+            status.report(.presets, "reset blocked: presets are busy")
+            return
+        }
+        let result = await BackgroundWork.run(operation: "reset preset kind") {
+            try engine.resetKind(kind).get()
+            return (
+                try engine.configDump(kind: kind, edited: true).get(),
+                try engine.configDump(kind: kind, edited: false).get()
+            )
+        }
+        switch result {
+        case .success((let edited, let system)):
+            editedConfigs[kind] = edited
+            systemConfigs[kind] = system
+            status.update(.presets, "presets: modifications reset")
+        case .failure(let failure):
+            status.report(.presets, failure: failure)
+        }
+    }
+
+    /// Engine-derived membership: an option belongs to a preset kind when the
+    /// kind's selected system presets actually define the key — no
+    /// client-side desktop page tables to drift.
+    func definesKey(_ key: String, kind: PresetKind) -> Bool {
+        systemConfigs[kind]?[key] != nil
+    }
+
+    func modifiedKeys(in kind: PresetKind) -> Set<String> {
+        guard let edited = editedConfigs[kind],
+              let system = systemConfigs[kind] else { return [] }
+        var modified = Set<String>()
+        for (key, value) in edited where system[key] != value {
+            modified.insert(key)
+        }
+        for key in system.keys where edited[key] == nil {
+            modified.insert(key)
+        }
+        return modified
     }
 
     func names(for kind: PresetKind) -> [PresetEntry] {

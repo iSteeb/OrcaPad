@@ -234,7 +234,7 @@ static void test_md5_shim() {
 
 static void test_abi_version() {
     CHECK_EQ(orca_bridge_abi_version(), ORCA_BRIDGE_ABI_VERSION);
-    CHECK_EQ(ORCA_BRIDGE_ABI_VERSION, 3);
+    CHECK_EQ(ORCA_BRIDGE_ABI_VERSION, 4);
 }
 
 static void test_document_lifecycle(const std::string &dir) {
@@ -939,6 +939,96 @@ static void test_resolved_config(const std::string &data_dir) {
     orca_presets_free(presets);
 }
 
+static void test_preset_overrides(const std::string &data_dir) {
+    orca_presets *presets = nullptr;
+    GUARD(g0, orca_presets_new(data_dir.c_str(), &presets));
+    expect_ok(g0, "presets_new");
+
+    // select a concrete system triple (fresh bundles select a non-system
+    // default printer, against which no process is compatible)
+    {
+        orca_owned_string machine_first, filament_first, process_first;
+        GUARD(gs1, orca_presets_list_name(presets, 0, 0, &machine_first));
+        expect_ok(gs1, "machine names[0]");
+        GUARD(gs2, orca_presets_list_name(presets, 1, 0, &filament_first));
+        expect_ok(gs2, "filament names[0]");
+        GUARD(gs3, orca_presets_list_name(presets, 2, 0, &process_first));
+        expect_ok(gs3, "process names[0]");
+        GUARD(gs4, orca_presets_select(presets, machine_first.data,
+                                       filament_first.data,
+                                       process_first.data));
+        expect_ok(gs4, "select first system presets");
+        orca_owned_string_dispose(&machine_first);
+        orca_owned_string_dispose(&filament_first);
+        orca_owned_string_dispose(&process_first);
+    }
+
+    // typed rejections
+    GUARD(g1, orca_presets_set_value(presets, 0, nullptr, "1"));
+    expect_code(g1, ORCA_STATUS_INVALID_ARGUMENT, "set(null key)");
+    GUARD(g2, orca_presets_set_value(presets, 7, "layer_height", "0.3"));
+    expect_code(g2, ORCA_STATUS_INVALID_ARGUMENT, "set(bad kind)");
+    GUARD(g3, orca_presets_set_value(presets, 2, "__no_such_key__", "1"));
+    expect_code(g3, ORCA_STATUS_NOT_FOUND, "set(unknown key)");
+
+    // system baseline: edited dump == system dump right after selection
+    orca_owned_string system_dump;
+    GUARD(g4, orca_presets_config_dump(presets, 2, 0, &system_dump));
+    expect_ok(g4, "system dump");
+    orca_owned_string edited_dump;
+    GUARD(g5, orca_presets_config_dump(presets, 2, 1, &edited_dump));
+    expect_ok(g5, "edited dump");
+    CHECK(system_dump.length == edited_dump.length &&
+          strcmp(system_dump.data ? system_dump.data : "",
+                 edited_dump.data ? edited_dump.data : "") == 0);
+
+    // override: edited dump changes, system dump does not
+    GUARD(g6, orca_presets_set_value(presets, 2, "layer_height", "0.31"));
+    expect_ok(g6, "set layer_height");
+    orca_owned_string edited_after;
+    GUARD(g7, orca_presets_config_dump(presets, 2, 1, &edited_after));
+    expect_ok(g7, "edited dump after override");
+    CHECK(strstr(edited_after.data ? edited_after.data : "",
+                 "\"layer_height\":\"0.31\"") != nullptr);
+    CHECK(strstr(system_dump.data ? system_dump.data : "",
+                 "\"layer_height\":\"0.31\"") == nullptr);
+
+    // overrides flow into the resolved config (slicing consumes them)
+    orca_owned_string resolved;
+    GUARD(g8, orca_presets_resolved_config(presets, &resolved));
+    expect_ok(g8, "resolved after override");
+    CHECK(strstr(resolved.data ? resolved.data : "",
+                 "\"layer_height\":\"0.31\"") != nullptr);
+
+    // per-key reset restores the system value
+    GUARD(g9, orca_presets_reset_value(presets, 2, "layer_height"));
+    expect_ok(g9, "reset layer_height");
+    orca_owned_string edited_reset;
+    GUARD(g10, orca_presets_config_dump(presets, 2, 1, &edited_reset));
+    expect_ok(g10, "edited dump after reset");
+    CHECK(strstr(edited_reset.data ? edited_reset.data : "",
+                 "\"layer_height\":\"0.31\"") == nullptr);
+
+    // whole-kind reset also restores the system dump exactly
+    GUARD(g11, orca_presets_set_value(presets, 2, "layer_height", "0.42"));
+    expect_ok(g11, "set layer_height again");
+    GUARD(g12, orca_presets_reset_kind(presets, 2));
+    expect_ok(g12, "reset process kind");
+    orca_owned_string edited_final;
+    GUARD(g13, orca_presets_config_dump(presets, 2, 1, &edited_final));
+    expect_ok(g13, "edited dump after kind reset");
+    CHECK(strcmp(system_dump.data ? system_dump.data : "",
+                 edited_final.data ? edited_final.data : "") == 0);
+
+    orca_owned_string_dispose(&system_dump);
+    orca_owned_string_dispose(&edited_dump);
+    orca_owned_string_dispose(&edited_after);
+    orca_owned_string_dispose(&resolved);
+    orca_owned_string_dispose(&edited_reset);
+    orca_owned_string_dispose(&edited_final);
+    orca_presets_free(presets);
+}
+
 static void test_slice_defaults(const std::string &dir) {
     const std::string cube = write_cube_stl(dir, "orcapad-cube5.stl");
     orca_plater *plater = nullptr;
@@ -1074,6 +1164,7 @@ int main() {
     test_preset_metadata(data_dir);
     test_print_volume(data_dir);
     test_resolved_config(data_dir);
+    test_preset_overrides(data_dir);
     test_slice_defaults(dir);
     test_slice_with_presets(dir, data_dir);
     test_standalone_slice(dir);

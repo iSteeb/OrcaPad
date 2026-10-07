@@ -264,6 +264,108 @@ public final class EnginePresets: @unchecked Sendable {
         return consumeBridgeString(&owned, operation: operation)
     }
 
+    /// Desktop-parity override: writes `serializedValue` into the working
+    /// (edited) preset of `kind`; `full_config()` merges edited presets, so
+    /// the next slice consumes it by construction.
+    public func setValue(
+        kind: PresetKind,
+        key: String,
+        serializedValue: String
+    ) -> Result<Void, BridgeError> {
+        let operation = "EnginePresets.setValue"
+        lock.lock(); defer { lock.unlock() }
+        guard let handle else { return .failure(invalidHandle(operation)) }
+        if let error = bridgeFailure(operation: operation, call: {
+            key.withCString { keyPointer in
+                serializedValue.withCString { valuePointer in
+                    orca_presets_set_value(
+                        handle, kind.rawValue, keyPointer, valuePointer
+                    )
+                }
+            }
+        }) {
+            return .failure(error)
+        }
+        return .success(())
+    }
+
+    /// Restores one key of the edited preset from the selected system preset.
+    public func resetValue(
+        kind: PresetKind,
+        key: String
+    ) -> Result<Void, BridgeError> {
+        let operation = "EnginePresets.resetValue"
+        lock.lock(); defer { lock.unlock() }
+        guard let handle else { return .failure(invalidHandle(operation)) }
+        if let error = bridgeFailure(operation: operation, call: {
+            key.withCString { keyPointer in
+                orca_presets_reset_value(handle, kind.rawValue, keyPointer)
+            }
+        }) {
+            return .failure(error)
+        }
+        return .success(())
+    }
+
+    /// Restores the whole edited preset of `kind` from its selection.
+    public func resetKind(_ kind: PresetKind) -> Result<Void, BridgeError> {
+        let operation = "EnginePresets.resetKind"
+        lock.lock(); defer { lock.unlock() }
+        guard let handle else { return .failure(invalidHandle(operation)) }
+        if let error = bridgeFailure(operation: operation, call: {
+            orca_presets_reset_kind(handle, kind.rawValue)
+        }) {
+            return .failure(error)
+        }
+        return .success(())
+    }
+
+    /// Serialized key→value dictionary of either the edited or the selected
+    /// system preset config of `kind` (the client diffs the two to detect
+    /// modified values).
+    public func configDump(
+        kind: PresetKind,
+        edited: Bool
+    ) -> Result<[String: String], BridgeError> {
+        let operation = "EnginePresets.configDump"
+        lock.lock(); defer { lock.unlock() }
+        guard let handle else { return .failure(invalidHandle(operation)) }
+        var owned = orca_owned_string()
+        if let error = bridgeFailure(operation: operation, call: {
+            orca_presets_config_dump(
+                handle, kind.rawValue, edited ? 1 : 0, &owned
+            )
+        }) {
+            orca_owned_string_dispose(&owned)
+            return .failure(error)
+        }
+        switch consumeBridgeString(&owned, operation: operation) {
+        case .success(let json):
+            guard let data = json.data(using: .utf8) else {
+                return .failure(.local(
+                    .internalInvariant,
+                    operation: operation,
+                    diagnostic: "config dump is not valid UTF-8"
+                ))
+            }
+            do {
+                return .success(try JSONDecoder().decode(
+                    [String: String].self,
+                    from: data
+                ))
+            } catch {
+                return .failure(.local(
+                    .internalInvariant,
+                    operation: operation,
+                    diagnostic: "config dump is not a JSON object of strings: " +
+                        String(reflecting: error)
+                ))
+            }
+        case .failure(let error):
+            return .failure(error)
+        }
+    }
+
     private func invalidHandle(_ operation: String) -> BridgeError {
         .local(
             .invalidHandle,

@@ -10,6 +10,7 @@ struct ConfigOptionSchema: Codable, Sendable {
     let category: String?
     let tooltip: String?
     let guiFlags: String?
+    let mode: Int?
     let defaultValue: String?
     let min: Double?
     let max: Double?
@@ -24,6 +25,7 @@ struct ConfigOptionSchema: Codable, Sendable {
         case category
         case tooltip
         case guiFlags = "gui_flags"
+        case mode
         case defaultValue = "default"
         case min
         case max
@@ -60,29 +62,6 @@ final class ResolvedConfigService {
     private(set) var rows: [ResolvedConfigRow] = []
     private(set) var categories: [String] = []
 
-    private static let schema: Result<[ConfigOptionSchema], AppFailure> = {
-        guard let url = Bundle.module.url(
-            forResource: "config-schema",
-            withExtension: "json"
-        ) else {
-            return .failure(.invariant(
-                operation: "load config schema",
-                diagnostic: "config-schema.json is missing from the bundle"
-            ))
-        }
-        do {
-            let data = try Data(contentsOf: url)
-            return .success(try JSONDecoder().decode(
-                [ConfigOptionSchema].self,
-                from: data
-            ))
-        } catch {
-            return .failure(.path(EnginePathError.importCopy(
-                String(reflecting: error)
-            )))
-        }
-    }()
-
     func load(presets: PresetStore) async {
         guard case .idle = phase else { return }
         phase = .loading
@@ -118,7 +97,7 @@ final class ResolvedConfigService {
                 ))
                 return
             }
-            switch Self.schema {
+            switch ConfigSchema.shared {
             case .success(let schema):
                 install(values: values, schema: schema)
             case .failure(let failure):

@@ -37,6 +37,7 @@ int main() {
         j["category"]    = def.category;
         j["tooltip"]     = def.tooltip;
         j["gui_flags"]   = def.gui_flags;
+        j["mode"]        = int(def.mode);
         if (def.default_value)
             j["default"] = def.default_value->serialize();
         else

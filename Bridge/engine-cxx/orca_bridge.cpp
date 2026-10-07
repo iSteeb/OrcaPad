@@ -557,6 +557,120 @@ orca_result orca_presets_resolved_config(orca_presets *presets,
     });
 }
 
+static orca_result orcapad_dump_config(const char *operation,
+                                       const Slic3r::DynamicPrintConfig &config,
+                                       orca_owned_string *out_json) {
+    nlohmann::json out = nlohmann::json::object();
+    for (const std::string &key : config.keys())
+        out[key] = config.opt_serialize(key);
+    const std::string serialized = out.dump();
+    if (!orcapad_copy_string(serialized.c_str(), out_json))
+        return orcapad_fail(ORCA_STATUS_OUT_OF_MEMORY, operation,
+                            "could not allocate config dump");
+    return orcapad_ok();
+}
+
+static bool orcapad_preset_kind_collection(int32_t kind,
+                                          orca_presets *presets,
+                                          Slic3r::PresetCollection **out) {
+    if (!orcapad_valid_preset_kind(kind)) return false;
+    *out = &presets->collection(kind);
+    return true;
+}
+
+orca_result orca_presets_set_value(orca_presets *presets, int32_t kind,
+                                   const char *key,
+                                   const char *serialized_value) {
+    constexpr const char *operation = "orca_presets_set_value";
+    if (!presets)
+        return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation,
+                            "presets handle is null");
+    if (!key || !key[0] || !serialized_value)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "key or value is empty");
+    Slic3r::PresetCollection *collection = nullptr;
+    if (!orcapad_preset_kind_collection(kind, presets, &collection))
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "preset kind is invalid");
+
+    return orcapad_guard(operation, [&]() -> orca_result {
+        Slic3r::Preset &edited = collection->get_edited_preset();
+        Slic3r::ConfigOption *option = edited.config.option(key, true);
+        if (!option)
+            return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation,
+                                "unknown configuration key");
+        option->deserialize(serialized_value, false);
+        return orcapad_ok();
+    });
+}
+
+orca_result orca_presets_reset_value(orca_presets *presets, int32_t kind,
+                                     const char *key) {
+    constexpr const char *operation = "orca_presets_reset_value";
+    if (!presets)
+        return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation,
+                            "presets handle is null");
+    if (!key || !key[0])
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "key is empty");
+    Slic3r::PresetCollection *collection = nullptr;
+    if (!orcapad_preset_kind_collection(kind, presets, &collection))
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "preset kind is invalid");
+
+    return orcapad_guard(operation, [&]() -> orca_result {
+        Slic3r::Preset &edited = collection->get_edited_preset();
+        const Slic3r::ConfigOption *source =
+            collection->get_selected_preset().config.option(key);
+        if (source)
+            edited.config.set_key_value(key, source->clone());
+        else
+            edited.config.erase(key);
+        return orcapad_ok();
+    });
+}
+
+orca_result orca_presets_reset_kind(orca_presets *presets, int32_t kind) {
+    constexpr const char *operation = "orca_presets_reset_kind";
+    if (!presets)
+        return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation,
+                            "presets handle is null");
+    Slic3r::PresetCollection *collection = nullptr;
+    if (!orcapad_preset_kind_collection(kind, presets, &collection))
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "preset kind is invalid");
+
+    return orcapad_guard(operation, [&]() -> orca_result {
+        Slic3r::Preset &edited = collection->get_edited_preset();
+        edited.config = collection->get_selected_preset().config;
+        return orcapad_ok();
+    });
+}
+
+orca_result orca_presets_config_dump(orca_presets *presets, int32_t kind,
+                                    uint8_t edited,
+                                    orca_owned_string *out_json) {
+    constexpr const char *operation = "orca_presets_config_dump";
+    if (out_json) *out_json = orcapad_empty_string();
+    if (!presets)
+        return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation,
+                            "presets handle is null");
+    if (!out_json)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "output pointer is null");
+    Slic3r::PresetCollection *collection = nullptr;
+    if (!orcapad_preset_kind_collection(kind, presets, &collection))
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "preset kind is invalid");
+
+    return orcapad_guard(operation, [&]() -> orca_result {
+        const Slic3r::Preset &preset = edited
+            ? collection->get_edited_preset()
+            : collection->get_selected_preset();
+        return orcapad_dump_config(operation, preset.config, out_json);
+    });
+}
+
 // --- plater session ------------------------------------------------------
 
 struct orca_plater {

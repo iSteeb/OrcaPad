@@ -7,7 +7,7 @@ extern "C" {
 #endif
 
 /// Version of the C ABI contract in this header. Callers verify it at runtime.
-#define ORCA_BRIDGE_ABI_VERSION ((uint32_t)3)
+#define ORCA_BRIDGE_ABI_VERSION ((uint32_t)4)
 
 typedef int32_t orca_status_code;
 #define ORCA_STATUS_OK                     ((orca_status_code)0)
@@ -169,6 +169,27 @@ orca_result orca_presets_print_volume(orca_presets *presets,
 /// caller-owned JSON object of { "key": "serialized value" }.
 orca_result orca_presets_resolved_config(orca_presets *presets,
                                          orca_owned_string *out_json);
+
+/// Desktop-parity config editing: overrides are written to the working
+/// (edited) preset of `kind`; `full_config()` merges edited presets, so
+/// slicing consumes overrides by construction. Selecting a preset resets its
+/// edited copy. `serialized_value` uses the option's own serialization.
+orca_result orca_presets_set_value(orca_presets *presets, int32_t kind,
+                                   const char *key,
+                                   const char *serialized_value);
+/// Restores one key of the edited preset from the selected system preset
+/// (erasing it when the system preset does not define the key).
+orca_result orca_presets_reset_value(orca_presets *presets, int32_t kind,
+                                     const char *key);
+/// Restores the whole edited preset of `kind` from its selected system
+/// preset.
+orca_result orca_presets_reset_kind(orca_presets *presets, int32_t kind);
+/// Serialized key→value dump of either the edited (`edited` != 0) or the
+/// selected system (`edited` == 0) preset config of `kind`; the client diffs
+/// the two to detect modified values.
+orca_result orca_presets_config_dump(orca_presets *presets, int32_t kind,
+                                    uint8_t edited,
+                                    orca_owned_string *out_json);
 orca_result orca_presets_select(orca_presets *presets, const char *machine,
                                 const char *filament, const char *process);
 orca_result orca_presets_current(orca_presets *presets, int32_t kind,

@@ -57,6 +57,7 @@ assert isinstance(schema, list) and len(schema) > 500, f"schema too small: {len(
 keys = {option["key"] for option in schema}
 for anchor in ("layer_height", "printable_area", "nozzle_diameter"):
     assert anchor in keys, f"missing anchor option: {anchor}"
+assert all("mode" in option and 0 <= option["mode"] <= 3 for option in schema), "mode field missing"
 print(f"schema ok: {len(schema)} options")
 EOF
 mv "$SCHEMA.tmp" "$SCHEMA"
