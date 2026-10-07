@@ -46,31 +46,58 @@ public struct DocumentRevision: RawRepresentable, Hashable, Comparable, Sendable
     }
 }
 
-/// Canonical engine-space transform: z-up, millimetres, radians.
+/// World axes for incremental engine rotations (desktop rotate gizmo).
+public enum EngineAxis: Int32, CaseIterable, Sendable {
+    case x = 0
+    case y = 1
+    case z = 2
+}
+
+/// Canonical engine-space transform: z-up, millimetres, radians. Rotation is
+/// the engine's own Euler decomposition; scale is per local axis (> 0).
 public struct InstanceTransform: Equatable, Sendable {
     public var offsetX: Double
     public var offsetY: Double
     public var offsetZ: Double
+    public var rotationX: Double
+    public var rotationY: Double
     public var rotationZ: Double
-    public var scale: Double
+    public var scaleX: Double
+    public var scaleY: Double
+    public var scaleZ: Double
 
     public init(
-        offsetX: Double,
-        offsetY: Double,
-        offsetZ: Double,
-        rotationZ: Double,
-        scale: Double
+        offsetX: Double, offsetY: Double, offsetZ: Double,
+        rotationX: Double, rotationY: Double, rotationZ: Double,
+        scaleX: Double, scaleY: Double, scaleZ: Double
     ) {
         precondition(
-            offsetX.isFinite && offsetY.isFinite && offsetZ.isFinite &&
-                rotationZ.isFinite && scale.isFinite && scale > 0,
-            "InstanceTransform must contain finite values and positive scale"
+            [offsetX, offsetY, offsetZ, rotationX, rotationY, rotationZ,
+             scaleX, scaleY, scaleZ].allSatisfy(\.isFinite) &&
+                scaleX > 0 && scaleY > 0 && scaleZ > 0,
+            "InstanceTransform must contain finite values and positive scales"
         )
         self.offsetX = offsetX
         self.offsetY = offsetY
         self.offsetZ = offsetZ
+        self.rotationX = rotationX
+        self.rotationY = rotationY
         self.rotationZ = rotationZ
-        self.scale = scale
+        self.scaleX = scaleX
+        self.scaleY = scaleY
+        self.scaleZ = scaleZ
+    }
+
+    public var rotation: SIMD3<Double> { SIMD3(rotationX, rotationY, rotationZ) }
+    public var scale: SIMD3<Double> { SIMD3(scaleX, scaleY, scaleZ) }
+    public var isUniformlyScaled: Bool {
+        abs(scaleX - scaleY) < 1e-9 && abs(scaleX - scaleZ) < 1e-9
+    }
+
+    public var isValid: Bool {
+        [offsetX, offsetY, offsetZ, rotationX, rotationY, rotationZ,
+         scaleX, scaleY, scaleZ].allSatisfy(\.isFinite) &&
+            scaleX > 0 && scaleY > 0 && scaleZ > 0
     }
 }
 
@@ -112,10 +139,14 @@ public struct SceneMesh: Sendable {
 public struct SceneInstance: Identifiable, Sendable {
     public let id: InstanceID
     public let transform: InstanceTransform
+    /// The engine's instance matrix (ModelInstance::get_matrix()); render and
+    /// preview from this — never re-derive it from the Euler angles.
+    public let matrix: simd_double4x4
 
-    public init(id: InstanceID, transform: InstanceTransform) {
+    public init(id: InstanceID, transform: InstanceTransform, matrix: simd_double4x4) {
         self.id = id
         self.transform = transform
+        self.matrix = matrix
     }
 }
 

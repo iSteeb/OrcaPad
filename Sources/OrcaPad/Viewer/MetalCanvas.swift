@@ -10,10 +10,12 @@ struct SceneSync {
     var bed: EngineBed
     var selectedObjectID: ObjectID?
     var selectedInstanceID: InstanceID?
-    var previewTransform: InstanceTransform?
+    /// Live gesture preview of the selected instance (engine-frame matrix).
+    var previewMatrix: simd_float4x4?
     var presentationRevision: UInt64
     var frameRequest: UInt64
     var gizmoMode: GizmoMode
+    var rotationAxis: EngineAxis
 }
 
 /// Manipulation callbacks from the canvas gestures (engine-space units).
@@ -22,7 +24,8 @@ struct CanvasManipulation {
     /// Incremental bed-plane translation in engine millimetres.
     let onMove: (SIMD2<Float>) -> Void
     let onBegin: () -> Void
-    /// Total rotation since gesture start, radians (engine +Z = CCW from above).
+    /// Total rotation since gesture start about the selected world axis,
+    /// radians (right-handed).
     let onRotate: (Double) -> Void
     /// Total uniform scale factor since gesture start.
     let onScale: (Double) -> Void
@@ -69,7 +72,7 @@ struct MetalCanvas: UIViewRepresentable {
     func updateUIView(_ view: MTKView, context: Context) {
         let coordinator = context.coordinator
         coordinator.manipulation = manipulation
-        coordinator.renderer?.setGizmoMode(scene.gizmoMode)
+        coordinator.renderer?.setGizmo(mode: scene.gizmoMode, rotationAxis: scene.rotationAxis)
         let needsSceneApply =
             scene.snapshot.documentID != coordinator.lastDocumentID ||
             scene.snapshot.revision != coordinator.lastDocumentRevision ||
@@ -84,7 +87,7 @@ struct MetalCanvas: UIViewRepresentable {
                     bed: scene.bed,
                     selectedObjectID: scene.selectedObjectID,
                     selectedInstanceID: scene.selectedInstanceID,
-                    previewTransform: scene.previewTransform
+                    previewMatrix: scene.previewMatrix
                 )
                 coordinator.lastDocumentID = scene.snapshot.documentID
                 coordinator.lastDocumentRevision = scene.snapshot.revision
@@ -175,11 +178,15 @@ struct MetalCanvas: UIViewRepresentable {
         /// the object itself.
         private func gizmoRingHit(at location: CGPoint, in view: MTKView) -> CGPoint? {
             guard let renderer, let gizmo = renderer.selectedGizmo(),
-                  let center = renderer.projectToScreen(gizmo.center, in: view),
-                  let rim = renderer.projectToScreen(
-                      gizmo.center + SIMD3(gizmo.radius, 0, 0), in: view
-                  ) else { return nil }
-            let radius = hypot(rim.x - center.x, rim.y - center.y)
+                  let center = renderer.projectToScreen(gizmo.center, in: view) else { return nil }
+            // Projected extent from several rim directions (robust for rings
+            // seen at grazing angles).
+            var radius: CGFloat = 0
+            for direction in [SIMD3<Float>(1, 0, 0), SIMD3(0, 1, 0), SIMD3(0, 0, 1)] {
+                if let rim = renderer.projectToScreen(gizmo.center + direction * gizmo.radius, in: view) {
+                    radius = max(radius, hypot(rim.x - center.x, rim.y - center.y))
+                }
+            }
             let distance = hypot(location.x - center.x, location.y - center.y)
             return distance <= radius * 1.35 + 24 ? center : nil
         }
@@ -200,9 +207,12 @@ struct MetalCanvas: UIViewRepresentable {
                     }
                 case .rotate(let center, let startAngle):
                     let angle = Double(atan2(location.y - center.y, location.x - center.x))
-                    // Screen y points down: visually CCW motion decreases the
-                    // angle; engine +Z rotation is CCW seen from above.
-                    let delta = atan2(sin(startAngle - angle), cos(startAngle - angle))
+                    // Screen y points down, so visually CCW motion decreases
+                    // the angle. A right-handed rotation looks CCW when the
+                    // axis points toward the camera — flip otherwise.
+                    let axis = CoordinateMapper.viewerAxis(renderer.rotationAxis)
+                    let facing: Double = simd_dot(renderer.camera.forward, axis) < 0 ? 1 : -1
+                    let delta = atan2(sin(startAngle - angle), cos(startAngle - angle)) * facing
                     manipulation?.onRotate(delta)
                 case .scale(let startY):
                     manipulation?.onScale(exp(Double(startY - location.y) / 220))

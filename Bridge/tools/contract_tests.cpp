@@ -234,7 +234,7 @@ static void test_md5_shim() {
 
 static void test_abi_version() {
     CHECK_EQ(orca_bridge_abi_version(), ORCA_BRIDGE_ABI_VERSION);
-    CHECK_EQ(ORCA_BRIDGE_ABI_VERSION, 6);
+    CHECK_EQ(ORCA_BRIDGE_ABI_VERSION, 7);
 }
 
 static void test_document_lifecycle(const std::string &dir) {
@@ -365,7 +365,11 @@ static void test_stable_ids_and_revisions(const std::string &dir) {
         // z is lifted by ensure_on_bed: the mesh bbox is z-centered (-10..10),
         // so the instance offset raises the bottom onto the bed (+10).
         CHECK_NEAR(t.offset_z, 10.0, 0.01);
-        CHECK_NEAR(t.scale, 1.0, 1e-9);
+        CHECK_NEAR(t.scale_x, 1.0, 1e-9);
+        CHECK_NEAR(t.scale_y, 1.0, 1e-9);
+        CHECK_NEAR(t.scale_z, 1.0, 1e-9);
+        CHECK_NEAR(t.rotation_x, 0.0, 1e-9);
+        CHECK_NEAR(t.rotation_y, 0.0, 1e-9);
         const uint64_t mesh_revision = object->mesh_revision;
         CHECK(mesh_revision != 0);
         const orca_document_id document_id = snap.document_id;
@@ -502,12 +506,12 @@ static void test_not_found_and_validation(const std::string &dir) {
                                        &out_revision));
     expect_code(g7, ORCA_STATUS_INVALID_ARGUMENT, "set NaN offset");
     bad = valid;
-    bad.scale = 0.0;
+    bad.scale_y = 0.0;
     GUARD(g8, orca_plater_instance_set(plater, object_id, instance, &bad,
                                        &out_revision));
     expect_code(g8, ORCA_STATUS_INVALID_ARGUMENT, "set zero scale");
     bad = valid;
-    bad.scale = std::nan("");
+    bad.scale_z = std::nan("");
     GUARD(g9, orca_plater_instance_set(plater, object_id, instance, &bad,
                                        &out_revision));
     expect_code(g9, ORCA_STATUS_INVALID_ARGUMENT, "set NaN scale");
@@ -522,6 +526,101 @@ static void test_not_found_and_validation(const std::string &dir) {
 
     // no rejection may advance the revision
     CHECK_EQ(snapshot_revision(plater), baseline);
+    orca_plater_free(plater);
+}
+
+// Instance-space min z of an object's mesh under its engine matrix.
+static double instance_min_z(const orca_scene_object &object, const double *m) {
+    double lowest = 1e300;
+    for (int32_t i = 0; i < object.position_count; ++i) {
+        const float *p = object.positions + static_cast<size_t>(i) * 3;
+        const double z = m[2] * p[0] + m[6] * p[1] + m[10] * p[2] + m[14];
+        if (z < lowest) lowest = z;
+    }
+    return lowest;
+}
+
+static void test_full_transforms(const std::string &dir) {
+    const std::string cube = write_cube_stl(dir, "orcapad-cube-transform.stl");
+    orca_plater *plater = nullptr;
+    GUARD(g0, orca_plater_new(&plater));
+    expect_ok(g0, "plater_new");
+    orca_object_id object_id = 0;
+    orca_revision revision = 0;
+    GUARD(g1, orca_plater_add_stl(plater, cube.c_str(), 100.0, 100.0, &object_id, &revision));
+    expect_ok(g1, "add cube");
+    orca_scene_snapshot snap = take_snapshot(plater);
+    const orca_instance_id instance = snap.objects[0].instances[0].id;
+    double original[16];
+    memcpy(original, snap.objects[0].instances[0].matrix, sizeof original);
+    // matrix translation equals the reported offset
+    CHECK_NEAR(original[12], snap.objects[0].instances[0].transform.offset_x, 1e-9);
+    CHECK_NEAR(original[13], snap.objects[0].instances[0].transform.offset_y, 1e-9);
+    CHECK_NEAR(original[14], snap.objects[0].instances[0].transform.offset_z, 1e-9);
+    orca_scene_snapshot_dispose(&snap);
+
+    // typed rejections, no revision bump
+    orca_revision out = 99;
+    GUARD(g2, orca_plater_instance_rotate(plater, object_id, instance, 3, 0.1, &out));
+    expect_code(g2, ORCA_STATUS_INVALID_ARGUMENT, "rotate(bad axis)");
+    GUARD(g3, orca_plater_instance_rotate(plater, object_id, instance, 0, std::nan(""), &out));
+    expect_code(g3, ORCA_STATUS_INVALID_ARGUMENT, "rotate(NaN)");
+    GUARD(g4, orca_plater_instance_rotate(plater, object_id, 0x7fffffffffff, 0, 0.1, &out));
+    expect_code(g4, ORCA_STATUS_NOT_FOUND, "rotate(bogus instance)");
+    CHECK_EQ(snapshot_revision(plater), revision);
+
+    // world X rotation by 90 degrees: +1 revision, rests on the bed
+    GUARD(g5, orca_plater_instance_rotate(plater, object_id, instance, 0, M_PI / 2, &out));
+    expect_ok(g5, "rotate X 90");
+    CHECK_EQ(out, revision + 1);
+    snap = take_snapshot(plater);
+    const orca_scene_object &rotated = snap.objects[0];
+    CHECK_NEAR(std::fabs(rotated.instances[0].transform.rotation_x), M_PI / 2, 1e-6);
+    CHECK_NEAR(instance_min_z(rotated, rotated.instances[0].matrix), 0.0, 1e-4);
+    // local +Z maps onto world -Y for a +90 deg rotation about world X
+    CHECK_NEAR(rotated.instances[0].matrix[9], -1.0, 1e-6);
+    orca_scene_snapshot_dispose(&snap);
+
+    // 24 x 15 deg about Z wraps all the way through 360 back to the start
+    GUARD(g6, orca_plater_instance_rotate(plater, object_id, instance, 0, -M_PI / 2, &out));
+    expect_ok(g6, "rotate X back");
+    for (int step = 0; step < 24; ++step) {
+        orca_result r = orca_plater_instance_rotate(plater, object_id, instance, 2, M_PI / 12, &out);
+        CHECK(r.code == ORCA_STATUS_OK);
+        orca_result_dispose(&r);
+    }
+    snap = take_snapshot(plater);
+    for (int i = 0; i < 16; ++i)
+        CHECK_NEAR(snap.objects[0].instances[0].matrix[i], original[i], 1e-6);
+    orca_instance_transform t = snap.objects[0].instances[0].transform;
+    orca_scene_snapshot_dispose(&snap);
+
+    // non-uniform scale: reported per axis, still resting on the bed
+    t.scale_x = 2.0; t.scale_y = 1.0; t.scale_z = 0.5;
+    t.offset_z = 50.0; // deliberately floating: the engine must re-rest it
+    GUARD(g7, orca_plater_instance_set(plater, object_id, instance, &t, &out));
+    expect_ok(g7, "set non-uniform scale");
+    snap = take_snapshot(plater);
+    const orca_scene_object &scaled = snap.objects[0];
+    CHECK_NEAR(scaled.instances[0].transform.scale_x, 2.0, 1e-9);
+    CHECK_NEAR(scaled.instances[0].transform.scale_y, 1.0, 1e-9);
+    CHECK_NEAR(scaled.instances[0].transform.scale_z, 0.5, 1e-9);
+    CHECK_NEAR(instance_min_z(scaled, scaled.instances[0].matrix), 0.0, 1e-4);
+    CHECK_NEAR(scaled.instances[0].transform.offset_z, 5.0, 1e-4); // 20 mm * 0.5 / 2
+    orca_scene_snapshot_dispose(&snap);
+
+    // absolute X/Y/Z rotation via set is accepted and reported back
+    t.scale_x = t.scale_y = t.scale_z = 1.0;
+    t.rotation_x = 0.3; t.rotation_y = -0.2; t.rotation_z = 1.1;
+    GUARD(g8, orca_plater_instance_set(plater, object_id, instance, &t, &out));
+    expect_ok(g8, "set absolute XYZ rotation");
+    snap = take_snapshot(plater);
+    CHECK_NEAR(snap.objects[0].instances[0].transform.rotation_x, 0.3, 1e-6);
+    CHECK_NEAR(snap.objects[0].instances[0].transform.rotation_y, -0.2, 1e-6);
+    CHECK_NEAR(snap.objects[0].instances[0].transform.rotation_z, 1.1, 1e-6);
+    CHECK_NEAR(instance_min_z(snap.objects[0], snap.objects[0].instances[0].matrix), 0.0, 1e-4);
+    orca_scene_snapshot_dispose(&snap);
+
     orca_plater_free(plater);
 }
 
@@ -1292,6 +1391,7 @@ int main() {
     test_stable_ids_and_revisions(dir);
     test_not_found_and_validation(dir);
     test_snapshot_ownership(dir);
+    test_full_transforms(dir);
     test_engine_serialization(dir);
     test_presets(data_dir);
     test_preset_metadata(data_dir);

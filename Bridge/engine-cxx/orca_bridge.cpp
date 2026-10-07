@@ -710,11 +710,29 @@ static bool orcapad_revision_available(const orca_plater &plater) {
 }
 
 static bool orcapad_valid_transform(const orca_instance_transform &transform) {
-    return std::isfinite(transform.offset_x) &&
-           std::isfinite(transform.offset_y) &&
-           std::isfinite(transform.offset_z) &&
-           std::isfinite(transform.rotation_z) &&
-           std::isfinite(transform.scale) && transform.scale > 0.0;
+    const double values[] = {
+        transform.offset_x, transform.offset_y, transform.offset_z,
+        transform.rotation_x, transform.rotation_y, transform.rotation_z,
+        transform.scale_x, transform.scale_y, transform.scale_z,
+    };
+    for (double value : values)
+        if (!std::isfinite(value)) return false;
+    return transform.scale_x > 0.0 && transform.scale_y > 0.0 &&
+           transform.scale_z > 0.0;
+}
+
+/// Desktop manipulation parity: after any transform the instance rests on
+/// the bed — its exact transformed bounding box (upstream
+/// ModelObject::instance_bounding_box) touches z = 0.
+static void orcapad_rest_on_bed(Slic3r::ModelObject *object,
+                                Slic3r::ModelInstance *instance) {
+    object->invalidate_bounding_box();
+    const Slic3r::BoundingBoxf3 box = object->instance_bounding_box(*instance);
+    if (!box.defined) return;
+    Slic3r::Vec3d offset = instance->get_offset();
+    offset.z() -= box.min.z();
+    instance->set_offset(offset);
+    object->invalidate_bounding_box();
 }
 
 orca_result orca_plater_new(orca_plater **out) {
@@ -940,16 +958,72 @@ orca_result orca_plater_instance_set(orca_plater *plater,
         if (!orcapad_revision_available(*plater))
             return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
                                 "document revision is exhausted");
-        Slic3r::Geometry::Transformation candidate =
+        const Slic3r::Geometry::Transformation original =
             instance->get_transformation();
+        Slic3r::Geometry::Transformation candidate = original;
         candidate.set_offset(Slic3r::Vec3d(
             transform->offset_x, transform->offset_y, transform->offset_z));
-        candidate.set_rotation(
-            Slic3r::Vec3d(0.0, 0.0, transform->rotation_z));
+        candidate.set_rotation(Slic3r::Vec3d(
+            transform->rotation_x, transform->rotation_y, transform->rotation_z));
         candidate.set_scaling_factor(Slic3r::Vec3d(
-            transform->scale, transform->scale, transform->scale));
-        instance->set_transformation(candidate);
-        object->invalidate_bounding_box();
+            transform->scale_x, transform->scale_y, transform->scale_z));
+        try {
+            instance->set_transformation(candidate);
+            orcapad_rest_on_bed(object, instance);
+        } catch (...) {
+            instance->set_transformation(original);
+            object->invalidate_bounding_box();
+            throw;
+        }
+        *out_revision = ++plater->revision;
+        return orcapad_ok();
+    });
+}
+
+orca_result orca_plater_instance_rotate(orca_plater *plater,
+                                        orca_object_id object_id,
+                                        orca_instance_id instance_id,
+                                        int32_t axis, double radians,
+                                        orca_revision *out_revision) {
+    constexpr const char *operation = "orca_plater_instance_rotate";
+    if (out_revision) *out_revision = 0;
+    if (!plater)
+        return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation,
+                            "plater handle is null");
+    if (!out_revision)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "output pointer is null");
+    if (axis < 0 || axis > 2)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "axis must be 0 (X), 1 (Y), or 2 (Z)");
+    if (!std::isfinite(radians))
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "rotation angle is not finite");
+    return orcapad_guard(operation, [&]() -> orca_result {
+        Slic3r::ModelObject *object = plater_obj(plater, object_id);
+        if (!object)
+            return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation,
+                                "object was not found");
+        Slic3r::ModelInstance *instance = plater_instance(object, instance_id);
+        if (!instance)
+            return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation,
+                                "instance was not found");
+        if (!orcapad_revision_available(*plater))
+            return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
+                                "document revision is exhausted");
+        const Slic3r::Vec3d world_axis = axis == 0 ? Slic3r::Vec3d::UnitX()
+            : axis == 1 ? Slic3r::Vec3d::UnitY() : Slic3r::Vec3d::UnitZ();
+        const Slic3r::Geometry::Transformation original =
+            instance->get_transformation();
+        try {
+            instance->rotate(Eigen::AngleAxisd(radians, world_axis)
+                                 .toRotationMatrix());
+            orcapad_rest_on_bed(object, instance);
+        } catch (...) {
+            instance->set_transformation(original);
+            object->invalidate_bounding_box();
+            throw;
+        }
         *out_revision = ++plater->revision;
         return orcapad_ok();
     });
@@ -1146,20 +1220,29 @@ orca_result orca_plater_snapshot(orca_plater *plater,
                 const Slic3r::Vec3d rotation = model_instance->get_rotation();
                 const Slic3r::Vec3d scaling =
                     model_instance->get_scaling_factor();
-                const Slic3r::Vec3d mirror = model_instance->get_mirror();
-                if (std::abs(rotation.x()) > 1e-12 ||
-                    std::abs(rotation.y()) > 1e-12 ||
-                    std::abs(scaling.x() - scaling.y()) > 1e-12 ||
-                    std::abs(scaling.x() - scaling.z()) > 1e-12 ||
-                    !mirror.isApprox(Slic3r::Vec3d::Ones(), 1e-12))
+                if (model_instance->is_left_handed())
                     return fail_snapshot(
                         ORCA_STATUS_UNSUPPORTED_CAPABILITY,
-                        "snapshot transform is not unmirrored z-rotation with uniform scale");
-                instance.transform.offset_x = model_instance->get_offset().x();
-                instance.transform.offset_y = model_instance->get_offset().y();
-                instance.transform.offset_z = model_instance->get_offset().z();
+                        "mirrored instances are not supported");
+                const Slic3r::Vec3d offset = model_instance->get_offset();
+                instance.transform.offset_x = offset.x();
+                instance.transform.offset_y = offset.y();
+                instance.transform.offset_z = offset.z();
+                instance.transform.rotation_x = rotation.x();
+                instance.transform.rotation_y = rotation.y();
                 instance.transform.rotation_z = rotation.z();
-                instance.transform.scale = scaling.x();
+                instance.transform.scale_x = scaling.x();
+                instance.transform.scale_y = scaling.y();
+                instance.transform.scale_z = scaling.z();
+                const Slic3r::Transform3d matrix = model_instance->get_matrix();
+                for (int column = 0; column < 4; ++column)
+                    for (int row = 0; row < 4; ++row) {
+                        const double value = matrix(row, column);
+                        if (!std::isfinite(value))
+                            return fail_snapshot(ORCA_STATUS_INTERNAL_INVARIANT,
+                                                 "engine returned a non-finite matrix");
+                        instance.matrix[column * 4 + row] = value;
+                    }
                 if (!orcapad_valid_transform(instance.transform))
                     return fail_snapshot(ORCA_STATUS_INTERNAL_INVARIANT,
                                          "engine returned an invalid transform");

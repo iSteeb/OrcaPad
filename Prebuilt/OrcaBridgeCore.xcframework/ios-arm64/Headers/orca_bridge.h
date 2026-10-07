@@ -7,7 +7,7 @@ extern "C" {
 #endif
 
 /// Version of the C ABI contract in this header. Callers verify it at runtime.
-#define ORCA_BRIDGE_ABI_VERSION ((uint32_t)6)
+#define ORCA_BRIDGE_ABI_VERSION ((uint32_t)7)
 
 typedef int32_t orca_status_code;
 #define ORCA_STATUS_OK                     ((orca_status_code)0)
@@ -48,10 +48,13 @@ void orca_owned_string_dispose(orca_owned_string *string);
 void orca_result_dispose(orca_result *result);
 
 /// Canonical engine-space instance transform: z-up, millimetres, radians.
+/// Rotation is the engine's own Euler decomposition
+/// (Geometry::Transformation::get_rotation / set_rotation); scale is per
+/// local axis and each factor must be > 0. Mirroring is not supported.
 typedef struct {
     double offset_x, offset_y, offset_z;
-    double rotation_z;
-    double scale; // uniform and greater than zero
+    double rotation_x, rotation_y, rotation_z;
+    double scale_x, scale_y, scale_z;
 } orca_instance_transform;
 
 /// Deep-copied, immutable scene snapshot values. All mesh positions and bounds
@@ -60,6 +63,10 @@ typedef struct {
 typedef struct {
     orca_instance_id id;
     orca_instance_transform transform;
+    /// The engine's instance matrix (ModelInstance::get_matrix()),
+    /// column-major. Clients render and preview from this matrix and never
+    /// re-derive it from the Euler angles.
+    double matrix[16];
 } orca_scene_instance;
 
 typedef struct {
@@ -112,11 +119,23 @@ orca_result orca_plater_instance_delete(orca_plater *plater,
                                         orca_object_id object_id,
                                         orca_instance_id instance_id,
                                         orca_revision *out_revision);
+/// Absolute transform. Like desktop manipulation, the instance is then
+/// rested on the bed (offset z adjusted so its exact transformed bounding
+/// box touches z = 0).
 orca_result orca_plater_instance_set(orca_plater *plater,
                                      orca_object_id object_id,
                                      orca_instance_id instance_id,
                                      const orca_instance_transform *transform,
                                      orca_revision *out_revision);
+/// Incremental rotation about a WORLD axis (0 = X, 1 = Y, 2 = Z) through the
+/// instance origin (the object center after import centering), composed by
+/// the engine (ModelInstance::rotate), then rested on the bed. Repeated steps
+/// wrap continuously through 360 degrees.
+orca_result orca_plater_instance_rotate(orca_plater *plater,
+                                        orca_object_id object_id,
+                                        orca_instance_id instance_id,
+                                        int32_t axis, double radians,
+                                        orca_revision *out_revision);
 orca_result orca_plater_ensure_on_bed(orca_plater *plater,
                                       orca_revision *out_revision);
 

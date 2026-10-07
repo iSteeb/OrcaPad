@@ -15,6 +15,12 @@ public final class EnginePlater: @unchecked Sendable {
             instanceID: InstanceID,
             transform: InstanceTransform
         )
+        case rotate(
+            objectID: ObjectID,
+            instanceID: InstanceID,
+            axis: EngineAxis,
+            radians: Double
+        )
         case ensureOnBed
     }
 
@@ -130,8 +136,12 @@ public final class EnginePlater: @unchecked Sendable {
                     offset_x: transform.offsetX,
                     offset_y: transform.offsetY,
                     offset_z: transform.offsetZ,
+                    rotation_x: transform.rotationX,
+                    rotation_y: transform.rotationY,
                     rotation_z: transform.rotationZ,
-                    scale: transform.scale
+                    scale_x: transform.scaleX,
+                    scale_y: transform.scaleY,
+                    scale_z: transform.scaleZ
                 )
                 try BridgeResult.consume(
                     orca_plater_instance_set(
@@ -142,6 +152,19 @@ public final class EnginePlater: @unchecked Sendable {
                         &mutationRevision
                     ),
                     operation: "set transform for instance \(instanceID)"
+                )
+
+            case .rotate(let objectID, let instanceID, let axis, let radians):
+                try BridgeResult.consume(
+                    orca_plater_instance_rotate(
+                        handle,
+                        objectID.rawValue,
+                        instanceID.rawValue,
+                        axis.rawValue,
+                        radians,
+                        &mutationRevision
+                    ),
+                    operation: "rotate instance \(instanceID)"
                 )
 
             case .ensureOnBed:
@@ -315,27 +338,34 @@ public final class EnginePlater: @unchecked Sendable {
                             rawInstance.id,
                             operation: "read scene snapshot"
                         )
-                        let rawTransform = rawInstance.transform
-                        guard rawTransform.offset_x.isFinite,
-                              rawTransform.offset_y.isFinite,
-                              rawTransform.offset_z.isFinite,
-                              rawTransform.rotation_z.isFinite,
-                              rawTransform.scale.isFinite,
-                              rawTransform.scale > 0 else {
+                        let raw = rawInstance.transform
+                        // Validate before constructing: InstanceTransform's
+                        // initializer preconditions would trap otherwise.
+                        guard [raw.offset_x, raw.offset_y, raw.offset_z,
+                               raw.rotation_x, raw.rotation_y, raw.rotation_z,
+                               raw.scale_x, raw.scale_y, raw.scale_z].allSatisfy(\.isFinite),
+                              raw.scale_x > 0, raw.scale_y > 0, raw.scale_z > 0 else {
                             throw Self.invariant(
                                 operation: "read scene snapshot",
                                 "Instance \(instanceID) has an invalid transform"
                             )
                         }
+                        let transform = InstanceTransform(
+                            offsetX: raw.offset_x, offsetY: raw.offset_y, offsetZ: raw.offset_z,
+                            rotationX: raw.rotation_x, rotationY: raw.rotation_y, rotationZ: raw.rotation_z,
+                            scaleX: raw.scale_x, scaleY: raw.scale_y, scaleZ: raw.scale_z
+                        )
+                        let m = rawInstance.matrix
+                        let matrix = simd_double4x4(columns: (
+                            SIMD4(m.0, m.1, m.2, m.3),
+                            SIMD4(m.4, m.5, m.6, m.7),
+                            SIMD4(m.8, m.9, m.10, m.11),
+                            SIMD4(m.12, m.13, m.14, m.15)
+                        ))
                         instances.append(SceneInstance(
                             id: instanceID,
-                            transform: InstanceTransform(
-                                offsetX: rawTransform.offset_x,
-                                offsetY: rawTransform.offset_y,
-                                offsetZ: rawTransform.offset_z,
-                                rotationZ: rawTransform.rotation_z,
-                                scale: rawTransform.scale
-                            )
+                            transform: transform,
+                            matrix: matrix
                         ))
                     }
                 }

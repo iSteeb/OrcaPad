@@ -35,7 +35,8 @@ final class DocumentStore {
     private var plater: EnginePlater?
     private(set) var scene: SceneSnapshot?
     private(set) var selection: InstanceSelection?
-    private(set) var previewTransform: InstanceTransform?
+    /// Live gesture preview of the selected instance (engine-frame matrix).
+    private(set) var previewMatrix: simd_float4x4?
     private(set) var presentationRevision: UInt64 = 0
     private(set) var frameRequest: UInt64 = 0
     private(set) var isMutating = false
@@ -187,7 +188,7 @@ final class DocumentStore {
                   instanceID: instanceID
               ) != nil else {
             selection = nil
-            previewTransform = nil
+            previewMatrix = nil
             presentationRevision += 1
             return
         }
@@ -195,125 +196,159 @@ final class DocumentStore {
             objectID: objectID,
             instanceID: instanceID
         )
-        previewTransform = nil
+        previewMatrix = nil
         presentationRevision += 1
     }
 
-    func moveSelected(by delta: SIMD2<Float>) {
-        guard !isBusy,
-              let selection,
-              let authoritative = scene?.instance(
-                  objectID: selection.objectID,
-                  instanceID: selection.instanceID
-              )?.transform else { return }
-        var transform = previewTransform ?? authoritative
-        transform.offsetX += Double(delta.x)
-        transform.offsetY += Double(delta.y)
-        previewTransform = transform
-        presentationRevision += 1
-    }
-
-    func commitSelectedTransform() async {
-        manipulationBase = nil
-        guard let selection,
-              let authoritative = selectedAuthoritativeTransform else { return }
-        let transform = onBed(previewTransform ?? authoritative)
-        guard transform != authoritative else {
-            previewTransform = nil
-            presentationRevision += 1
-            return
-        }
-        _ = await applyMutation(
-            .setTransform(
-                objectID: selection.objectID,
-                instanceID: selection.instanceID,
-                transform: transform
-            ),
-            operation: "transform"
-        )
-    }
-
-    // MARK: Gizmo manipulation (rotate / scale relative to a gesture base)
+    // MARK: Manipulation (gesture previews on the engine matrix → one
+    // engine mutation on commit; the engine rests the instance on the bed)
 
     /// Snap step for gesture rotation (desktop rotate gizmo snaps too).
     static let rotationSnapDegrees = 5.0
 
-    private var manipulationBase: InstanceTransform?
+    private enum PendingManipulation {
+        case move
+        case rotate(EngineAxis, Double)
+        case scale(Double)
+    }
 
-    var selectedAuthoritativeTransform: InstanceTransform? {
+    private var pending: PendingManipulation?
+    private var manipulationBase: simd_float4x4?
+
+    private var selectedInstance: SceneInstance? {
         guard let selection else { return nil }
-        return scene?.instance(
-            objectID: selection.objectID,
-            instanceID: selection.instanceID
-        )?.transform
+        return scene?.instance(objectID: selection.objectID, instanceID: selection.instanceID)
     }
 
-    /// The transform the UI should display: the live preview while a gesture
-    /// runs, otherwise the authoritative engine value.
-    var selectedDisplayTransform: InstanceTransform? {
-        previewTransform ?? selectedAuthoritativeTransform
+    var selectedAuthoritativeTransform: InstanceTransform? { selectedInstance?.transform }
+
+    private var selectedAuthoritativeMatrix: simd_float4x4? {
+        selectedInstance.map { EngineMatrix.float($0.matrix) }
     }
 
-    /// Engine-space size of the selected instance (snapshot bounds × scale).
+    /// Transform shown by the panels: always the engine's authoritative value
+    /// (gesture previews are matrix-only and commit as one mutation).
+    var selectedDisplayTransform: InstanceTransform? { selectedAuthoritativeTransform }
+
+    /// Local (object-axis) size: snapshot bounds × per-axis scale.
     var selectedSize: SIMD3<Float>? {
         guard let selection,
               let object = scene?.object(id: selection.objectID),
-              let transform = selectedDisplayTransform else { return nil }
-        return object.mesh.bounds.size * Float(transform.scale)
+              let transform = selectedAuthoritativeTransform else { return nil }
+        return object.mesh.bounds.size * SIMD3<Float>(transform.scale)
+    }
+
+    func moveSelected(by delta: SIMD2<Float>) {
+        guard !isBusy, let current = previewMatrix ?? selectedAuthoritativeMatrix else { return }
+        previewMatrix = EngineMatrix.translation(SIMD3(delta.x, delta.y, 0)) * current
+        pending = .move
+        presentationRevision += 1
     }
 
     func beginManipulation() {
         guard !isBusy else { return }
-        manipulationBase = selectedDisplayTransform
+        manipulationBase = previewMatrix ?? selectedAuthoritativeMatrix
     }
 
-    /// Live rotation preview: base rotation + gesture delta, snapped.
-    func previewRotation(deltaRadians: Double) {
+    /// Live rotation preview about a world axis through the object center,
+    /// snapped to `rotationSnapDegrees`.
+    func previewRotation(axis: EngineAxis, deltaRadians: Double) {
         guard !isBusy, let base = manipulationBase else { return }
         let step = Self.rotationSnapDegrees * .pi / 180
-        var transform = base
-        transform.rotationZ = Self.normalizedAngle(
-            base.rotationZ + (deltaRadians / step).rounded() * step
-        )
-        previewTransform = transform
+        let snapped = (deltaRadians / step).rounded() * step
+        let origin = EngineMatrix.origin(base)
+        previewMatrix = EngineMatrix.translation(origin)
+            * EngineMatrix.rotation(axis, radians: Float(snapped))
+            * EngineMatrix.translation(-origin)
+            * base
+        pending = .rotate(axis, snapped)
         presentationRevision += 1
     }
 
-    /// Live uniform-scale preview: base scale × gesture factor, kept on bed.
+    /// Live uniform-scale preview (local axes, about the object center).
     func previewScale(factor: Double) {
         guard !isBusy, let base = manipulationBase, factor.isFinite, factor > 0 else { return }
-        var transform = base
-        transform.scale = min(max(base.scale * factor, 0.01), 100)
-        previewTransform = onBed(transform)
+        let clamped = min(max(factor, 0.01), 100)
+        previewMatrix = base * EngineMatrix.scale(SIMD3(repeating: Float(clamped)))
+        pending = .scale(clamped)
         presentationRevision += 1
     }
 
-    /// Numeric entry (Object manipulation panel): commits immediately.
-    func setSelectedTransform(_ transform: InstanceTransform) async {
-        guard !isBusy else {
-            status.report(.document, "transform blocked: document is busy")
+    func commitSelectedTransform() async {
+        let gesture = pending
+        let previewed = previewMatrix
+        pending = nil
+        manipulationBase = nil
+        guard let selection,
+              let authoritative = selectedAuthoritativeTransform,
+              let authoritativeMatrix = selectedAuthoritativeMatrix,
+              let gesture else {
+            clearPreview()
             return
         }
-        var normalized = transform
-        normalized.rotationZ = Self.normalizedAngle(transform.rotationZ)
-        previewTransform = onBed(normalized)
+        switch gesture {
+        case .move:
+            guard let previewed else { clearPreview(); return }
+            let delta = EngineMatrix.origin(previewed) - EngineMatrix.origin(authoritativeMatrix)
+            var moved = authoritative
+            moved.offsetX += Double(delta.x)
+            moved.offsetY += Double(delta.y)
+            await setSelectedTransform(moved)
+        case .rotate(let axis, let radians):
+            guard radians != 0 else { clearPreview(); return }
+            _ = await applyMutation(
+                .rotate(objectID: selection.objectID, instanceID: selection.instanceID,
+                        axis: axis, radians: radians),
+                operation: "rotate"
+            )
+        case .scale(let factor):
+            var scaled = authoritative
+            scaled.scaleX *= factor
+            scaled.scaleY *= factor
+            scaled.scaleZ *= factor
+            await setSelectedTransform(scaled)
+        }
+    }
+
+    /// Absolute transform (numeric panels). The engine rests it on the bed.
+    func setSelectedTransform(_ transform: InstanceTransform) async {
+        guard let selection else { return }
+        guard transform.isValid else {
+            status.report(.document, failure: .invariant(
+                operation: "set transform",
+                diagnostic: "transform contains a non-finite value or non-positive scale"
+            ))
+            return
+        }
+        _ = await applyMutation(
+            .setTransform(objectID: selection.objectID, instanceID: selection.instanceID,
+                          transform: transform),
+            operation: "transform"
+        )
+    }
+
+    /// Incremental world-axis rotation (rotate panel ± steps): the engine
+    /// composes it, so repeated steps wrap continuously through 360°.
+    func rotateSelected(axis: EngineAxis, degrees: Double) async {
+        guard let selection else { return }
+        _ = await applyMutation(
+            .rotate(objectID: selection.objectID, instanceID: selection.instanceID,
+                    axis: axis, radians: degrees * .pi / 180),
+            operation: "rotate"
+        )
+    }
+
+    func resetRotation() async {
+        guard var transform = selectedAuthoritativeTransform else { return }
+        transform.rotationX = 0
+        transform.rotationY = 0
+        transform.rotationZ = 0
+        await setSelectedTransform(transform)
+    }
+
+    private func clearPreview() {
+        previewMatrix = nil
         presentationRevision += 1
-        await commitSelectedTransform()
-    }
-
-    /// Keeps the instance resting on the bed: meshes are centered on import
-    /// and only z-rotation is supported, so the lowest point is the snapshot
-    /// bound's min z scaled — engine truth, no client geometry.
-    private func onBed(_ transform: InstanceTransform) -> InstanceTransform {
-        guard let selection,
-              let object = scene?.object(id: selection.objectID) else { return transform }
-        var lifted = transform
-        lifted.offsetZ = -Double(object.mesh.bounds.minimum.z) * transform.scale
-        return lifted
-    }
-
-    private static func normalizedAngle(_ radians: Double) -> Double {
-        atan2(sin(radians), cos(radians))
     }
 
     func beginSlicing() -> SliceInput? {
@@ -347,7 +382,7 @@ final class DocumentStore {
             install(mutation.snapshot)
             return mutation
         case .failure(let failure):
-            previewTransform = nil
+            previewMatrix = nil
             presentationRevision += 1
             status.report(.document, failure: failure)
             return nil
@@ -358,7 +393,7 @@ final class DocumentStore {
         if let current = scene,
            current.documentID == authoritativeScene.documentID,
            authoritativeScene.revision < current.revision {
-            previewTransform = nil
+            previewMatrix = nil
             presentationRevision += 1
             status.report(
                 .document,
@@ -370,7 +405,7 @@ final class DocumentStore {
             return
         }
         scene = authoritativeScene
-        previewTransform = nil
+        previewMatrix = nil
         if let selection,
            authoritativeScene.instance(
                objectID: selection.objectID,

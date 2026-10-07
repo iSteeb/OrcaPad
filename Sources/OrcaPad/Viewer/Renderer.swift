@@ -225,7 +225,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         bed: EngineBed,
         selectedObjectID: ObjectID?,
         selectedInstanceID: InstanceID?,
-        previewTransform: InstanceTransform?
+        previewMatrix: simd_float4x4?
     ) throws {
         if bed != self.bed {
             buildScene(for: bed)
@@ -248,9 +248,9 @@ final class Renderer: NSObject, MTKViewDelegate {
                 return InstanceDraw(
                     instanceID: instance.id,
                     model: CoordinateMapper.modelMatrix(
-                        transform: usesPreview
-                            ? previewTransform ?? instance.transform
-                            : instance.transform,
+                        engineMatrix: usesPreview
+                            ? previewMatrix ?? EngineMatrix.float(instance.matrix)
+                            : EngineMatrix.float(instance.matrix),
                         enginePivot: sceneObject.mesh.pivot,
                         bedCenter: bed.center
                     ),
@@ -498,8 +498,12 @@ final class Renderer: NSObject, MTKViewDelegate {
     // MARK: Gizmos (selected instance manipulation feedback)
 
     private(set) var gizmoMode: GizmoMode = .move
+    private(set) var rotationAxis: EngineAxis = .z
 
-    func setGizmoMode(_ mode: GizmoMode) { gizmoMode = mode }
+    func setGizmo(mode: GizmoMode, rotationAxis: EngineAxis) {
+        gizmoMode = mode
+        self.rotationAxis = rotationAxis
+    }
 
     /// Geometry of the selected instance's gizmo in viewer space: center on
     /// the bed plane, ring radius, current rotation direction, and model.
@@ -534,11 +538,11 @@ final class Renderer: NSObject, MTKViewDelegate {
             let scale = simd_length(column0)
             let origin = model * SIMD4<Float>(0, 0, 0, 1)
             let extent = object.bboxMax - object.bboxMin
-            let halfDiagonal = 0.5 * simd_length(SIMD2(extent.x, extent.z)) * scale
+            let halfDiagonal = 0.5 * simd_length(extent) * scale
             let flat = SIMD3(column0.x, 0, column0.z)
             let direction = simd_length(flat) > 1e-6 ? simd_normalize(flat) : SIMD3(1, 0, 0)
             return SelectedGizmo(
-                center: SIMD3(origin.x, 0.15, origin.z),
+                center: SIMD3(origin.x, origin.y, origin.z),
                 radius: halfDiagonal + 4,
                 rotationDirection: direction,
                 model: model,
@@ -554,12 +558,14 @@ final class Renderer: NSObject, MTKViewDelegate {
         let accent = SIMD4<Float>(0.16, 0.80, 0.95, 1)
         switch gizmoMode {
         case .move:
-            // Engine +X → viewer +X (red); engine +Y → viewer -Z (green).
+            // Engine +X → viewer +X (red); engine +Y → viewer -Z (green),
+            // drawn on the bed plane under the object.
             let red = SIMD4<Float>(0.95, 0.30, 0.25, 1)
             let green = SIMD4<Float>(0.35, 0.85, 0.35, 1)
+            let bedCenter = SIMD3(gizmo.center.x, 0.15, gizmo.center.z)
             for (axis, color) in [(SIMD3<Float>(1, 0, 0), red), (SIMD3<Float>(0, 0, -1), green)] {
-                let tip = gizmo.center + axis * gizmo.radius
-                let tail = gizmo.center - axis * gizmo.radius
+                let tip = bedCenter + axis * gizmo.radius
+                let tail = bedCenter - axis * gizmo.radius
                 let side = SIMD3(-axis.z, 0, axis.x) * 3
                 vertices += [
                     VertexPC(position: tail, color: color), VertexPC(position: tip, color: color),
@@ -568,16 +574,38 @@ final class Renderer: NSObject, MTKViewDelegate {
                 ]
             }
         case .rotate:
+            // Ring in the plane perpendicular to the selected world axis,
+            // colored like desktop (X red, Y green, Z blue).
+            let axis = CoordinateMapper.viewerAxis(rotationAxis)
+            let (u, v): (SIMD3<Float>, SIMD3<Float>) = {
+                switch rotationAxis {
+                case .x: return (SIMD3(0, 1, 0), SIMD3(0, 0, 1))
+                case .y: return (SIMD3(1, 0, 0), SIMD3(0, 1, 0))
+                case .z: return (SIMD3(1, 0, 0), SIMD3(0, 0, 1))
+                }
+            }()
+            let color: SIMD4<Float> = {
+                switch rotationAxis {
+                case .x: return SIMD4(0.95, 0.30, 0.25, 1)
+                case .y: return SIMD4(0.35, 0.85, 0.35, 1)
+                case .z: return SIMD4(0.30, 0.55, 1.00, 1)
+                }
+            }()
             let segments = 48
             for index in 0..<segments {
                 let a0 = Float(index) / Float(segments) * 2 * .pi
                 let a1 = Float(index + 1) / Float(segments) * 2 * .pi
-                vertices.append(VertexPC(position: gizmo.center + SIMD3(cos(a0), 0, sin(a0)) * gizmo.radius, color: accent))
-                vertices.append(VertexPC(position: gizmo.center + SIMD3(cos(a1), 0, sin(a1)) * gizmo.radius, color: accent))
+                vertices.append(VertexPC(position: gizmo.center + (u * cos(a0) + v * sin(a0)) * gizmo.radius, color: color))
+                vertices.append(VertexPC(position: gizmo.center + (u * cos(a1) + v * sin(a1)) * gizmo.radius, color: color))
             }
-            let white = SIMD4<Float>(1, 1, 1, 1)
-            vertices.append(VertexPC(position: gizmo.center, color: white))
-            vertices.append(VertexPC(position: gizmo.center + gizmo.rotationDirection * gizmo.radius, color: white))
+            // Axis line through the center so the rotation axis is explicit.
+            vertices.append(VertexPC(position: gizmo.center - axis * gizmo.radius * 0.6, color: color))
+            vertices.append(VertexPC(position: gizmo.center + axis * gizmo.radius * 0.6, color: color))
+            if rotationAxis == .z {
+                let white = SIMD4<Float>(1, 1, 1, 1)
+                vertices.append(VertexPC(position: gizmo.center, color: white))
+                vertices.append(VertexPC(position: gizmo.center + gizmo.rotationDirection * gizmo.radius, color: white))
+            }
         case .scale:
             let lo = gizmo.localMin, hi = gizmo.localMax
             let corners: [SIMD3<Float>] = [

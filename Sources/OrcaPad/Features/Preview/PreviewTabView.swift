@@ -69,23 +69,36 @@ struct PreviewTabView: View {
             )
             .ignoresSafeArea()
 
-            HStack(alignment: .top) {
+            // Left dock (Plate-style): scheme, travel, legend, framing.
+            HStack(alignment: .top, spacing: 10) {
+                PreviewDock(
+                    colorMode: $store.colorMode,
+                    showTravel: $store.showTravel,
+                    showLegend: $showLegend,
+                    onFrame: { frameRequest += 1 }
+                )
+                if showLegend { legend }
                 Spacer()
-                VStack(alignment: .trailing, spacing: 12) {
-                    if showLegend { legend }
-                    LayerRangeSlider(
-                        lower: store.lowerLayer,
-                        upper: store.upperLayer,
-                        maximum: max(store.layerCount - 1, 0),
-                        label: layerLabel,
-                        onChange: { store.setLayerRange(lower: $0, upper: $1) }
-                    )
-                    .frame(width: 44)
-                    .frame(maxHeight: .infinity)
-                }
-                .padding(.trailing, 12)
-                .padding(.top, 70)
             }
+            .padding(.leading, 12)
+            .padding(.top, 60)
+            .padding(.bottom, 110)
+
+            // Right: desktop-style vertical layer range slider.
+            HStack {
+                Spacer()
+                LayerRangeSlider(
+                    lower: store.lowerLayer,
+                    upper: store.upperLayer,
+                    maximum: max(store.layerCount - 1, 0),
+                    label: layerLabel,
+                    onChange: { store.setLayerRange(lower: $0, upper: $1) }
+                )
+                .frame(width: 44)
+                .frame(maxHeight: .infinity)
+                .padding(.trailing, 12)
+            }
+            .padding(.top, 70)
             .padding(.bottom, 110)
 
             VStack {
@@ -103,55 +116,24 @@ struct PreviewTabView: View {
     // MARK: Bottom panel: move scrubber + scheme controls
 
     private var bottomPanel: some View {
-        VStack(spacing: 8) {
-            HStack(spacing: 12) {
-                Menu {
-                    Picker("Color scheme", selection: $store.colorMode) {
-                        ForEach(ToolpathColorMode.allCases) { mode in
-                            Text(mode.rawValue).tag(mode)
-                        }
-                    }
-                } label: {
-                    Label(store.colorMode.rawValue, systemImage: "paintpalette")
-                }
-                Toggle(isOn: $store.showTravel) {
-                    Label("Travel", systemImage: "arrow.triangle.swap")
-                }
-                .toggleStyle(.button)
-                Button {
-                    showLegend.toggle()
-                } label: {
-                    Label("Legend", systemImage: showLegend ? "list.bullet.rectangle.fill" : "list.bullet.rectangle")
-                }
-                Button {
-                    frameRequest += 1
-                } label: {
-                    Label("Frame", systemImage: "viewfinder")
-                }
-                Spacer()
+        HStack(spacing: 10) {
+            Image(systemName: "point.topleft.down.to.point.bottomright.curvepath")
+                .foregroundStyle(.secondary)
+            Slider(
+                value: Binding(
+                    get: { Double(store.topLayerProgress) },
+                    set: { store.setTopLayerProgress(Int($0.rounded())) }
+                ),
+                in: 0...Double(max(store.topLayerSegmentCount, 1)),
+                step: 1
+            )
+            VStack(alignment: .trailing, spacing: 1) {
+                Text("\(store.topLayerProgress)/\(store.topLayerSegmentCount) moves")
                 Text("~\(Int(store.remainingSeconds / 60)) min after layer \(store.upperLayer + 1)")
-                    .font(.caption.monospaced())
-                    .foregroundStyle(.secondary)
             }
-            .labelStyle(.titleAndIcon)
-            .font(.caption)
-
-            HStack(spacing: 10) {
-                Image(systemName: "point.topleft.down.to.point.bottomright.curvepath")
-                    .foregroundStyle(.secondary)
-                Slider(
-                    value: Binding(
-                        get: { Double(store.topLayerProgress) },
-                        set: { store.setTopLayerProgress(Int($0.rounded())) }
-                    ),
-                    in: 0...Double(max(store.topLayerSegmentCount, 1)),
-                    step: 1
-                )
-                Text("\(store.topLayerProgress)/\(store.topLayerSegmentCount)")
-                    .font(.caption2.monospaced())
-                    .foregroundStyle(.secondary)
-                    .frame(minWidth: 70, alignment: .trailing)
-            }
+            .font(.caption2.monospaced())
+            .foregroundStyle(.secondary)
+            .frame(minWidth: 150, alignment: .trailing)
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
@@ -236,5 +218,70 @@ struct PreviewTabView: View {
 
     private func swatch(_ color: SIMD4<Float>) -> Color {
         Color(red: Double(color.x), green: Double(color.y), blue: Double(color.z))
+    }
+}
+
+/// Left dock for the Preview tab (mirrors the Plate gizmo toolbar style).
+private struct PreviewDock: View {
+    @Binding var colorMode: ToolpathColorMode
+    @Binding var showTravel: Bool
+    @Binding var showLegend: Bool
+    let onFrame: () -> Void
+
+    var body: some View {
+        VStack(spacing: 6) {
+            Menu {
+                Picker("Color scheme", selection: $colorMode) {
+                    ForEach(ToolpathColorMode.allCases) { mode in
+                        Text(mode.rawValue).tag(mode)
+                    }
+                }
+            } label: {
+                dockLabel(symbol: "paintpalette", label: shortName(colorMode), active: true)
+            }
+            Button { showTravel.toggle() } label: {
+                dockLabel(symbol: "arrow.triangle.swap", label: "Travel", active: showTravel)
+            }
+            .buttonStyle(.plain)
+            Button { showLegend.toggle() } label: {
+                dockLabel(symbol: "list.bullet.rectangle", label: "Legend", active: showLegend)
+            }
+            .buttonStyle(.plain)
+            Divider().frame(width: 32)
+            Button(action: onFrame) {
+                dockLabel(symbol: "viewfinder", label: "Frame", active: false)
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.vertical, 10)
+        .padding(.horizontal, 6)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 18))
+    }
+
+    private func shortName(_ mode: ToolpathColorMode) -> String {
+        switch mode {
+        case .feature: return "Type"
+        case .speed: return "Speed"
+        case .layerHeight: return "Height"
+        case .lineWidth: return "Width"
+        case .fanSpeed: return "Fan"
+        case .temperature: return "Temp"
+        }
+    }
+
+    private func dockLabel(symbol: String, label: String, active: Bool) -> some View {
+        VStack(spacing: 2) {
+            Image(systemName: symbol)
+                .font(.system(size: 18, weight: .medium))
+            Text(label)
+                .font(.system(size: 9))
+        }
+        .frame(width: 52, height: 44)
+        .foregroundStyle(active ? Color.accentColor : Color.primary)
+        .background(
+            active ? Color.accentColor.opacity(0.18) : Color.clear,
+            in: RoundedRectangle(cornerRadius: 10)
+        )
+        .contentShape(Rectangle())
     }
 }
