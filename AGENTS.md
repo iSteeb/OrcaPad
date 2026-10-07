@@ -84,8 +84,11 @@ contract test literal in the same commit)**
   not thread-safe); a handle must not be freed concurrently with a call.
 - The process data directory is initialize-once; a second, different path is a
   typed configuration failure.
-- Supported instance transforms are unmirrored z-rotation with uniform scale;
-  anything else is a typed unsupported-capability rejection.
+- Instance transforms: engine XYZ Euler rotation + positive per-axis scale
+  (ABI v7); mirroring is not supported yet (typed rejection).
+- Document mutations are transactional (a failure leaves the document
+  unchanged) and each success is one labelled undo step; undo/redo restore
+  the same stable IDs and still advance the revision (ABI v18).
 - Presets: entries expose engine vendor + `is_compatible`; overrides are
   written to the edited preset of a kind (`full_config()` merges edited
   presets, so slices consume them); edited vs system dumps detect changes.

@@ -41,6 +41,10 @@
 
 ## PROGRESS
 
+- [2026-10-07 CODE][TOOL] ABI v18: transactional mutations (OrcapadMutation),
+  64-step undo/redo with labels in the snapshot, rename, delete all,
+  session-unique mesh revisions; Plate undo/redo buttons (cmd-Z), object
+  list rename + delete all. Host tests 50,770 PASS. Parity 24%.
 - [2026-10-07 CODE][TOOL] Parity checker (`2974b83`): 551 desktop items, 152
   features, PARITY.md generated + gated. ABI v17: physical printer
   print_host_webui; Device tab = printer web UI (PrinterWebSession/WKWebView)

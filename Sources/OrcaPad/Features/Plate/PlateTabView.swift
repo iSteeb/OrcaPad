@@ -17,6 +17,9 @@ struct PlateTabView: View {
     @State private var objectsPresented = false
     @State private var gizmoMode: GizmoMode = .move
     @State private var rotationAxis: EngineAxis = .z
+    @State private var renameTarget: ObjectID?
+    @State private var renameText = ""
+    @State private var deleteAllConfirmation = false
 
     private var document: DocumentStore { environment.document }
 
@@ -65,8 +68,8 @@ struct PlateTabView: View {
                         rotationAxis: $rotationAxis,
                         isBusy: document.isBusy,
                         actions: ManipulationActions(
-                            setTransform: { newTransform in
-                                Task { await document.setSelectedTransform(newTransform) }
+                            setTransform: { newTransform, label in
+                                Task { await document.setSelectedTransform(newTransform, label: label) }
                             },
                             rotate: { axis, degrees in
                                 Task { await document.rotateSelected(axis: axis, degrees: degrees) }
@@ -167,6 +170,25 @@ struct PlateTabView: View {
 
     private var fileActions: some View {
         HStack(spacing: 4) {
+            PlateActionButton(
+                symbol: "arrow.uturn.backward",
+                label: "Undo",
+                disabled: document.history?.canUndo != true || document.isBusy
+            ) {
+                Task { await document.undo() }
+            }
+            .keyboardShortcut("z", modifiers: .command)
+            .accessibilityHint(document.history.map { "Undo \($0.undoLabel)" } ?? "")
+            PlateActionButton(
+                symbol: "arrow.uturn.forward",
+                label: "Redo",
+                disabled: document.history?.canRedo != true || document.isBusy
+            ) {
+                Task { await document.redo() }
+            }
+            .keyboardShortcut("z", modifiers: [.command, .shift])
+            .accessibilityHint(document.history.map { "Redo \($0.redoLabel)" } ?? "")
+            Divider().frame(height: 28)
             Menu {
                 Button {
                     importMode = .model
@@ -304,6 +326,14 @@ struct PlateTabView: View {
                                 }
                                 Spacer()
                                 Button {
+                                    renameText = object.name
+                                    renameTarget = object.id
+                                } label: {
+                                    Image(systemName: "pencil")
+                                }
+                                .buttonStyle(.borderless)
+                                .accessibilityLabel("Rename \(object.name)")
+                                Button {
                                     Task { await document.addInstance(to: object.id) }
                                 } label: {
                                     Image(systemName: "plus.square.on.square")
@@ -337,6 +367,39 @@ struct PlateTabView: View {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Done") { objectsPresented = false }
                 }
+                ToolbarItem(placement: .destructiveAction) {
+                    Button(role: .destructive) {
+                        deleteAllConfirmation = true
+                    } label: {
+                        Label("Delete all", systemImage: "trash.slash")
+                    }
+                    .disabled(objects.isEmpty || document.isBusy)
+                }
+            }
+            .alert("Rename object", isPresented: Binding(
+                get: { renameTarget != nil },
+                set: { if !$0 { renameTarget = nil } }
+            )) {
+                TextField("Name", text: $renameText)
+                Button("Rename") {
+                    if let target = renameTarget {
+                        let name = renameText
+                        Task { await document.rename(target, to: name) }
+                    }
+                    renameTarget = nil
+                }
+                Button("Cancel", role: .cancel) { renameTarget = nil }
+            }
+            .confirmationDialog(
+                "Delete all objects?",
+                isPresented: $deleteAllConfirmation,
+                titleVisibility: .visible
+            ) {
+                Button("Delete all", role: .destructive) {
+                    Task { await document.deleteAll() }
+                }
+            } message: {
+                Text("Removes every object from the plate. You can undo this.")
             }
         }
     }
@@ -419,7 +482,8 @@ private struct PanelHeader {
 }
 
 private struct ManipulationActions {
-    let setTransform: (InstanceTransform) -> Void
+    /// Absolute transform + the undo-step label ("Move", "Scale", ...).
+    let setTransform: (InstanceTransform, String) -> Void
     let rotate: (EngineAxis, Double) -> Void
     let resetRotation: () -> Void
 }
@@ -470,16 +534,16 @@ private struct ManipulationPanel: View {
     private var movePanel: some View {
         HStack(alignment: .bottom, spacing: 14) {
             NumericField(label: "X", unit: "mm", value: transform.offsetX, digits: 2) { value in
-                var updated = transform; updated.offsetX = value; actions.setTransform(updated)
+                var updated = transform; updated.offsetX = value; actions.setTransform(updated, "Move")
             }
             NumericField(label: "Y", unit: "mm", value: transform.offsetY, digits: 2) { value in
-                var updated = transform; updated.offsetY = value; actions.setTransform(updated)
+                var updated = transform; updated.offsetY = value; actions.setTransform(updated, "Move")
             }
             Button {
                 var updated = transform
                 updated.offsetX = bedCenter.x
                 updated.offsetY = bedCenter.y
-                actions.setTransform(updated)
+                actions.setTransform(updated, "Center")
             } label: {
                 Label("Center on bed", systemImage: "scope")
             }
@@ -622,7 +686,7 @@ private struct ScalePanel: View {
                 Button("100%") {
                     var updated = transform
                     updated.scaleX = 1; updated.scaleY = 1; updated.scaleZ = 1
-                    actions.setTransform(updated)
+                    actions.setTransform(updated, "Reset scale")
                 }
                 .buttonStyle(.bordered)
                 .font(.caption)
@@ -676,7 +740,7 @@ private struct ScalePanel: View {
             case .z: updated.scaleZ = newScale
             }
         }
-        actions.setTransform(updated)
+        actions.setTransform(updated, "Scale")
     }
 }
 

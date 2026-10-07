@@ -49,6 +49,8 @@ final class DocumentStore {
 
     var isReady: Bool { plater != nil && scene != nil }
     var isBusy: Bool { isMutating || isSlicing }
+    /// Undo/redo state of the authoritative document.
+    var history: DocumentHistory? { scene?.history }
 
     func bootstrap() async {
         guard !isReady, !isBootstrapping else { return }
@@ -206,6 +208,36 @@ final class DocumentStore {
         )
     }
 
+    // MARK: History / object list (desktop Edit menu, object list)
+
+    func undo() async {
+        guard history?.canUndo == true else { return }
+        _ = await applyMutation(.undo, operation: "undo")
+    }
+
+    func redo() async {
+        guard history?.canRedo == true else { return }
+        _ = await applyMutation(.redo, operation: "redo")
+    }
+
+    func rename(_ objectID: ObjectID, to name: String) async {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            status.report(.document, failure: .invariant(
+                operation: "rename object", diagnostic: "the name is empty"))
+            return
+        }
+        _ = await applyMutation(.rename(objectID: objectID, name: trimmed), operation: "rename object")
+    }
+
+    /// Desktop "Delete all" (one undo step).
+    func deleteAll() async {
+        guard scene?.objects.isEmpty == false else { return }
+        if await applyMutation(.clear, operation: "delete all") != nil {
+            selection = nil
+        }
+    }
+
     func deleteObjects(_ objectIDs: [ObjectID]) async {
         guard let plater, !isBusy else {
             status.report(.document, "delete objects blocked: document is busy")
@@ -359,7 +391,7 @@ final class DocumentStore {
             var moved = authoritative
             moved.offsetX += Double(delta.x)
             moved.offsetY += Double(delta.y)
-            await setSelectedTransform(moved)
+            await setSelectedTransform(moved, label: "Move")
         case .rotate(let axis, let radians):
             guard radians != 0 else { clearPreview(); return }
             _ = await applyMutation(
@@ -372,12 +404,13 @@ final class DocumentStore {
             scaled.scaleX *= factor
             scaled.scaleY *= factor
             scaled.scaleZ *= factor
-            await setSelectedTransform(scaled)
+            await setSelectedTransform(scaled, label: "Scale")
         }
     }
 
     /// Absolute transform (numeric panels). The engine rests it on the bed.
-    func setSelectedTransform(_ transform: InstanceTransform) async {
+    /// `label` names the undo step.
+    func setSelectedTransform(_ transform: InstanceTransform, label: String) async {
         guard let selection else { return }
         guard transform.isValid else {
             status.report(.document, failure: .invariant(
@@ -388,7 +421,7 @@ final class DocumentStore {
         }
         _ = await applyMutation(
             .setTransform(objectID: selection.objectID, instanceID: selection.instanceID,
-                          transform: transform),
+                          transform: transform, label: label),
             operation: "transform"
         )
     }
@@ -484,7 +517,7 @@ final class DocumentStore {
         transform.rotationX = 0
         transform.rotationY = 0
         transform.rotationZ = 0
-        await setSelectedTransform(transform)
+        await setSelectedTransform(transform, label: "Reset rotation")
     }
 
     private func clearPreview() {

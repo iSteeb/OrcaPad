@@ -273,7 +273,166 @@ static void test_md5_shim() {
 
 static void test_abi_version() {
     CHECK_EQ(orca_bridge_abi_version(), ORCA_BRIDGE_ABI_VERSION);
-    CHECK_EQ(ORCA_BRIDGE_ABI_VERSION, 17);
+    CHECK_EQ(ORCA_BRIDGE_ABI_VERSION, 18);
+}
+
+static std::string snapshot_label(const orca_owned_string &label) {
+    return label.data ? std::string(label.data, static_cast<size_t>(label.length)) : std::string();
+}
+
+// ABI v18: transactional mutations, undo/redo with stable IDs, rename,
+// delete all, per-session-unique mesh revisions.
+static void test_history(const std::string &dir) {
+    orca_plater *plater = nullptr;
+    GUARD(g0, orca_plater_new(&plater));
+    expect_ok(g0, "plater_new");
+    orca_revision revision = 0;
+
+    // empty history: typed NOT_FOUND, revision untouched
+    GUARD(e1, orca_plater_undo(plater, &revision));
+    expect_code(e1, ORCA_STATUS_NOT_FOUND, "undo empty");
+    GUARD(e2, orca_plater_redo(plater, &revision));
+    expect_code(e2, ORCA_STATUS_NOT_FOUND, "redo empty");
+    GUARD(e3, orca_plater_undo(nullptr, &revision));
+    expect_code(e3, ORCA_STATUS_INVALID_HANDLE, "undo null plater");
+    GUARD(e4, orca_plater_clear(plater, &revision));
+    expect_code(e4, ORCA_STATUS_INVALID_MODEL, "clear empty");
+    CHECK_EQ(snapshot_revision(plater), 0);
+
+    const std::string cube = write_cube_stl(dir, "history_cube.stl");
+    orca_object_id object_id = 0;
+    GUARD(g1, import_one(plater, cube.c_str(), 100, 100, &object_id, &revision));
+    expect_ok(g1, "import");
+    orca_scene_snapshot snap = take_snapshot(plater);
+    CHECK_EQ(snap.undo_count, 1u);
+    CHECK_EQ(snap.redo_count, 0u);
+    CHECK(snapshot_label(snap.undo_label) == "Import");
+    CHECK(snapshot_label(snap.redo_label).empty());
+    const orca_instance_id instance_id = snap.objects[0].instances[0].id;
+    const orca_instance_transform original = snap.objects[0].instances[0].transform;
+    const uint64_t first_mesh_revision = snap.objects[0].mesh_revision;
+    orca_scene_snapshot_dispose(&snap);
+
+    // labelled transform -> undo restores it with the same IDs -> redo
+    orca_instance_transform moved = original;
+    moved.offset_x += 25.0;
+    GUARD(g2, orca_plater_instance_set(plater, object_id, instance_id, &moved, "Move", &revision));
+    expect_ok(g2, "move");
+    snap = take_snapshot(plater);
+    CHECK_EQ(snap.undo_count, 2u);
+    CHECK(snapshot_label(snap.undo_label) == "Move");
+    orca_scene_snapshot_dispose(&snap);
+
+    const orca_revision before_undo = revision;
+    GUARD(g3, orca_plater_undo(plater, &revision));
+    expect_ok(g3, "undo move");
+    CHECK(revision > before_undo); // revisions advance, never rewind
+    snap = take_snapshot(plater);
+    CHECK_EQ(snap.revision, revision);
+    CHECK_EQ(snap.undo_count, 1u);
+    CHECK_EQ(snap.redo_count, 1u);
+    CHECK(snapshot_label(snap.redo_label) == "Move");
+    const orca_scene_object *restored = find_object(snap, object_id);
+    CHECK(restored != nullptr);
+    if (restored) {
+        CHECK_EQ(restored->instances[0].id, instance_id);
+        CHECK_NEAR(restored->instances[0].transform.offset_x, original.offset_x, 1e-9);
+        CHECK_EQ(restored->mesh_revision, first_mesh_revision);
+    }
+    orca_scene_snapshot_dispose(&snap);
+
+    GUARD(g4, orca_plater_redo(plater, &revision));
+    expect_ok(g4, "redo move");
+    snap = take_snapshot(plater);
+    CHECK_EQ(snap.undo_count, 2u);
+    CHECK_EQ(snap.redo_count, 0u);
+    restored = find_object(snap, object_id);
+    if (restored) CHECK_NEAR(restored->instances[0].transform.offset_x, original.offset_x + 25.0, 1e-9);
+    orca_scene_snapshot_dispose(&snap);
+
+    // a new mutation after undo drops the redo branch
+    GUARD(g5, orca_plater_undo(plater, &revision));
+    expect_ok(g5, "undo again");
+    GUARD(g6, orca_plater_instance_add(plater, object_id, nullptr, &revision));
+    expect_code(g6, ORCA_STATUS_INVALID_ARGUMENT, "add instance null out");
+    orca_instance_id added = 0;
+    GUARD(g7, orca_plater_instance_add(plater, object_id, &added, &revision));
+    expect_ok(g7, "add instance");
+    snap = take_snapshot(plater);
+    CHECK_EQ(snap.redo_count, 0u);
+    CHECK(snapshot_label(snap.undo_label) == "Add instance");
+    orca_scene_snapshot_dispose(&snap);
+
+    // failed mutation: no history step, document unchanged
+    GUARD(g8, orca_plater_instance_delete(plater, object_id, 0x7fffffff, &revision));
+    expect_code(g8, ORCA_STATUS_NOT_FOUND, "delete bogus instance");
+    snap = take_snapshot(plater);
+    CHECK_EQ(snap.undo_count, 2u);
+    CHECK_EQ(snap.objects[0].instance_count, 2);
+    orca_scene_snapshot_dispose(&snap);
+
+    // rename
+    GUARD(g9, orca_plater_object_rename(plater, object_id, "   ", &revision));
+    expect_code(g9, ORCA_STATUS_INVALID_ARGUMENT, "rename blank");
+    GUARD(g10, orca_plater_object_rename(plater, object_id, nullptr, &revision));
+    expect_code(g10, ORCA_STATUS_INVALID_ARGUMENT, "rename null");
+    GUARD(g11, orca_plater_object_rename(plater, 0x7fffffff, "x", &revision));
+    expect_code(g11, ORCA_STATUS_NOT_FOUND, "rename bogus object");
+    snap = take_snapshot(plater);
+    const std::string original_name = snapshot_label(snap.objects[0].name);
+    CHECK(!original_name.empty());
+    orca_scene_snapshot_dispose(&snap);
+    GUARD(g12, orca_plater_object_rename(plater, object_id, "Bracket v2", &revision));
+    expect_ok(g12, "rename");
+    snap = take_snapshot(plater);
+    CHECK(snapshot_label(snap.objects[0].name) == "Bracket v2");
+    CHECK(snapshot_label(snap.undo_label) == "Rename");
+    orca_scene_snapshot_dispose(&snap);
+    GUARD(g13, orca_plater_undo(plater, &revision));
+    expect_ok(g13, "undo rename");
+    snap = take_snapshot(plater);
+    CHECK(snapshot_label(snap.objects[0].name) == original_name);
+    orca_scene_snapshot_dispose(&snap);
+
+    // delete all + undo brings the same IDs and mesh content back
+    GUARD(g14, orca_plater_clear(plater, &revision));
+    expect_ok(g14, "clear");
+    snap = take_snapshot(plater);
+    CHECK_EQ(snap.object_count, 0);
+    CHECK(snapshot_label(snap.undo_label) == "Delete all");
+    orca_scene_snapshot_dispose(&snap);
+    GUARD(g15, orca_plater_undo(plater, &revision));
+    expect_ok(g15, "undo clear");
+    snap = take_snapshot(plater);
+    CHECK_EQ(snap.object_count, 1);
+    restored = find_object(snap, object_id);
+    CHECK(restored != nullptr);
+    if (restored) {
+        CHECK_EQ(restored->instance_count, 2);
+        CHECK_EQ(restored->mesh_revision, first_mesh_revision);
+    }
+    orca_scene_snapshot_dispose(&snap);
+
+    // a second import gets a NEW mesh revision (session-unique)
+    orca_object_id second_id = 0;
+    GUARD(g16, import_one(plater, cube.c_str(), 50, 50, &second_id, &revision));
+    expect_ok(g16, "second import");
+    snap = take_snapshot(plater);
+    const orca_scene_object *second = find_object(snap, second_id);
+    CHECK(second != nullptr);
+    if (second) CHECK(second->mesh_revision != first_mesh_revision);
+    orca_scene_snapshot_dispose(&snap);
+
+    // bounded history: 64 steps
+    for (int step = 0; step < 70; ++step) {
+        GUARD(gs, orca_plater_object_rename(plater, object_id,
+                                            ("name " + std::to_string(step)).c_str(), &revision));
+        expect_ok(gs, "rename loop");
+    }
+    snap = take_snapshot(plater);
+    CHECK_EQ(snap.undo_count, 64u);
+    orca_scene_snapshot_dispose(&snap);
+    orca_plater_free(plater);
 }
 
 static void test_document_lifecycle(const std::string &dir) {
@@ -419,7 +578,7 @@ static void test_stable_ids_and_revisions(const std::string &dir) {
         moved.offset_x = original_offset_x + 5.0;
         orca_revision revision2 = 0;
         GUARD(g2, orca_plater_instance_set(plater, object_id, instance_id,
-                                           &moved, &revision2));
+                                           &moved, nullptr, &revision2));
         expect_ok(g2, "set transform");
         CHECK_EQ(revision2, 2);
 
@@ -534,31 +693,31 @@ static void test_not_found_and_validation(const std::string &dir) {
                                           0x7fffffffffff, &out_revision));
     expect_code(g5, ORCA_STATUS_NOT_FOUND, "delete bogus instance");
     GUARD(g6, orca_plater_instance_set(plater, object_id, 0x7fffffffffff,
-                                       &valid, &out_revision));
+                                       &valid, nullptr, &out_revision));
     expect_code(g6, ORCA_STATUS_NOT_FOUND, "set transform bogus instance");
 
     // INVALID ARGUMENT family: bad transforms
     orca_instance_transform bad = valid;
     bad.offset_x = std::nan("");
-    GUARD(g7, orca_plater_instance_set(plater, object_id, instance, &bad,
+    GUARD(g7, orca_plater_instance_set(plater, object_id, instance, &bad, nullptr,
                                        &out_revision));
     expect_code(g7, ORCA_STATUS_INVALID_ARGUMENT, "set NaN offset");
     bad = valid;
     bad.scale_y = 0.0;
-    GUARD(g8, orca_plater_instance_set(plater, object_id, instance, &bad,
+    GUARD(g8, orca_plater_instance_set(plater, object_id, instance, &bad, nullptr,
                                        &out_revision));
     expect_code(g8, ORCA_STATUS_INVALID_ARGUMENT, "set zero scale");
     bad = valid;
     bad.scale_z = std::nan("");
-    GUARD(g9, orca_plater_instance_set(plater, object_id, instance, &bad,
+    GUARD(g9, orca_plater_instance_set(plater, object_id, instance, &bad, nullptr,
                                        &out_revision));
     expect_code(g9, ORCA_STATUS_INVALID_ARGUMENT, "set NaN scale");
     bad = valid;
     bad.rotation_z = HUGE_VAL;
-    GUARD(g10, orca_plater_instance_set(plater, object_id, instance, &bad,
+    GUARD(g10, orca_plater_instance_set(plater, object_id, instance, &bad, nullptr,
                                         &out_revision));
     expect_code(g10, ORCA_STATUS_INVALID_ARGUMENT, "set infinite rotation");
-    GUARD(g11, orca_plater_instance_set(plater, object_id, instance, nullptr,
+    GUARD(g11, orca_plater_instance_set(plater, object_id, instance, nullptr, nullptr,
                                         &out_revision));
     expect_code(g11, ORCA_STATUS_INVALID_ARGUMENT, "set null transform");
 
@@ -678,7 +837,7 @@ static void test_full_transforms(const std::string &dir) {
     // non-uniform scale: reported per axis, still resting on the bed
     t.scale_x = 2.0; t.scale_y = 1.0; t.scale_z = 0.5;
     t.offset_z = 50.0; // deliberately floating: the engine must re-rest it
-    GUARD(g7, orca_plater_instance_set(plater, object_id, instance, &t, &out));
+    GUARD(g7, orca_plater_instance_set(plater, object_id, instance, &t, nullptr, &out));
     expect_ok(g7, "set non-uniform scale");
     snap = take_snapshot(plater);
     const orca_scene_object &scaled = snap.objects[0];
@@ -692,7 +851,7 @@ static void test_full_transforms(const std::string &dir) {
     // absolute X/Y/Z rotation via set is accepted and reported back
     t.scale_x = t.scale_y = t.scale_z = 1.0;
     t.rotation_x = 0.3; t.rotation_y = -0.2; t.rotation_z = 1.1;
-    GUARD(g8, orca_plater_instance_set(plater, object_id, instance, &t, &out));
+    GUARD(g8, orca_plater_instance_set(plater, object_id, instance, &t, nullptr, &out));
     expect_ok(g8, "set absolute XYZ rotation");
     snap = take_snapshot(plater);
     CHECK_NEAR(snap.objects[0].instances[0].transform.rotation_x, 0.3, 1e-6);
@@ -736,7 +895,7 @@ static void test_snapshot_ownership(const std::string &dir) {
     GUARD(g2, orca_plater_instance_set(plater, object_id,
                                        object_a ? object_a->instances[0].id
                                                 : orca_instance_id(0),
-                                       &moved, &revision2));
+                                       &moved, nullptr, &revision2));
     expect_ok(g2, "set transform after copy");
 
     // copy B reflects the mutation; copy A is unchanged (deep copy)
@@ -789,7 +948,7 @@ static void test_engine_serialization(const std::string &dir) {
             t.offset_x += (id + 1) * 0.001 * i;
             orca_revision rev = 0;
             orca_result r = orca_plater_instance_set(
-                plater, object_id, instance, &t, &rev);
+                plater, object_id, instance, &t, nullptr, &rev);
             if (r.code != ORCA_STATUS_OK) ++failures;
             orca_result_dispose(&r);
         }
@@ -2144,6 +2303,7 @@ int main() {
     test_md5_shim();
     test_abi_version();
     test_document_lifecycle(dir);
+    test_history(dir);
     test_add_failures(dir);
     test_stable_ids_and_revisions(dir);
     test_not_found_and_validation(dir);

@@ -7,7 +7,7 @@ extern "C" {
 #endif
 
 /// Version of the C ABI contract in this header. Callers verify it at runtime.
-#define ORCA_BRIDGE_ABI_VERSION ((uint32_t)17)
+#define ORCA_BRIDGE_ABI_VERSION ((uint32_t)18)
 
 typedef int32_t orca_status_code;
 #define ORCA_STATUS_OK                     ((orca_status_code)0)
@@ -89,6 +89,13 @@ typedef struct {
     orca_revision revision;
     orca_scene_object *objects;
     int32_t object_count;
+    /// Undo/redo history at this revision (desktop Plater::undo/redo):
+    /// step counts and the label of the step each command would apply
+    /// (empty when the stack is empty).
+    uint32_t undo_count;
+    uint32_t redo_count;
+    orca_owned_string undo_label;
+    orca_owned_string redo_label;
 } orca_scene_snapshot;
 
 /// Opaque authoritative document session. Fallible engine operations are
@@ -100,6 +107,11 @@ orca_result orca_plater_new(orca_plater **out_plater);
 void orca_plater_free(orca_plater *plater);
 
 /// Every successful mutation advances and returns the document revision.
+/// Mutations are transactional: a failed mutation (typed failure or engine
+/// exception) leaves the document exactly as it was. Every successful
+/// mutation is one undo step (history bounded to 64 steps); opening a
+/// project starts a new history. Mesh revisions are unique per session, so
+/// (object id, mesh revision) identifies mesh content across undo/redo.
 /// Imports EVERY object of a model file through upstream
 /// `Model::read_from_file` (STL, OBJ, AMF, 3MF geometry — desktop "Import").
 /// Each mesh is centered via `center_around_origin()` with instance offsets
@@ -127,10 +139,13 @@ orca_result orca_plater_instance_delete(orca_plater *plater,
 /// Absolute transform. Like desktop manipulation, the instance is then
 /// rested on the bed (offset z adjusted so its exact transformed bounding
 /// box touches z = 0).
+/// `label` names the undo step ("Move", "Scale", ...); NULL or empty means
+/// "Transform".
 orca_result orca_plater_instance_set(orca_plater *plater,
                                      orca_object_id object_id,
                                      orca_instance_id instance_id,
                                      const orca_instance_transform *transform,
+                                     const char *label,
                                      orca_revision *out_revision);
 /// Incremental rotation about a WORLD axis (0 = X, 1 = Y, 2 = Z) through the
 /// instance origin (the object center after import centering), composed by
@@ -143,6 +158,18 @@ orca_result orca_plater_instance_rotate(orca_plater *plater,
                                         orca_revision *out_revision);
 orca_result orca_plater_ensure_on_bed(orca_plater *plater,
                                       orca_revision *out_revision);
+/// Desktop Edit > Undo / Redo: restores the previous / next history step
+/// (same stable IDs as when it was recorded) and advances the revision.
+/// ORCA_STATUS_NOT_FOUND when the respective stack is empty.
+orca_result orca_plater_undo(orca_plater *plater, orca_revision *out_revision);
+orca_result orca_plater_redo(orca_plater *plater, orca_revision *out_revision);
+/// Desktop object-list rename. Empty / whitespace-only names are
+/// ORCA_STATUS_INVALID_ARGUMENT.
+orca_result orca_plater_object_rename(orca_plater *plater, orca_object_id object_id,
+                                      const char *name, orca_revision *out_revision);
+/// Desktop "Delete all": removes every object (one undo step).
+/// ORCA_STATUS_INVALID_MODEL when the document is already empty.
+orca_result orca_plater_clear(orca_plater *plater, orca_revision *out_revision);
 
 /// Produces a deep copy at one authoritative document revision. The caller
 /// owns every nested allocation and must call orca_scene_snapshot_dispose().

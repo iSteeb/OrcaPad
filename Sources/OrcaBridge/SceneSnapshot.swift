@@ -169,20 +169,43 @@ public struct SceneObject: Identifiable, Sendable {
     }
 }
 
+/// Undo/redo availability at a revision (desktop Edit menu state).
+public struct DocumentHistory: Equatable, Sendable {
+    public let undoCount: Int
+    public let redoCount: Int
+    /// Label of the step Undo reverts ("" when there is none).
+    public let undoLabel: String
+    /// Label of the step Redo re-applies ("" when there is none).
+    public let redoLabel: String
+
+    public init(undoCount: Int, redoCount: Int, undoLabel: String, redoLabel: String) {
+        self.undoCount = undoCount
+        self.redoCount = redoCount
+        self.undoLabel = undoLabel
+        self.redoLabel = redoLabel
+    }
+
+    public var canUndo: Bool { undoCount > 0 }
+    public var canRedo: Bool { redoCount > 0 }
+}
+
 /// A coherent, immutable read of one authoritative C++ document revision.
 public struct SceneSnapshot: Sendable {
     public let documentID: DocumentID
     public let revision: DocumentRevision
     public let objects: [SceneObject]
+    public let history: DocumentHistory
 
     public init(
         documentID: DocumentID,
         revision: DocumentRevision,
-        objects: [SceneObject]
+        objects: [SceneObject],
+        history: DocumentHistory
     ) {
         self.documentID = documentID
         self.revision = revision
         self.objects = objects
+        self.history = history
     }
 
     public func object(id: ObjectID) -> SceneObject? {

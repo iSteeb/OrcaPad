@@ -9,6 +9,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
 #include <limits>
 #include <memory>
 #include <mutex>
@@ -889,11 +890,69 @@ orca_result orca_presets_config_dump(orca_presets *presets, int32_t kind,
 
 // --- plater session ------------------------------------------------------
 
+/// One undo/redo step: the whole document as it was (Model copies share
+/// meshes through shared_ptr and keep every ObjectID, so restoring a step
+/// brings back the same stable object/instance IDs).
+struct OrcapadHistoryStep {
+    std::string label;
+    Slic3r::Model model;
+    std::unordered_map<orca_object_id, uint64_t> mesh_revisions;
+};
+
 struct orca_plater {
     Slic3r::Model model;
     orca_revision revision = 0;
     std::unordered_map<orca_object_id, uint64_t> mesh_revisions;
+    /// Process-unique per plater: (object id, mesh revision) identifies mesh
+    /// CONTENT, also across undo/redo, so client caches never alias.
+    uint64_t next_mesh_revision = 1;
+    std::deque<OrcapadHistoryStep> undo;
+    std::deque<OrcapadHistoryStep> redo;
 };
+
+/// Desktop keeps a memory-bounded undo stack; OrcaPad bounds it by steps.
+static constexpr size_t kOrcapadHistoryLimit = 64;
+
+/// Transactional document mutation (desktop Plater::take_snapshot + the
+/// Bridge's failure atomicity): the document is copied up front; commit()
+/// files that copy as one undo step (clearing redo) and advances the
+/// revision; leaving the scope WITHOUT commit (typed failure or exception)
+/// restores the copy, so a failed mutation never leaves partial state.
+class OrcapadMutation {
+public:
+    OrcapadMutation(orca_plater &plater, std::string label)
+        : m_plater(plater), m_label(std::move(label)), m_model(plater.model),
+          m_revisions(plater.mesh_revisions) {}
+    OrcapadMutation(const OrcapadMutation &) = delete;
+    OrcapadMutation &operator=(const OrcapadMutation &) = delete;
+    ~OrcapadMutation() {
+        if (m_committed) return;
+        m_plater.model = std::move(m_model);
+        m_plater.mesh_revisions = std::move(m_revisions);
+    }
+
+    orca_revision commit() {
+        m_plater.redo.clear();
+        m_plater.undo.push_back(
+            OrcapadHistoryStep{m_label, std::move(m_model), std::move(m_revisions)});
+        while (m_plater.undo.size() > kOrcapadHistoryLimit) m_plater.undo.pop_front();
+        m_committed = true;
+        return ++m_plater.revision;
+    }
+
+private:
+    orca_plater &m_plater;
+    std::string m_label;
+    Slic3r::Model m_model;
+    std::unordered_map<orca_object_id, uint64_t> m_revisions;
+    bool m_committed = false;
+};
+
+/// Registers a newly created document object for snapshots.
+static bool orcapad_register_object(orca_plater &plater, const Slic3r::ModelObject &object) {
+    const orca_object_id id = static_cast<orca_object_id>(object.id().id);
+    return id != 0 && plater.mesh_revisions.emplace(id, plater.next_mesh_revision++).second;
+}
 
 static Slic3r::ModelObject *plater_obj(orca_plater *plater,
                                       orca_object_id id) {
@@ -1027,38 +1086,22 @@ orca_result orca_plater_import_model(orca_plater *plater, const char *path,
             object->ensure_on_bed(false);
         }
 
+        OrcapadMutation mutation(*plater, "Import");
         std::vector<Slic3r::ModelObject *> added;
-        auto rollback = [&]() {
-            for (Slic3r::ModelObject *object : added) {
-                plater->mesh_revisions.erase(
-                    static_cast<orca_object_id>(object->id().id));
-                plater->model.delete_object(object);
-            }
-        };
-        try {
-            for (Slic3r::ModelObject *source : temporary.objects) {
-                Slic3r::ModelObject *object = plater->model.add_object(*source);
-                if (!object) {
-                    rollback();
-                    return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
-                                        "engine did not create a document object");
-                }
-                added.push_back(object);
-                const orca_object_id id = static_cast<orca_object_id>(object->id().id);
-                if (id == 0 || !plater->mesh_revisions.emplace(id, 1).second) {
-                    rollback();
-                    return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
-                                        "engine returned an invalid or reused object ID");
-                }
-            }
-        } catch (...) {
-            rollback();
-            throw;
+        for (Slic3r::ModelObject *source : temporary.objects) {
+            Slic3r::ModelObject *object = plater->model.add_object(*source);
+            if (!object)
+                return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
+                                    "engine did not create a document object");
+            added.push_back(object);
+            if (!orcapad_register_object(*plater, *object))
+                return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
+                                    "engine returned an invalid or reused object ID");
         }
-        ++plater->revision;
-        *out_first_object_id = static_cast<orca_object_id>(added.front()->id().id);
+        const orca_object_id first = static_cast<orca_object_id>(added.front()->id().id);
+        *out_revision = mutation.commit();
+        *out_first_object_id = first;
         *out_object_count = static_cast<uint32_t>(added.size());
-        *out_revision = plater->revision;
         return orcapad_ok();
     });
 }
@@ -1081,12 +1124,13 @@ orca_result orca_plater_object_delete(orca_plater *plater,
         if (!orcapad_revision_available(*plater))
             return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
                                 "document revision is exhausted");
+        OrcapadMutation mutation(*plater, "Delete");
         if (!plater->model.delete_object(
                 Slic3r::ObjectID(static_cast<size_t>(object_id))))
             return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
                                 "engine did not delete the object");
         plater->mesh_revisions.erase(object_id);
-        *out_revision = ++plater->revision;
+        *out_revision = mutation.commit();
         return orcapad_ok();
     });
 }
@@ -1112,31 +1156,22 @@ orca_result orca_plater_instance_add(orca_plater *plater,
         if (!orcapad_revision_available(*plater))
             return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
                                 "document revision is exhausted");
-        const size_t original_count = object->instances.size();
+        OrcapadMutation mutation(*plater, "Add instance");
         Slic3r::ModelInstance *instance = object->instances.empty()
             ? object->add_instance()
             : object->add_instance(*object->instances.back());
         if (!instance)
             return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
                                 "engine did not create an instance");
-        try {
-            instance->set_offset(instance->get_offset() +
-                                 Slic3r::Vec3d(10.0, 10.0, 0.0));
-            object->invalidate_bounding_box();
-        } catch (...) {
-            if (object->instances.size() > original_count)
-                object->delete_instance(object->instances.size() - 1);
-            throw;
-        }
+        instance->set_offset(instance->get_offset() + Slic3r::Vec3d(10.0, 10.0, 0.0));
+        object->invalidate_bounding_box();
         const orca_instance_id id =
             static_cast<orca_instance_id>(instance->id().id);
-        if (id == 0) {
-            object->delete_instance(object->instances.size() - 1);
+        if (id == 0)
             return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
                                 "engine returned an invalid instance ID");
-        }
+        *out_revision = mutation.commit();
         *out_instance_id = id;
-        *out_revision = ++plater->revision;
         return orcapad_ok();
     });
 }
@@ -1168,8 +1203,9 @@ orca_result orca_plater_instance_delete(orca_plater *plater,
         if (!orcapad_revision_available(*plater))
             return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
                                 "document revision is exhausted");
+        OrcapadMutation mutation(*plater, "Delete instance");
         object->delete_instance(instance_index);
-        *out_revision = ++plater->revision;
+        *out_revision = mutation.commit();
         return orcapad_ok();
     });
 }
@@ -1178,6 +1214,7 @@ orca_result orca_plater_instance_set(orca_plater *plater,
                                      orca_object_id object_id,
                                      orca_instance_id instance_id,
                                      const orca_instance_transform *transform,
+                                     const char *label,
                                      orca_revision *out_revision) {
     constexpr const char *operation = "orca_plater_instance_set";
     if (out_revision) *out_revision = 0;
@@ -1202,24 +1239,17 @@ orca_result orca_plater_instance_set(orca_plater *plater,
         if (!orcapad_revision_available(*plater))
             return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
                                 "document revision is exhausted");
-        const Slic3r::Geometry::Transformation original =
-            instance->get_transformation();
-        Slic3r::Geometry::Transformation candidate = original;
+        OrcapadMutation mutation(*plater, label && label[0] ? label : "Transform");
+        Slic3r::Geometry::Transformation candidate = instance->get_transformation();
         candidate.set_offset(Slic3r::Vec3d(
             transform->offset_x, transform->offset_y, transform->offset_z));
         candidate.set_rotation(Slic3r::Vec3d(
             transform->rotation_x, transform->rotation_y, transform->rotation_z));
         candidate.set_scaling_factor(Slic3r::Vec3d(
             transform->scale_x, transform->scale_y, transform->scale_z));
-        try {
-            instance->set_transformation(candidate);
-            orcapad_rest_on_bed(object, instance);
-        } catch (...) {
-            instance->set_transformation(original);
-            object->invalidate_bounding_box();
-            throw;
-        }
-        *out_revision = ++plater->revision;
+        instance->set_transformation(candidate);
+        orcapad_rest_on_bed(object, instance);
+        *out_revision = mutation.commit();
         return orcapad_ok();
     });
 }
@@ -1257,18 +1287,10 @@ orca_result orca_plater_instance_rotate(orca_plater *plater,
                                 "document revision is exhausted");
         const Slic3r::Vec3d world_axis = axis == 0 ? Slic3r::Vec3d::UnitX()
             : axis == 1 ? Slic3r::Vec3d::UnitY() : Slic3r::Vec3d::UnitZ();
-        const Slic3r::Geometry::Transformation original =
-            instance->get_transformation();
-        try {
-            instance->rotate(Eigen::AngleAxisd(radians, world_axis)
-                                 .toRotationMatrix());
-            orcapad_rest_on_bed(object, instance);
-        } catch (...) {
-            instance->set_transformation(original);
-            object->invalidate_bounding_box();
-            throw;
-        }
-        *out_revision = ++plater->revision;
+        OrcapadMutation mutation(*plater, "Rotate");
+        instance->rotate(Eigen::AngleAxisd(radians, world_axis).toRotationMatrix());
+        orcapad_rest_on_bed(object, instance);
+        *out_revision = mutation.commit();
         return orcapad_ok();
     });
 }
@@ -1287,17 +1309,103 @@ orca_result orca_plater_ensure_on_bed(orca_plater *plater,
         if (!orcapad_revision_available(*plater))
             return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
                                 "document revision is exhausted");
-        Slic3r::Model candidate(plater->model);
-        for (Slic3r::ModelObject *object : candidate.objects)
+        OrcapadMutation mutation(*plater, "Drop to bed");
+        for (Slic3r::ModelObject *object : plater->model.objects)
             object->ensure_on_bed(false);
-        plater->model = std::move(candidate);
+        *out_revision = mutation.commit();
+        return orcapad_ok();
+    });
+}
+
+/// Desktop Plater::undo / redo: moves one step between the stacks. The
+/// restored document keeps its stable IDs; the revision still advances
+/// (revisions order observations, they are never rewound).
+static orca_result orcapad_step_history(orca_plater *plater, bool undo,
+                                        orca_revision *out_revision,
+                                        const char *operation) {
+    if (out_revision) *out_revision = 0;
+    if (!plater)
+        return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation, "plater handle is null");
+    if (!out_revision)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation, "output pointer is null");
+    return orcapad_guard(operation, [&]() -> orca_result {
+        std::deque<OrcapadHistoryStep> &from = undo ? plater->undo : plater->redo;
+        std::deque<OrcapadHistoryStep> &to = undo ? plater->redo : plater->undo;
+        if (from.empty())
+            return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation,
+                                undo ? "nothing to undo" : "nothing to redo");
+        if (!orcapad_revision_available(*plater))
+            return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
+                                "document revision is exhausted");
+        OrcapadHistoryStep step = std::move(from.back());
+        from.pop_back();
+        to.push_back(OrcapadHistoryStep{step.label, std::move(plater->model),
+                                        std::move(plater->mesh_revisions)});
+        plater->model = std::move(step.model);
+        plater->mesh_revisions = std::move(step.mesh_revisions);
         *out_revision = ++plater->revision;
         return orcapad_ok();
     });
 }
 
+orca_result orca_plater_undo(orca_plater *plater, orca_revision *out_revision) {
+    return orcapad_step_history(plater, true, out_revision, "orca_plater_undo");
+}
+
+orca_result orca_plater_redo(orca_plater *plater, orca_revision *out_revision) {
+    return orcapad_step_history(plater, false, out_revision, "orca_plater_redo");
+}
+
+orca_result orca_plater_object_rename(orca_plater *plater, orca_object_id object_id,
+                                      const char *name, orca_revision *out_revision) {
+    constexpr const char *operation = "orca_plater_object_rename";
+    if (out_revision) *out_revision = 0;
+    if (!plater)
+        return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation, "plater handle is null");
+    if (!name || !out_revision)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "name or output pointer is null");
+    const std::string value(name);
+    if (value.find_first_not_of(" \t\r\n") == std::string::npos)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation, "name is empty");
+    return orcapad_guard(operation, [&]() -> orca_result {
+        Slic3r::ModelObject *object = plater_obj(plater, object_id);
+        if (!object)
+            return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation, "object was not found");
+        if (!orcapad_revision_available(*plater))
+            return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
+                                "document revision is exhausted");
+        OrcapadMutation mutation(*plater, "Rename");
+        object->name = value;
+        *out_revision = mutation.commit();
+        return orcapad_ok();
+    });
+}
+
+orca_result orca_plater_clear(orca_plater *plater, orca_revision *out_revision) {
+    constexpr const char *operation = "orca_plater_clear";
+    if (out_revision) *out_revision = 0;
+    if (!plater)
+        return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation, "plater handle is null");
+    if (!out_revision)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation, "output pointer is null");
+    return orcapad_guard(operation, [&]() -> orca_result {
+        if (plater->model.objects.empty())
+            return orcapad_fail(ORCA_STATUS_INVALID_MODEL, operation,
+                                "document contains no model object");
+        if (!orcapad_revision_available(*plater))
+            return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
+                                "document revision is exhausted");
+        OrcapadMutation mutation(*plater, "Delete all");
+        plater->model.clear_objects();
+        plater->mesh_revisions.clear();
+        *out_revision = mutation.commit();
+        return orcapad_ok();
+    });
+}
+
 static orca_scene_snapshot orcapad_empty_snapshot() noexcept {
-    return { 0, 0, nullptr, 0 };
+    return orca_scene_snapshot{};
 }
 
 void orca_scene_snapshot_dispose(orca_scene_snapshot *snapshot) {
@@ -1312,6 +1420,8 @@ void orca_scene_snapshot_dispose(orca_scene_snapshot *snapshot) {
         }
     }
     std::free(snapshot->objects);
+    orca_owned_string_dispose(&snapshot->undo_label);
+    orca_owned_string_dispose(&snapshot->redo_label);
     *snapshot = orcapad_empty_snapshot();
 }
 
@@ -1341,6 +1451,14 @@ orca_result orca_plater_snapshot(orca_plater *plater,
         snapshot.revision = plater->revision;
         snapshot.object_count =
             static_cast<int32_t>(plater->model.objects.size());
+        snapshot.undo_count = static_cast<uint32_t>(plater->undo.size());
+        snapshot.redo_count = static_cast<uint32_t>(plater->redo.size());
+        if (!orcapad_copy_string(plater->undo.empty() ? "" : plater->undo.back().label.c_str(),
+                                 &snapshot.undo_label) ||
+            !orcapad_copy_string(plater->redo.empty() ? "" : plater->redo.back().label.c_str(),
+                                 &snapshot.redo_label))
+            return orcapad_fail(ORCA_STATUS_OUT_OF_MEMORY, operation,
+                                "could not allocate history labels");
         if (snapshot.document_id == 0) {
             return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
                                 "engine returned an invalid document ID");
@@ -2391,17 +2509,22 @@ orca_result orca_project_open(orca_plater *plater, orca_presets *presets,
 
         // 3) identity bookkeeping for the new document
         std::unordered_map<orca_object_id, uint64_t> revisions;
+        uint64_t next_mesh_revision = plater->next_mesh_revision;
         for (const Slic3r::ModelObject *object : loaded.objects) {
             const orca_object_id id = static_cast<orca_object_id>(object->id().id);
-            if (id == 0 || !revisions.emplace(id, 1).second)
+            if (id == 0 || !revisions.emplace(id, next_mesh_revision++).second)
                 return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
                                     "project object has an invalid or duplicate ID");
         }
         const uint32_t object_count = static_cast<uint32_t>(loaded.objects.size());
 
-        // 4) commit (no-throw): new document + session swap atomically
+        // 4) commit: new document + session swap atomically. A new
+        //    document starts a new history (desktop clears its undo stack).
         plater->model = std::move(loaded);
         plater->mesh_revisions.swap(revisions);
+        plater->next_mesh_revision = next_mesh_revision;
+        plater->undo.clear();
+        plater->redo.clear();
         ++plater->revision;
         presets->bundle.swap(candidate);
 
@@ -2554,6 +2677,7 @@ orca_result orca_plater_orient(orca_plater *plater, orca_presets *presets,
             return orcapad_fail(ORCA_STATUS_INVALID_MODEL, operation,
                                 "no instance to orient");
 
+        OrcapadMutation mutation(*plater, "Orient");
         const Slic3r::DynamicPrintConfig config = orcapad_arrange_config(presets);
         const int overhang = config.has("support_threshold_angle")
                                  ? config.opt_int("support_threshold_angle")
@@ -2586,8 +2710,7 @@ orca_result orca_plater_orient(orca_plater *plater, orca_presets *presets,
         Slic3r::orientation::orient(selected, unselected, params);
         for (Slic3r::orientation::OrientMesh &mesh : selected) mesh.apply();
 
-        ++plater->revision;
-        *out_revision = plater->revision;
+        *out_revision = mutation.commit();
         return orcapad_ok();
     });
 }
@@ -2623,6 +2746,7 @@ orca_result orca_plater_instance_lay_flat(orca_plater *plater,
 
         // desktop GLGizmoFlatten: rotate the chosen face normal to point
         // down; the object then rests on that face.
+        OrcapadMutation mutation(*plater, "Lay flat");
         Slic3r::Vec3d axis;
         double angle = 0.0;
         Slic3r::Matrix3d rotation = Slic3r::Matrix3d::Identity();
@@ -2634,8 +2758,7 @@ orca_result orca_plater_instance_lay_flat(orca_plater *plater,
         object->invalidate_bounding_box();
         object->ensure_on_bed();
 
-        ++plater->revision;
-        *out_revision = plater->revision;
+        *out_revision = mutation.commit();
         return orcapad_ok();
     });
 }
@@ -2661,6 +2784,7 @@ orca_result orca_plater_arrange(orca_plater *plater, orca_presets *presets,
             return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
                                 "document revision is exhausted");
 
+        OrcapadMutation mutation(*plater, "Arrange");
         const Slic3r::DynamicPrintConfig config = orcapad_arrange_config(presets);
         // desktop ArrangeJob::prepare: every printable instance is selected
         Slic3r::ModelInstancePtrs instances;
@@ -2720,9 +2844,8 @@ orca_result orca_plater_arrange(orca_plater *plater, orca_presets *presets,
             object->ensure_on_bed();
         }
 
-        ++plater->revision;
+        *out_revision = mutation.commit();
         *out_unprintable = unprintable;
-        *out_revision = plater->revision;
         return orcapad_ok();
     });
 }

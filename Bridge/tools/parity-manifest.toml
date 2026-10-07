@@ -62,13 +62,9 @@ reason = "deferred by user 2026-10-07: STEP/SVG need OpenCASCADE, DRC needs drac
 id = "plate.delete"
 area = "plate"
 title = "Delete selected / delete all"
-status = "partial"
+status = "done"
 desktop = ["menu:Delete selected", "menu:Delete all", "context:Delete", "context:Delete All"]
-evidence = ["abi:orca_plater_object_delete", 'client:func deleteObjects\(']
-gap = "no Delete all command; deletes act on the single selection or the object list"
-work = "UI"
-priority = 14
-
+evidence = ["abi:orca_plater_object_delete", "abi:orca_plater_clear", 'client:func deleteAll\(']
 [[feature]]
 id = "plate.instances"
 area = "plate"
@@ -234,12 +230,11 @@ note = "snapshot contract rejects left-handed instances today; renderer needs wi
 id = "plate.undo-redo"
 area = "plate"
 title = "Undo / redo"
-status = "missing"
+status = "done"
 desktop = ["menu:Undo", "menu:Redo"]
 source = "src/slic3r/Utils/UndoRedo.hpp:class Stack"
-work = "Bridge + UI"
-priority = 1
-
+evidence = ["abi:orca_plater_undo", "abi:orca_plater_redo", 'client:func undo\(\) async']
+note = "transactional Bridge mutations, 64-step history with labels (ABI v18)"
 [[feature]]
 id = "plate.copy-paste"
 area = "plate"
@@ -264,11 +259,9 @@ priority = 3
 id = "plate.rename"
 area = "plate"
 title = "Rename object"
-status = "missing"
+status = "done"
 desktop = ["context:Rename", "kb:Select the object/part and mouse click to change the name"]
-work = "Bridge + UI"
-priority = 3
-
+evidence = ["abi:orca_plater_object_rename", 'client:func rename\(']
 [[feature]]
 id = "plate.parts-modifiers"
 area = "plate"
@@ -646,7 +639,9 @@ priority = 47
 id = "plate.keyboard"
 area = "plate"
 title = "Hardware-keyboard shortcuts: 3D editor"
-status = "missing"
+status = "partial"
+evidence = ['client:keyboardShortcut\("z"']
+gap = "only undo / redo (\u2318Z, \u21e7\u2318Z) so far"
 desktop = ["kb:Arrange all objects", "kb:Arrange objects on selected plates",
            "kb:Auto orients all objects on the active plate.",
            "kb:Auto orients selected objects or all objects. If there are selected objects, it just orients the selected ones. Otherwise, it will orient all objects in the current project.",

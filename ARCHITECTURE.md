@@ -183,6 +183,10 @@ Rules:
   gesture is committed as a command and replaced by the authoritative result.
 - Stale snapshots and stale slice results are detectable, never silently
   treated as current.
+- Undo/redo lives with the authoritative document (Bridge): each successful
+  mutation files the prior document as one step; restoring a step keeps
+  stable IDs, and mesh revisions are session-unique so (ID, mesh revision)
+  always names the same mesh content in client caches.
 
 ## 4. Commands and snapshots
 

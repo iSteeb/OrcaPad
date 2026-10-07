@@ -10,10 +10,12 @@ public final class EnginePlater: @unchecked Sendable {
         case deleteObject(ObjectID)
         case addInstance(objectID: ObjectID)
         case deleteInstance(objectID: ObjectID, instanceID: InstanceID)
+        /// `label` names the undo step ("Move", "Scale", ...).
         case setTransform(
             objectID: ObjectID,
             instanceID: InstanceID,
-            transform: InstanceTransform
+            transform: InstanceTransform,
+            label: String
         )
         case rotate(
             objectID: ObjectID,
@@ -29,6 +31,12 @@ public final class EnginePlater: @unchecked Sendable {
         case orientAll
         case arrange(allowRotations: Bool)
         case ensureOnBed
+        /// Desktop Edit > Undo / Redo (one history step).
+        case undo
+        case redo
+        case rename(objectID: ObjectID, name: String)
+        /// Desktop "Delete all".
+        case clear
     }
 
     public struct MutationResult: Sendable {
@@ -160,7 +168,7 @@ public final class EnginePlater: @unchecked Sendable {
                     operation: "delete instance \(instanceID)"
                 )
 
-            case .setTransform(let objectID, let instanceID, let transform):
+            case .setTransform(let objectID, let instanceID, let transform, let label):
                 var rawTransform = orca_instance_transform(
                     offset_x: transform.offsetX,
                     offset_y: transform.offsetY,
@@ -173,13 +181,16 @@ public final class EnginePlater: @unchecked Sendable {
                     scale_z: transform.scaleZ
                 )
                 try BridgeResult.consume(
-                    orca_plater_instance_set(
-                        handle,
-                        objectID.rawValue,
-                        instanceID.rawValue,
-                        &rawTransform,
-                        &mutationRevision
-                    ),
+                    label.withCString { labelPointer in
+                        orca_plater_instance_set(
+                            handle,
+                            objectID.rawValue,
+                            instanceID.rawValue,
+                            &rawTransform,
+                            labelPointer,
+                            &mutationRevision
+                        )
+                    },
                     operation: "set transform for instance \(instanceID)"
                 )
 
@@ -232,6 +243,30 @@ public final class EnginePlater: @unchecked Sendable {
                 try BridgeResult.consume(
                     orca_plater_ensure_on_bed(handle, &mutationRevision),
                     operation: "ensure scene on bed"
+                )
+
+            case .undo:
+                try BridgeResult.consume(
+                    orca_plater_undo(handle, &mutationRevision),
+                    operation: "undo"
+                )
+
+            case .redo:
+                try BridgeResult.consume(
+                    orca_plater_redo(handle, &mutationRevision),
+                    operation: "redo"
+                )
+
+            case .rename(let objectID, let name):
+                try BridgeResult.consume(
+                    name.withCString { orca_plater_object_rename(handle, objectID.rawValue, $0, &mutationRevision) },
+                    operation: "rename object \(objectID)"
+                )
+
+            case .clear:
+                try BridgeResult.consume(
+                    orca_plater_clear(handle, &mutationRevision),
+                    operation: "delete all objects"
                 )
             }
 
@@ -533,10 +568,17 @@ public final class EnginePlater: @unchecked Sendable {
             }
         }
 
+        let history = DocumentHistory(
+            undoCount: Int(rawSnapshot.undo_count),
+            redoCount: Int(rawSnapshot.redo_count),
+            undoLabel: try Self.borrowedString(rawSnapshot.undo_label, operation: "read undo label"),
+            redoLabel: try Self.borrowedString(rawSnapshot.redo_label, operation: "read redo label")
+        )
         return SceneSnapshot(
             documentID: DocumentID(rawValue: rawSnapshot.document_id),
             revision: DocumentRevision(rawValue: rawSnapshot.revision),
-            objects: objects
+            objects: objects,
+            history: history
         )
     }
 
