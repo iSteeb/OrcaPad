@@ -2,35 +2,19 @@ import OrcaBridge
 import SwiftUI
 import UniformTypeIdentifiers
 
-/// Presentation-only plater shell. Engine/file/job orchestration lives in the
-/// process-lifetime AppEnvironment stores and services.
-struct PlaterView: View {
+/// Plate tab: the pre-slice 3D view. Owns import, object/instance editing,
+/// and placement gestures. Config editing lives in Prepare; the gcode
+/// visualization lives in Preview. Presentation-only — all document state
+/// belongs to the AppEnvironment stores.
+struct PlateTabView: View {
     @Environment(AppEnvironment.self) private var environment
     @State private var importPresented = false
     @State private var objectsPresented = false
-    @State private var settingsPresented = false
 
     var body: some View {
-        ZStack(alignment: .topLeading) {
+        ZStack {
             canvas
                 .ignoresSafeArea()
-
-            VStack(alignment: .leading, spacing: 3) {
-                Text("OrcaPad")
-                    .font(.caption.weight(.semibold))
-                ForEach(environment.status.visibleEntries) { entry in
-                    Text(entry.text)
-                        .font(.caption2.monospaced())
-                        .foregroundStyle(.secondary)
-                        .lineLimit(entry.subsystem == .slice ? 3 : 2)
-                }
-            }
-            .padding(10)
-            .background(
-                .ultraThinMaterial,
-                in: RoundedRectangle(cornerRadius: 10)
-            )
-            .padding(12)
         }
         .overlay(alignment: .bottom) {
             VStack(spacing: 10) {
@@ -43,18 +27,14 @@ struct PlaterView: View {
                 }
                 platerToolbar
             }
-            .padding(.bottom, 14)
+            .padding(.bottom, 90)
         }
-        .preferredColorScheme(.dark)
         .fileImporter(
             isPresented: $importPresented,
             allowedContentTypes: ImportTypes.stl,
             onCompletion: handleImport
         )
         .sheet(isPresented: $objectsPresented) { objectsList }
-        .sheet(isPresented: $settingsPresented) {
-            SettingsView(presets: environment.presets)
-        }
     }
 
     @ViewBuilder
@@ -279,27 +259,7 @@ struct PlaterView: View {
                 label: "Arrange",
                 disabled: true
             ) {
-                // Phase 2: engine arrange (Arrange.cpp + libnest2d).
-            }
-            ToolbarButton(
-                symbol: "scissors",
-                label: document.isSlicing ? "Slicing" : "Slice",
-                disabled: document.scene?.objects.isEmpty != false ||
-                    document.isBusy || environment.presets.isSelecting
-            ) {
-                Task {
-                    await environment.slicing.run(
-                        document: document,
-                        presets: environment.presets
-                    )
-                }
-            }
-            ToolbarButton(
-                symbol: "gearshape",
-                label: "Settings",
-                disabled: !environment.presets.isReady || document.isSlicing
-            ) {
-                settingsPresented = true
+                // Engine arrange (Arrange.cpp + libnest2d) — later gate.
             }
         }
         .padding(.horizontal, 18)

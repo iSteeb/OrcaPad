@@ -3,7 +3,7 @@ import SwiftUI
 /// The complete resolved configuration exactly as slicing will consume it:
 /// labeled and categorized from the pinned-engine schema, with non-default
 /// values highlighted and a machine/filament/process/bed summary header.
-struct ConfigView: View {
+struct ResolvedConfigView: View {
     let presets: PresetStore
 
     @State private var service = ResolvedConfigService()

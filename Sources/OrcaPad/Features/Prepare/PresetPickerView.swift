@@ -5,7 +5,7 @@ import SwiftUI
 /// Machines and filaments are grouped by manufacturer (engine vendor);
 /// processes default to the engine's compatibility flags for the selected
 /// machine. The store remains the single owner of selection + persistence.
-struct SettingsView: View {
+struct PresetPickerView: View {
     let presets: PresetStore
 
     @Environment(\.dismiss) private var dismiss
@@ -50,7 +50,7 @@ struct SettingsView: View {
     private var resolvedConfigSection: some View {
         Section {
             NavigationLink {
-                ConfigView(presets: presets)
+                ResolvedConfigView(presets: presets)
             } label: {
                 Label("Resolved configuration", systemImage: "doc.text.magnifyingglass")
             }

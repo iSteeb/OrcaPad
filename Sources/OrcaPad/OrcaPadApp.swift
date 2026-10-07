@@ -6,7 +6,7 @@ struct OrcaPadApp: App {
 
     var body: some Scene {
         WindowGroup {
-            PlaterView()
+            RootView()
                 .environment(environment)
                 .task { await environment.bootstrap() }
         }
