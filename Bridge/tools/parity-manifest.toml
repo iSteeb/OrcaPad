@@ -270,7 +270,7 @@ desktop = ["context:{_(item.first)}@append_menu_items_add_volume", "context:Load
 evidence = ["abi:orca_plater_volume_add_shape", "abi:orca_plater_volume_add_file",
             "abi:orca_plater_volume_set_type", "abi:orca_plater_volume_delete",
             "client:func volumeRow", "client:litBlendPipeline"]
-gap = "no per-volume settings and no canvas part selection (list-driven only)"
+gap = "no canvas part selection (parts are list-driven)"
 work = "Bridge + UI"
 priority = 4
 [[feature]]
@@ -304,14 +304,17 @@ priority = 20
 id = "plate.per-object-settings"
 area = "plate"
 title = "Per-object / per-part process settings"
-status = "missing"
+status = "partial"
 desktop = ["context:Edit Process Settings", "context:Copy Process Settings", "context:Paste Process Settings",
            "context:Edit in Parameter Table", "dialog:ObjectTableDialog",
            "context:{_(cat.first)}@create_settings_popupmenu",
            "context:{_(category.first)}@create_freq_settings_popupmenu"]
-work = "Bridge + UI"
+evidence = ["abi:orca_plater_settings_set", "abi:orca_plater_settings_erase",
+            "abi:orca_plater_settings_dump", "abi:orca_plater_settings_keys",
+            "client:struct ObjectSettingsSheet"]
+gap = "no copy / paste of settings between objects, no parameter table, no frequent-settings quick menu"
+work = "UI"
 priority = 5
-
 [[feature]]
 id = "plate.object-filament"
 area = "plate"

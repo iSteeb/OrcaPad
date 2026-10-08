@@ -7,7 +7,7 @@ extern "C" {
 #endif
 
 /// Version of the C ABI contract in this header. Callers verify it at runtime.
-#define ORCA_BRIDGE_ABI_VERSION ((uint32_t)21)
+#define ORCA_BRIDGE_ABI_VERSION ((uint32_t)22)
 
 typedef int32_t orca_status_code;
 #define ORCA_STATUS_OK                     ((orca_status_code)0)
@@ -98,6 +98,7 @@ typedef struct {
     int32_t position_count;
     uint32_t *indices;
     int32_t index_count;
+    uint32_t override_count;      // per-volume setting overrides
 } orca_scene_volume;
 
 typedef struct {
@@ -116,6 +117,7 @@ typedef struct {
     int32_t instance_count;
     orca_scene_volume *volumes;   // >= 1, document order
     int32_t volume_count;
+    uint32_t override_count;      // per-object setting overrides
 } orca_scene_object;
 
 typedef struct {
@@ -292,6 +294,28 @@ orca_result orca_plater_instances_rotate(
     const orca_instance_id *instance_ids,
     int32_t count, int32_t axis, double radians,
     orca_revision *out_revision);
+/// Per-object / per-part setting overrides (desktop object list "Edit
+/// Process Settings"): ModelObject::config when `volume_id` is 0, else the
+/// ModelVolume::config. Objects accept PrintObjectConfig + PrintRegionConfig
+/// keys, volumes PrintRegionConfig keys (desktop SettingsFactory::get_options).
+/// Overrides are slice inputs (Print::apply consumes them).
+/// Allowed keys for objects (for_volume = 0) or volumes, JSON string array.
+orca_result orca_plater_settings_keys(uint8_t for_volume, orca_owned_string *out_json);
+/// Current overrides of the target as a JSON object {"key": "serialized"}.
+orca_result orca_plater_settings_dump(orca_plater *plater, orca_object_id object_id,
+                                      orca_volume_id volume_id,
+                                      orca_owned_string *out_json);
+/// Sets one override (the option's own serialization). Keys the target does
+/// not accept are ORCA_STATUS_INVALID_ARGUMENT; values the engine cannot
+/// parse are ORCA_STATUS_INVALID_CONFIGURATION. One undo step.
+orca_result orca_plater_settings_set(orca_plater *plater, orca_object_id object_id,
+                                     orca_volume_id volume_id, const char *key,
+                                     const char *serialized_value,
+                                     orca_revision *out_revision);
+/// Removes one override (ORCA_STATUS_NOT_FOUND when absent). One undo step.
+orca_result orca_plater_settings_erase(orca_plater *plater, orca_object_id object_id,
+                                       orca_volume_id volume_id, const char *key,
+                                       orca_revision *out_revision);
 /// Desktop clipboard: copies one object (volumes + instances). No document
 /// change, no undo step.
 orca_result orca_plater_object_copy(orca_plater *plater, orca_object_id object_id);

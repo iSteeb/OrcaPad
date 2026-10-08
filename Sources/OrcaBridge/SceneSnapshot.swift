@@ -202,19 +202,23 @@ public struct SceneObject: Identifiable, Sendable {
     public let instances: [SceneInstance]
     /// Object volumes, document order (desktop object list).
     public let volumes: [SceneVolume]
+    /// Per-object setting overrides (desktop object-list settings badge).
+    public let overrideCount: Int
 
     public init(
         id: ObjectID,
         name: String,
         mesh: SceneMesh,
         instances: [SceneInstance],
-        volumes: [SceneVolume]
+        volumes: [SceneVolume],
+        overrideCount: Int
     ) {
         self.id = id
         self.name = name
         self.mesh = mesh
         self.instances = instances
         self.volumes = volumes
+        self.overrideCount = overrideCount
     }
 
     public var modelParts: [SceneVolume] {
@@ -275,13 +279,19 @@ public struct SceneVolume: Identifiable, Sendable {
     public let extruder: Int
     /// Own object-space mesh for non-part roles; nil for parts.
     public let mesh: SceneMesh?
+    /// Per-volume setting overrides.
+    public let overrideCount: Int
 
-    public init(id: VolumeID, name: String, role: VolumeRole, extruder: Int, mesh: SceneMesh?) {
+    public init(
+        id: VolumeID, name: String, role: VolumeRole, extruder: Int, mesh: SceneMesh?,
+        overrideCount: Int
+    ) {
         self.id = id
         self.name = name
         self.role = role
         self.extruder = extruder
         self.mesh = mesh
+        self.overrideCount = overrideCount
     }
 }
 

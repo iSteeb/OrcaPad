@@ -211,6 +211,29 @@ struct SettingsEditorRow: Identifiable, Sendable {
     }
 }
 
+extension SettingsEditorRow {
+    /// A row for an arbitrary option value (object / part overrides).
+    init(schema: ConfigOptionSchema, value: String, isModified: Bool) {
+        self.init(
+            key: schema.key,
+            label: schema.fullLabel?.isEmpty == false
+                ? schema.fullLabel ?? schema.key
+                : (schema.label?.isEmpty == false ? schema.label ?? schema.key : schema.key),
+            tooltip: schema.tooltip?.isEmpty == false ? schema.tooltip : nil,
+            sidetext: schema.sidetext?.isEmpty == false ? schema.sidetext : nil,
+            mode: schema.mode ?? 0,
+            type: schema.type,
+            multiline: schema.multiline ?? false,
+            minimum: schema.min,
+            maximum: schema.max,
+            enumValues: schema.enumValues ?? [],
+            enumLabels: schema.enumLabels ?? [],
+            value: value,
+            isModified: isModified
+        )
+    }
+}
+
 enum SettingsEditorKind: Sendable {
     case toggle
     case picker

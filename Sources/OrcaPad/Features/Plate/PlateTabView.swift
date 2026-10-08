@@ -18,6 +18,7 @@ struct PlateTabView: View {
     @State private var gizmoMode: GizmoMode = .move
     @State private var rotationAxis: EngineAxis = .z
     @State private var renameTarget: RenameTarget?
+    @State private var settingsTarget: SettingsTarget?
     @State private var renameText = ""
     @State private var deleteAllConfirmation = false
 
@@ -442,6 +443,13 @@ struct PlateTabView: View {
                 }
                 Button("Cancel", role: .cancel) { renameTarget = nil }
             }
+            .sheet(item: $settingsTarget) { target in
+                ObjectSettingsSheet(
+                    objectID: target.objectID,
+                    volumeID: target.volumeID,
+                    title: target.title
+                )
+            }
             .confirmationDialog(
                 "Delete all objects?",
                 isPresented: $deleteAllConfirmation,
@@ -479,6 +487,12 @@ extension PlateTabView {
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
+                if object.overrideCount > 0 {
+                    Label("\(object.overrideCount)", systemImage: "slider.horizontal.3")
+                        .font(.caption2)
+                        .foregroundStyle(Color.accentColor)
+                        .accessibilityLabel("\(object.overrideCount) setting overrides")
+                }
                 if object.nonPartVolumes.isEmpty == false {
                     Circle()
                         .fill(roleColor(object.nonPartVolumes[0].role))
@@ -566,6 +580,12 @@ extension PlateTabView {
             }
             Divider()
             Button {
+                settingsTarget = SettingsTarget(
+                    objectID: object.id, volumeID: nil, title: object.name)
+            } label: {
+                Label("Edit process settings…", systemImage: "slider.horizontal.3")
+            }
+            Button {
                 renameText = object.name
                 renameTarget = .object(object.id)
             } label: {
@@ -636,8 +656,20 @@ extension PlateTabView {
                     .font(.caption2.monospaced())
                     .foregroundStyle(.secondary)
             }
+            if volume.overrideCount > 0 {
+                Label("\(volume.overrideCount)", systemImage: "slider.horizontal.3")
+                    .font(.caption2)
+                    .foregroundStyle(Color.accentColor)
+            }
             Spacer()
             Menu {
+                Button {
+                    settingsTarget = SettingsTarget(
+                        objectID: objectID, volumeID: volume.id, title: volume.name)
+                } label: {
+                    Label("Edit settings…", systemImage: "slider.horizontal.3")
+                }
+                .disabled(volume.role == .negative)
                 Button {
                     renameText = volume.name
                     renameTarget = .volume(objectID, volume.id)
@@ -674,6 +706,15 @@ extension PlateTabView {
         }
         .padding(.leading, 16)
     }
+}
+
+/// Settings sheet routing: an object (volumeID nil) or one of its volumes.
+private struct SettingsTarget: Identifiable {
+    let objectID: ObjectID
+    let volumeID: VolumeID?
+    let title: String
+
+    var id: String { "\(objectID)-\(volumeID?.description ?? "object")" }
 }
 
 /// Rename routing: object or volume.

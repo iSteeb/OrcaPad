@@ -62,6 +62,9 @@ public final class EnginePlater: @unchecked Sendable {
         case groupSetTransforms([GroupTransform], label: String)
         /// Group rotation about each instance's own origin; one undo step.
         case groupRotate([GroupInstance], axis: EngineAxis, radians: Double)
+        /// Per-object (volumeID nil) / per-part setting override.
+        case setSetting(objectID: ObjectID, volumeID: VolumeID?, key: String, value: String)
+        case eraseSetting(objectID: ObjectID, volumeID: VolumeID?, key: String)
     }
 
     /// One (object, instance) pair of a multi-selection.
@@ -143,6 +146,41 @@ public final class EnginePlater: @unchecked Sendable {
     public func snapshot() throws -> SceneSnapshot {
         try lock.withLock {
             try snapshotLocked()
+        }
+    }
+
+    /// Option keys an object (or a part / modifier) may override.
+    public static func settingsKeys(forVolume: Bool) throws -> [String] {
+        let operation = "read overridable option keys"
+        var raw = orca_owned_string()
+        try BridgeResult.consume(
+            orca_plater_settings_keys(forVolume ? 1 : 0, &raw), operation: operation
+        )
+        let json = try consumeBridgeString(&raw, operation: operation).get()
+        guard let data = json.data(using: .utf8),
+              let keys = try JSONSerialization.jsonObject(with: data) as? [String] else {
+            throw invariant(operation: operation, "Bridge returned a malformed key list")
+        }
+        return keys
+    }
+
+    /// Current overrides of an object (volumeID nil) or one of its volumes.
+    public func settings(objectID: ObjectID, volumeID: VolumeID?) throws -> [String: String] {
+        let operation = "read overrides of object \(objectID)"
+        return try lock.withLock {
+            var raw = orca_owned_string()
+            try BridgeResult.consume(
+                orca_plater_settings_dump(
+                    handle, objectID.rawValue, volumeID?.rawValue ?? 0, &raw
+                ),
+                operation: operation
+            )
+            let json = try consumeBridgeString(&raw, operation: operation).get()
+            guard let data = json.data(using: .utf8),
+                  let values = try JSONSerialization.jsonObject(with: data) as? [String: String] else {
+                throw Self.invariant(operation: operation, "Bridge returned a malformed dump")
+            }
+            return values
         }
     }
 
@@ -495,6 +533,30 @@ public final class EnginePlater: @unchecked Sendable {
                     operation: "rotate \(group.count) instance(s)"
                 )
 
+            case .setSetting(let objectID, let volumeID, let key, let value):
+                try BridgeResult.consume(
+                    key.withCString { keyPointer in
+                        value.withCString { valuePointer in
+                            orca_plater_settings_set(
+                                handle, objectID.rawValue, volumeID?.rawValue ?? 0,
+                                keyPointer, valuePointer, &mutationRevision
+                            )
+                        }
+                    },
+                    operation: "set \(key) on object \(objectID)"
+                )
+
+            case .eraseSetting(let objectID, let volumeID, let key):
+                try BridgeResult.consume(
+                    key.withCString { keyPointer in
+                        orca_plater_settings_erase(
+                            handle, objectID.rawValue, volumeID?.rawValue ?? 0,
+                            keyPointer, &mutationRevision
+                        )
+                    },
+                    operation: "remove \(key) from object \(objectID)"
+                )
+
             case .pasteObject(let bedCenter):
                 var rawObjectID: UInt64 = 0
                 try BridgeResult.consume(
@@ -795,7 +857,8 @@ public final class EnginePlater: @unchecked Sendable {
                             rawObject.pivot.0, rawObject.pivot.1, rawObject.pivot.2
                         ),
                         objectID: objectID
-                    )
+                    ),
+                    overrideCount: Int(rawObject.override_count)
                 ))
             }
         }
@@ -958,7 +1021,8 @@ public final class EnginePlater: @unchecked Sendable {
                 name: name,
                 role: role,
                 extruder: Int(raw.extruder),
-                mesh: mesh
+                mesh: mesh,
+                overrideCount: Int(raw.override_count)
             ))
         }
         return volumes

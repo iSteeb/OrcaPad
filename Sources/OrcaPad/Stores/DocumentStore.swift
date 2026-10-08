@@ -363,6 +363,37 @@ final class DocumentStore {
         multiSelection = []
     }
 
+    // MARK: Per-object / per-part settings (desktop "Edit Process Settings")
+
+    /// Current overrides of an object (volumeID nil) or one of its volumes.
+    func settings(objectID: ObjectID, volumeID: VolumeID?) async -> [String: String]? {
+        guard let plater else { return nil }
+        let result = await BackgroundWork.run(operation: "read object settings") {
+            try plater.settings(objectID: objectID, volumeID: volumeID)
+        }
+        switch result {
+        case .success(let values):
+            return values
+        case .failure(let failure):
+            status.report(.document, failure: failure)
+            return nil
+        }
+    }
+
+    func setSetting(objectID: ObjectID, volumeID: VolumeID?, key: String, value: String) async {
+        _ = await applyMutation(
+            .setSetting(objectID: objectID, volumeID: volumeID, key: key, value: value),
+            operation: "set \(key)"
+        )
+    }
+
+    func eraseSetting(objectID: ObjectID, volumeID: VolumeID?, key: String) async {
+        _ = await applyMutation(
+            .eraseSetting(objectID: objectID, volumeID: volumeID, key: key),
+            operation: "remove \(key)"
+        )
+    }
+
     // MARK: Mirror / clipboard (desktop object menu)
 
     func mirrorSelected(axis: EngineAxis) async {

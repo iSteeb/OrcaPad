@@ -273,7 +273,7 @@ static void test_md5_shim() {
 
 static void test_abi_version() {
     CHECK_EQ(orca_bridge_abi_version(), ORCA_BRIDGE_ABI_VERSION);
-    CHECK_EQ(ORCA_BRIDGE_ABI_VERSION, 21);
+    CHECK_EQ(ORCA_BRIDGE_ABI_VERSION, 22);
 }
 
 static std::string snapshot_label(const orca_owned_string &label) {
@@ -1097,6 +1097,78 @@ static void test_group_transforms(const std::string &dir) {
     CHECK_NEAR(snap.objects[0].instances[0].transform.rotation_x, 0.0, 1e-9);
     orca_scene_snapshot_dispose(&snap);
 
+    orca_plater_free(plater);
+}
+// ABI v22: per-object / per-part setting overrides.
+static void test_object_settings(const std::string &dir) {
+    orca_owned_string keys{};
+    GUARD(g0, orca_plater_settings_keys(0, &keys));
+    expect_ok(g0, "object keys");
+    CHECK(keys.data && strstr(keys.data, "\"layer_height\"") != nullptr);
+    CHECK(keys.data && strstr(keys.data, "\"sparse_infill_density\"") != nullptr);
+    orca_owned_string_dispose(&keys);
+    GUARD(g1, orca_plater_settings_keys(1, &keys));
+    expect_ok(g1, "volume keys");
+    CHECK(keys.data && strstr(keys.data, "\"sparse_infill_density\"") != nullptr);
+    CHECK(keys.data && strstr(keys.data, "\"layer_height\"") == nullptr);
+    orca_owned_string_dispose(&keys);
+
+    orca_plater *plater = nullptr;
+    GUARD(g2, orca_plater_new(&plater));
+    expect_ok(g2, "plater_new");
+    orca_revision revision = 0;
+    const std::string cube = write_cube_stl(dir, "settings_cube.stl");
+    orca_object_id object_id = 0;
+    GUARD(g3, import_one(plater, cube.c_str(), 100, 100, &object_id, &revision));
+    expect_ok(g3, "import");
+    orca_volume_id part_id = 0;
+    {
+        orca_scene_snapshot snap = take_snapshot(plater);
+        part_id = snap.objects[0].volumes[0].id;
+        CHECK_EQ(snap.objects[0].override_count, 0u);
+        orca_scene_snapshot_dispose(&snap);
+    }
+
+    GUARD(e1, orca_plater_settings_set(plater, object_id, 0, "no_such_key", "1", &revision));
+    expect_code(e1, ORCA_STATUS_INVALID_ARGUMENT, "unknown key");
+    GUARD(e2, orca_plater_settings_set(plater, object_id, part_id, "layer_height", "0.1", &revision));
+    expect_code(e2, ORCA_STATUS_INVALID_ARGUMENT, "object-only key on a part");
+    GUARD(e3, orca_plater_settings_set(plater, object_id, 0, "wall_loops", "lots", &revision));
+    expect_code(e3, ORCA_STATUS_INVALID_CONFIGURATION, "unparsable value");
+    GUARD(e4, orca_plater_settings_erase(plater, object_id, 0, "wall_loops", &revision));
+    expect_code(e4, ORCA_STATUS_NOT_FOUND, "erase absent override");
+
+    GUARD(g4, orca_plater_settings_set(plater, object_id, 0, "sparse_infill_density", "35%", &revision));
+    expect_ok(g4, "object override");
+    GUARD(g5, orca_plater_settings_set(plater, object_id, part_id, "wall_loops", "5", &revision));
+    expect_ok(g5, "part override");
+    orca_owned_string dump{};
+    GUARD(g6, orca_plater_settings_dump(plater, object_id, 0, &dump));
+    expect_ok(g6, "object dump");
+    CHECK(dump.data && strstr(dump.data, "\"sparse_infill_density\":\"35%\"") != nullptr);
+    orca_owned_string_dispose(&dump);
+    GUARD(g7, orca_plater_settings_dump(plater, object_id, part_id, &dump));
+    expect_ok(g7, "part dump");
+    CHECK(dump.data && strstr(dump.data, "\"wall_loops\":\"5\"") != nullptr);
+    orca_owned_string_dispose(&dump);
+    {
+        orca_scene_snapshot snap = take_snapshot(plater);
+        CHECK_EQ(snap.objects[0].override_count, 1u);
+        CHECK_EQ(snap.objects[0].volumes[0].override_count, 1u);
+        CHECK(snapshot_label(snap.undo_label) == "Part setting");
+        orca_scene_snapshot_dispose(&snap);
+    }
+    // undo removes the part override, erase removes the object one
+    GUARD(g8, orca_plater_undo(plater, &revision));
+    expect_ok(g8, "undo part override");
+    GUARD(g9, orca_plater_settings_erase(plater, object_id, 0, "sparse_infill_density", &revision));
+    expect_ok(g9, "erase object override");
+    {
+        orca_scene_snapshot snap = take_snapshot(plater);
+        CHECK_EQ(snap.objects[0].override_count, 0u);
+        CHECK_EQ(snap.objects[0].volumes[0].override_count, 0u);
+        orca_scene_snapshot_dispose(&snap);
+    }
     orca_plater_free(plater);
 }
 
@@ -2670,6 +2742,7 @@ int main() {
     test_volumes(dir);
     test_mirror_clipboard(dir);
     test_group_transforms(dir);
+    test_object_settings(dir);
     test_add_failures(dir);
     test_stable_ids_and_revisions(dir);
     test_not_found_and_validation(dir);

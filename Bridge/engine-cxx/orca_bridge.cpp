@@ -1021,6 +1021,34 @@ static Slic3r::ModelVolume *plater_volume(Slic3r::ModelObject *object,
     return nullptr;
 }
 
+/// Keys an object / volume config may override (desktop
+/// SettingsFactory::get_options): region keys for volumes, region + object
+/// keys for objects.
+static const std::set<std::string> &orcapad_settings_keys(bool for_volume) {
+    static const std::set<std::string> region = [] {
+        const Slic3r::PrintRegionConfig config;
+        const auto keys = config.keys();
+        return std::set<std::string>(keys.begin(), keys.end());
+    }();
+    static const std::set<std::string> object = [] {
+        std::set<std::string> keys = region;
+        const Slic3r::PrintObjectConfig config;
+        for (const std::string &key : config.keys()) keys.insert(key);
+        return keys;
+    }();
+    return for_volume ? region : object;
+}
+
+/// Overrides shown to users: the allowed keys a config sets ("extruder" is
+/// the filament assignment, handled by plate.object-filament).
+static size_t orcapad_override_count(const Slic3r::DynamicPrintConfig &config) {
+    size_t count = 0;
+    const std::set<std::string> &allowed = orcapad_settings_keys(false);
+    for (const std::string &key : config.keys())
+        if (allowed.count(key)) ++count;
+    return count;
+}
+
 /// Marks an object's volume composition as changed (client caches key on
 /// the object mesh revision).
 static void orcapad_touch_object(orca_plater &plater, orca_object_id object_id) {
@@ -2067,6 +2095,137 @@ orca_result orca_plater_instance_mirror(orca_plater *plater,
     });
 }
 
+/// Resolves a settings target: the object config (volume_id 0) or one
+/// volume's config.
+static orca_result orcapad_settings_target(orca_plater *plater, orca_object_id object_id,
+                                           orca_volume_id volume_id, const char *operation,
+                                           Slic3r::ModelConfig **out_config,
+                                           bool *out_is_volume) {
+    Slic3r::ModelObject *object = plater_obj(plater, object_id);
+    if (!object)
+        return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation, "object was not found");
+    if (volume_id == 0) {
+        *out_config = &object->config;
+        *out_is_volume = false;
+        return orcapad_ok();
+    }
+    Slic3r::ModelVolume *volume = plater_volume(object, volume_id);
+    if (!volume)
+        return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation, "volume was not found");
+    *out_config = &volume->config;
+    *out_is_volume = true;
+    return orcapad_ok();
+}
+
+orca_result orca_plater_settings_keys(uint8_t for_volume, orca_owned_string *out_json) {
+    constexpr const char *operation = "orca_plater_settings_keys";
+    if (out_json) *out_json = orcapad_empty_string();
+    if (!out_json)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation, "output pointer is null");
+    return orcapad_guard(operation, [&]() -> orca_result {
+        nlohmann::json keys = nlohmann::json::array();
+        for (const std::string &key : orcapad_settings_keys(for_volume != 0)) keys.push_back(key);
+        if (!orcapad_copy_string(keys.dump().c_str(), out_json))
+            return orcapad_fail(ORCA_STATUS_OUT_OF_MEMORY, operation,
+                                "could not allocate the key list");
+        return orcapad_ok();
+    });
+}
+
+orca_result orca_plater_settings_dump(orca_plater *plater, orca_object_id object_id,
+                                      orca_volume_id volume_id,
+                                      orca_owned_string *out_json) {
+    constexpr const char *operation = "orca_plater_settings_dump";
+    if (out_json) *out_json = orcapad_empty_string();
+    if (!plater)
+        return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation, "plater handle is null");
+    if (!out_json)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation, "output pointer is null");
+    return orcapad_guard(operation, [&]() -> orca_result {
+        Slic3r::ModelConfig *config = nullptr;
+        bool is_volume = false;
+        const orca_result found = orcapad_settings_target(
+            plater, object_id, volume_id, operation, &config, &is_volume);
+        if (found.code != ORCA_STATUS_OK) return found;
+        const std::set<std::string> &allowed = orcapad_settings_keys(is_volume);
+        nlohmann::json out = nlohmann::json::object();
+        for (const std::string &key : config->keys())
+            if (allowed.count(key)) out[key] = config->opt_serialize(key);
+        if (!orcapad_copy_string(out.dump().c_str(), out_json))
+            return orcapad_fail(ORCA_STATUS_OUT_OF_MEMORY, operation,
+                                "could not allocate the override dump");
+        return orcapad_ok();
+    });
+}
+
+orca_result orca_plater_settings_set(orca_plater *plater, orca_object_id object_id,
+                                     orca_volume_id volume_id, const char *key,
+                                     const char *serialized_value,
+                                     orca_revision *out_revision) {
+    constexpr const char *operation = "orca_plater_settings_set";
+    if (out_revision) *out_revision = 0;
+    if (!plater)
+        return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation, "plater handle is null");
+    if (!key || !key[0] || !serialized_value || !out_revision)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "key, value or output pointer is null");
+    return orcapad_guard(operation, [&]() -> orca_result {
+        Slic3r::ModelConfig *config = nullptr;
+        bool is_volume = false;
+        const orca_result found = orcapad_settings_target(
+            plater, object_id, volume_id, operation, &config, &is_volume);
+        if (found.code != ORCA_STATUS_OK) return found;
+        if (!orcapad_settings_keys(is_volume).count(key))
+            return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                                is_volume ? "this option cannot be overridden per part"
+                                          : "this option cannot be overridden per object");
+        if (!orcapad_revision_available(*plater))
+            return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
+                                "document revision is exhausted");
+        OrcapadMutation mutation(*plater, is_volume ? "Part setting" : "Object setting");
+        // re-resolve inside the mutation scope (pointers stay valid: the
+        // scope copies the document, the live model is unchanged)
+        Slic3r::ConfigSubstitutionContext substitutions(
+            Slic3r::ForwardCompatibilitySubstitutionRule::Disable);
+        try {
+            config->set_deserialize(key, serialized_value, substitutions);
+        } catch (const std::exception &error) {
+            return orcapad_fail(ORCA_STATUS_INVALID_CONFIGURATION, operation, error.what());
+        }
+        *out_revision = mutation.commit();
+        return orcapad_ok();
+    });
+}
+
+orca_result orca_plater_settings_erase(orca_plater *plater, orca_object_id object_id,
+                                       orca_volume_id volume_id, const char *key,
+                                       orca_revision *out_revision) {
+    constexpr const char *operation = "orca_plater_settings_erase";
+    if (out_revision) *out_revision = 0;
+    if (!plater)
+        return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation, "plater handle is null");
+    if (!key || !key[0] || !out_revision)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "key or output pointer is null");
+    return orcapad_guard(operation, [&]() -> orca_result {
+        Slic3r::ModelConfig *config = nullptr;
+        bool is_volume = false;
+        const orca_result found = orcapad_settings_target(
+            plater, object_id, volume_id, operation, &config, &is_volume);
+        if (found.code != ORCA_STATUS_OK) return found;
+        if (!config->has(key))
+            return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation,
+                                "the option is not overridden here");
+        if (!orcapad_revision_available(*plater))
+            return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
+                                "document revision is exhausted");
+        OrcapadMutation mutation(*plater, is_volume ? "Part setting" : "Object setting");
+        config->erase(key);
+        *out_revision = mutation.commit();
+        return orcapad_ok();
+    });
+}
+
 orca_result orca_plater_object_copy(orca_plater *plater, orca_object_id object_id) {
     constexpr const char *operation = "orca_plater_object_copy";
     if (!plater)
@@ -2223,6 +2382,8 @@ orca_result orca_plater_snapshot(orca_plater *plater,
                 return fail_snapshot(ORCA_STATUS_INTERNAL_INVARIANT,
                                      "object mesh revision is missing");
             object.mesh_revision = mesh_revision->second;
+            object.override_count = static_cast<uint32_t>(
+                orcapad_override_count(model_object->config.get()));
             if (!orcapad_copy_string(model_object->name.c_str(), &object.name))
                 return fail_snapshot(ORCA_STATUS_OUT_OF_MEMORY,
                                      "could not allocate object name");
@@ -2362,6 +2523,8 @@ orca_result orca_plater_snapshot(orca_plater *plater,
                 volume.type = role;
                 volume.extruder = model_volume->config.has("extruder")
                     ? model_volume->config.opt_int("extruder") : 0;
+                volume.override_count = static_cast<uint32_t>(
+                    orcapad_override_count(model_volume->config.get()));
                 if (!orcapad_copy_string(model_volume->name.c_str(), &volume.name))
                     return fail_snapshot(ORCA_STATUS_OUT_OF_MEMORY,
                                          "could not allocate volume name");
