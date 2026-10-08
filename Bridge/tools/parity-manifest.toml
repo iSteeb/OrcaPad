@@ -103,11 +103,13 @@ evidence = ['client:func select\(objectID: ObjectID\?', "client:func pick"]
 id = "plate.multi-select"
 area = "plate"
 title = "Multi-select, rectangle select, select all"
-status = "missing"
+status = "partial"
 desktop = ["menu:Select all", "context:Select All", "kb:Select multiple objects", "kb:Select objects by rectangle"]
-work = "UI + Bridge"
+evidence = ["abi:orca_plater_instances_set", "abi:orca_plater_instances_rotate",
+            'client:func toggleSelect\(', 'client:func selectAll\(', "client:UILongPressGestureRecognizer"]
+gap = "no rectangle (marquee) selection; group delete files one undo step per member"
+work = "UI"
 priority = 7
-
 [[feature]]
 id = "plate.move"
 area = "plate"

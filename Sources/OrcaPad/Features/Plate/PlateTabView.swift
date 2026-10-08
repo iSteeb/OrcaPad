@@ -60,7 +60,8 @@ struct PlateTabView: View {
                             name: object.name,
                             instanceOrdinal: (object.instances.firstIndex { $0.id == selection.instanceID } ?? 0) + 1,
                             instanceCount: object.instances.count,
-                            size: document.selectedSize ?? .zero
+                            size: document.selectedSize ?? .zero,
+                            selectionCount: document.selectedGroup.count
                         ),
                         transform: transform,
                         meshSize: object.mesh.bounds.size,
@@ -138,7 +139,8 @@ struct PlateTabView: View {
                     bed: bed,
                     selectedObjectID: document.selection?.objectID,
                     selectedInstanceID: document.selection?.instanceID,
-                    previewMatrix: document.previewMatrix,
+                    highlightedInstanceIDs: Set(document.selectedGroup.map(\.instanceID)),
+                    previewMatrices: document.previewMatrices,
                     presentationRevision: document.presentationRevision,
                     frameRequest: document.frameRequest,
                     cameraRequest: (document.cameraRequestID, document.cameraPreset),
@@ -147,6 +149,7 @@ struct PlateTabView: View {
                 ),
                 manipulation: CanvasManipulation(
                     onSelect: { document.select(objectID: $0, instanceID: $1) },
+                    onToggleSelect: { document.toggleSelect(objectID: $0, instanceID: $1) },
                     onMove: { document.moveSelected(by: $0) },
                     onBegin: { document.beginManipulation() },
                     onRotate: { document.previewRotation(axis: rotationAxis, deltaRadians: $0) },
@@ -309,6 +312,10 @@ struct PlateTabView: View {
     }
 
     private func deleteSelection() {
+        if document.hasMultiSelection {
+            Task { await document.deleteSelectedGroup() }
+            return
+        }
         guard let selection = document.selection,
               let object = document.scene?.object(id: selection.objectID) else { return }
         Task {
@@ -403,6 +410,14 @@ struct PlateTabView: View {
                     }
                     .disabled(objects.isEmpty || document.isBusy)
                 }
+                ToolbarItem(placement: .topBarLeading) {
+                    if document.hasMultiSelection {
+                        Button("Clear selection") { document.clearMultiSelection() }
+                    } else {
+                        Button("Select all") { document.selectAll() }
+                            .disabled(objects.isEmpty)
+                    }
+                }
             }
             .alert("Rename", isPresented: Binding(
                 get: { renameTarget != nil },
@@ -450,6 +465,11 @@ extension PlateTabView {
     private func objectRow(_ object: SceneObject) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack {
+                if document.hasMultiSelection {
+                    Image(systemName: isMultiSelected(object)
+                          ? "checkmark.circle.fill" : "circle")
+                        .foregroundStyle(isMultiSelected(object) ? Color.accentColor : .secondary)
+                }
                 VStack(alignment: .leading, spacing: 2) {
                     Text(object.name).lineLimit(1)
                     Text(object.volumes.count > 1
@@ -487,12 +507,25 @@ extension PlateTabView {
         }
         .contentShape(Rectangle())
         .onTapGesture {
+            if document.hasMultiSelection, let instanceID = object.instances.first?.id {
+                document.toggleSelect(objectID: object.id, instanceID: instanceID)
+                return
+            }
             document.select(
                 objectID: object.id,
                 instanceID: object.instances.first?.id
             )
             objectsPresented = false
         }
+        .onLongPressGesture {
+            if let instanceID = object.instances.first?.id {
+                document.toggleSelect(objectID: object.id, instanceID: instanceID)
+            }
+        }
+    }
+
+    private func isMultiSelected(_ object: SceneObject) -> Bool {
+        document.selectedGroup.contains { $0.objectID == object.id }
     }
 
     /// Desktop object context menu: split, add volumes, rename.
@@ -736,6 +769,8 @@ private struct PanelHeader {
     let instanceOrdinal: Int
     let instanceCount: Int
     let size: SIMD3<Float>
+    /// Members of a multi-selection (1 = single).
+    var selectionCount = 1
 }
 
 private struct ManipulationActions {
@@ -764,6 +799,11 @@ private struct ManipulationPanel: View {
                 Text("instance \(header.instanceOrdinal)/\(header.instanceCount)")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                if header.selectionCount > 1 {
+                    Text("+\(header.selectionCount - 1) selected")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(Color.accentColor)
+                }
                 Spacer()
                 Text(String(format: "%.1f × %.1f × %.1f mm", header.size.x, header.size.y, header.size.z))
                     .font(.caption.monospaced())

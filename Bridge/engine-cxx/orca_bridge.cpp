@@ -14,6 +14,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <new>
 #include <stdexcept>
 #include <string>
@@ -1913,6 +1914,120 @@ orca_result orca_plater_split_parts(orca_plater *plater, orca_object_id object_i
                                 "the part could not be split (a single body)");
         orcapad_touch_object(*plater, object_id);
         *out_part_count = static_cast<uint32_t>(parts);
+        *out_revision = mutation.commit();
+        return orcapad_ok();
+    });
+}
+
+/// Resolves N parallel (object, instance) pairs; every pair must exist.
+static orca_result orcapad_resolve_group(
+    orca_plater *plater, const orca_object_id *object_ids,
+    const orca_instance_id *instance_ids, int32_t count,
+    const char *operation, std::vector<Slic3r::ModelInstance *> *out) {
+    if (count <= 0 || count > 1'000'000)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "group count is out of range");
+    std::set<size_t> seen;
+    for (int32_t index = 0; index < count; ++index) {
+        Slic3r::ModelObject *object = plater_obj(plater, object_ids[index]);
+        if (!object)
+            return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation,
+                                "group object was not found");
+        Slic3r::ModelInstance *instance =
+            plater_instance(object, instance_ids[index]);
+        if (!instance)
+            return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation,
+                                "group instance was not found");
+        const size_t key = reinterpret_cast<size_t>(instance);
+        if (!seen.insert(key).second)
+            return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                                "group lists an instance twice");
+        out->push_back(instance);
+    }
+    return orcapad_ok();
+}
+
+orca_result orca_plater_instances_set(
+    orca_plater *plater,
+    const orca_object_id *object_ids,
+    const orca_instance_id *instance_ids,
+    const orca_instance_transform *transforms,
+    int32_t count, const char *label,
+    orca_revision *out_revision) {
+    constexpr const char *operation = "orca_plater_instances_set";
+    if (out_revision) *out_revision = 0;
+    if (!plater)
+        return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation, "plater handle is null");
+    if (!object_ids || !instance_ids || !transforms || !out_revision)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "input or output pointer is null");
+    for (int32_t index = 0; index < count; ++index)
+        if (!orcapad_valid_transform(transforms[index]))
+            return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                                "a group transform is invalid");
+    return orcapad_guard(operation, [&]() -> orca_result {
+        if (!orcapad_revision_available(*plater))
+            return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
+                                "document revision is exhausted");
+        std::vector<Slic3r::ModelInstance *> group;
+        const orca_result found = orcapad_resolve_group(
+            plater, object_ids, instance_ids, count, operation, &group);
+        if (found.code != ORCA_STATUS_OK) return found;
+        OrcapadMutation mutation(*plater, label && label[0] ? label : "Transform");
+        for (int32_t index = 0; index < count; ++index) {
+            Slic3r::ModelInstance *instance = group[static_cast<size_t>(index)];
+            const orca_instance_transform &wanted = transforms[index];
+            Slic3r::Geometry::Transformation candidate = instance->get_transformation();
+            candidate.set_offset(Slic3r::Vec3d(
+                wanted.offset_x, wanted.offset_y, wanted.offset_z));
+            candidate.set_rotation(Slic3r::Vec3d(
+                wanted.rotation_x, wanted.rotation_y, wanted.rotation_z));
+            candidate.set_scaling_factor(Slic3r::Vec3d(
+                wanted.scale_x, wanted.scale_y, wanted.scale_z));
+            instance->set_transformation(candidate);
+            orcapad_rest_on_bed(instance->get_object(), instance);
+        }
+        *out_revision = mutation.commit();
+        return orcapad_ok();
+    });
+}
+
+orca_result orca_plater_instances_rotate(
+    orca_plater *plater,
+    const orca_object_id *object_ids,
+    const orca_instance_id *instance_ids,
+    int32_t count, int32_t axis, double radians,
+    orca_revision *out_revision) {
+    constexpr const char *operation = "orca_plater_instances_rotate";
+    if (out_revision) *out_revision = 0;
+    if (!plater)
+        return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation, "plater handle is null");
+    if (!object_ids || !instance_ids || !out_revision)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "input or output pointer is null");
+    if (axis < 0 || axis > 2)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "axis must be 0 (X), 1 (Y), or 2 (Z)");
+    if (!std::isfinite(radians))
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "rotation angle is not finite");
+    return orcapad_guard(operation, [&]() -> orca_result {
+        if (!orcapad_revision_available(*plater))
+            return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
+                                "document revision is exhausted");
+        std::vector<Slic3r::ModelInstance *> group;
+        const orca_result found = orcapad_resolve_group(
+            plater, object_ids, instance_ids, count, operation, &group);
+        if (found.code != ORCA_STATUS_OK) return found;
+        OrcapadMutation mutation(*plater, "Rotate");
+        const Slic3r::Vec3d world_axis = axis == 0 ? Slic3r::Vec3d::UnitX()
+            : axis == 1 ? Slic3r::Vec3d::UnitY() : Slic3r::Vec3d::UnitZ();
+        const Slic3r::Matrix3d rotation =
+            Eigen::AngleAxisd(radians, world_axis).toRotationMatrix();
+        for (Slic3r::ModelInstance *instance : group) {
+            instance->rotate(rotation);
+            orcapad_rest_on_bed(instance->get_object(), instance);
+        }
         *out_revision = mutation.commit();
         return orcapad_ok();
     });

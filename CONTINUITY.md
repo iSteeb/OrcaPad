@@ -41,6 +41,10 @@
 
 ## PROGRESS
 
+- [2026-10-07 CODE][TOOL] ABI v21: group transforms (instances_set /
+  instances_rotate, one undo step); client multi-selection (long-press
+  toggle, select all, group move/rotate/delete, per-instance previews).
+  v20 installed on iPoke. Host tests 50,881 PASS.
 - [2026-10-07 CODE][TOOL] ABI v20: mirror (left-handed instances in
   snapshots + renderer normal-sign flip), object copy/paste clipboard,
   camera view presets (client), copy/paste keyboard shortcuts.

@@ -10,8 +10,10 @@ struct SceneSync {
     var bed: EngineBed
     var selectedObjectID: ObjectID?
     var selectedInstanceID: InstanceID?
-    /// Live gesture preview of the selected instance (engine-frame matrix).
-    var previewMatrix: simd_float4x4?
+    /// Every selected instance (multi-selection highlight).
+    var highlightedInstanceIDs: Set<InstanceID>
+    /// Live gesture previews (engine-frame matrices) keyed by instance.
+    var previewMatrices: [InstanceID: simd_float4x4]
     var presentationRevision: UInt64
     var frameRequest: UInt64
     /// Camera view preset request (advances when a preset is chosen).
@@ -23,6 +25,8 @@ struct SceneSync {
 /// Manipulation callbacks from the canvas gestures (engine-space units).
 struct CanvasManipulation {
     let onSelect: (ObjectID?, InstanceID?) -> Void
+    /// Desktop ctrl+click: long-press toggles multi-selection membership.
+    let onToggleSelect: (ObjectID, InstanceID) -> Void
     /// Incremental bed-plane translation in engine millimetres.
     let onMove: (SIMD2<Float>) -> Void
     let onBegin: () -> Void
@@ -91,7 +95,8 @@ struct MetalCanvas: UIViewRepresentable {
                     bed: scene.bed,
                     selectedObjectID: scene.selectedObjectID,
                     selectedInstanceID: scene.selectedInstanceID,
-                    previewMatrix: scene.previewMatrix
+                    highlightedInstanceIDs: scene.highlightedInstanceIDs,
+                    previewMatrices: scene.previewMatrices
                 )
                 coordinator.lastDocumentID = scene.snapshot.documentID
                 coordinator.lastDocumentRevision = scene.snapshot.revision
@@ -162,6 +167,21 @@ struct MetalCanvas: UIViewRepresentable {
 
             let pinch = UIPinchGestureRecognizer(target: self, action: #selector(onPinch(_:)))
             view.addGestureRecognizer(pinch)
+
+            // Desktop ctrl+click: long-press toggles multi-selection membership.
+            let longPress = UILongPressGestureRecognizer(
+                target: self, action: #selector(onLongPress(_:)))
+            longPress.minimumPressDuration = 0.45
+            view.addGestureRecognizer(longPress)
+        }
+
+        @objc private func onLongPress(_ gesture: UILongPressGestureRecognizer) {
+            guard gesture.state == .began,
+                  let view = gesture.view as? MTKView, let renderer else { return }
+            let location = gesture.location(in: view)
+            if let hit = renderer.pickInstance(at: location, in: view) {
+                manipulation?.onToggleSelect(hit.objectID, hit.instanceID)
+            }
         }
 
         func report(_ message: String) {

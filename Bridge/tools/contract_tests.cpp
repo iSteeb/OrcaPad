@@ -273,7 +273,7 @@ static void test_md5_shim() {
 
 static void test_abi_version() {
     CHECK_EQ(orca_bridge_abi_version(), ORCA_BRIDGE_ABI_VERSION);
-    CHECK_EQ(ORCA_BRIDGE_ABI_VERSION, 20);
+    CHECK_EQ(ORCA_BRIDGE_ABI_VERSION, 21);
 }
 
 static std::string snapshot_label(const orca_owned_string &label) {
@@ -1022,6 +1022,79 @@ static void test_mirror_clipboard(const std::string &dir) {
     expect_ok(g7, "undo unmirror");
     snap = take_snapshot(plater);
     CHECK_EQ(snap.objects[0].instances[0].mirrored, 1);
+    orca_scene_snapshot_dispose(&snap);
+
+    orca_plater_free(plater);
+}
+// ABI v21: group (multi-selection) transforms, one mutation / undo step.
+static void test_group_transforms(const std::string &dir) {
+    orca_plater *plater = nullptr;
+    GUARD(g0, orca_plater_new(&plater));
+    expect_ok(g0, "plater_new");
+    orca_revision revision = 0;
+    const std::string cube = write_cube_stl(dir, "group_cube.stl");
+    orca_object_id a = 0, b = 0;
+    GUARD(g1, import_one(plater, cube.c_str(), 80, 80, &a, &revision));
+    expect_ok(g1, "import a");
+    GUARD(g2, import_one(plater, cube.c_str(), 140, 80, &b, &revision));
+    expect_ok(g2, "import b");
+    orca_scene_snapshot snap = take_snapshot(plater);
+    const orca_object_id objects[2] = { a, b };
+    const orca_instance_id instances[2] = {
+        snap.objects[0].instances[0].id, snap.objects[1].instances[0].id
+    };
+    orca_instance_transform transforms[2] = {
+        snap.objects[0].instances[0].transform,
+        snap.objects[1].instances[0].transform
+    };
+    const uint32_t undo_before = snap.undo_count;
+    const double ax = snap.objects[0].instances[0].transform.offset_x;
+    orca_scene_snapshot_dispose(&snap);
+
+    // invalid group: bogus instance
+    const orca_instance_id bogus[2] = { instances[0], 0x7fffffff };
+    GUARD(e1, orca_plater_instances_rotate(plater, objects, bogus, 2, 2, 1.5,
+                                           &revision));
+    expect_code(e1, ORCA_STATUS_NOT_FOUND, "group rotate bogus instance");
+    // duplicate instance rejected
+    const orca_object_id dup_o[2] = { a, a };
+    const orca_instance_id dup_i[2] = { instances[0], instances[0] };
+    GUARD(e2, orca_plater_instances_rotate(plater, dup_o, dup_i, 2, 2, 1.5,
+                                           &revision));
+    expect_code(e2, ORCA_STATUS_INVALID_ARGUMENT, "group rotate duplicate");
+
+    // group move: one mutation, one undo step
+    transforms[0].offset_x += 10.0;
+    transforms[1].offset_x += 10.0;
+    GUARD(g3, orca_plater_instances_set(plater, objects, instances, transforms, 2,
+                                        "Move", &revision));
+    expect_ok(g3, "group set");
+    snap = take_snapshot(plater);
+    CHECK_EQ(snap.undo_count, undo_before + 1);
+    CHECK(snapshot_label(snap.undo_label) == "Move");
+    CHECK_NEAR(snap.objects[0].instances[0].transform.offset_x, ax + 10.0, 1e-9);
+    orca_scene_snapshot_dispose(&snap);
+
+    // one undo reverts BOTH instances
+    GUARD(g4, orca_plater_undo(plater, &revision));
+    expect_ok(g4, "undo group move");
+    snap = take_snapshot(plater);
+    CHECK_NEAR(snap.objects[0].instances[0].transform.offset_x, ax, 1e-9);
+    orca_scene_snapshot_dispose(&snap);
+
+    // group rotate
+    GUARD(g5, orca_plater_instances_rotate(plater, objects, instances, 2, 0,
+                                           0.5, &revision));
+    expect_ok(g5, "group rotate");
+    snap = take_snapshot(plater);
+    CHECK(snapshot_label(snap.undo_label) == "Rotate");
+    CHECK_NEAR(snap.objects[0].instances[0].transform.rotation_x, 0.5, 1e-9);
+    CHECK_NEAR(snap.objects[1].instances[0].transform.rotation_x, 0.5, 1e-9);
+    orca_scene_snapshot_dispose(&snap);
+    GUARD(g6, orca_plater_undo(plater, &revision));
+    expect_ok(g6, "undo group rotate");
+    snap = take_snapshot(plater);
+    CHECK_NEAR(snap.objects[0].instances[0].transform.rotation_x, 0.0, 1e-9);
     orca_scene_snapshot_dispose(&snap);
 
     orca_plater_free(plater);
@@ -2596,6 +2669,7 @@ int main() {
     test_history(dir);
     test_volumes(dir);
     test_mirror_clipboard(dir);
+    test_group_transforms(dir);
     test_add_failures(dir);
     test_stable_ids_and_revisions(dir);
     test_not_found_and_validation(dir);

@@ -23,7 +23,7 @@ enum ThumbnailService {
         }
         try renderer.applyScene(
             scene, bed: bed,
-            selectedObjectID: nil, selectedInstanceID: nil, previewMatrix: nil
+            selectedObjectID: nil, selectedInstanceID: nil, highlightedInstanceIDs: [], previewMatrices: [:]
         )
         return try renderer.renderThumbnail(size: size, colorFormat: view.colorPixelFormat)
     }

@@ -7,7 +7,7 @@ extern "C" {
 #endif
 
 /// Version of the C ABI contract in this header. Callers verify it at runtime.
-#define ORCA_BRIDGE_ABI_VERSION ((uint32_t)20)
+#define ORCA_BRIDGE_ABI_VERSION ((uint32_t)21)
 
 typedef int32_t orca_status_code;
 #define ORCA_STATUS_OK                     ((orca_status_code)0)
@@ -273,6 +273,25 @@ orca_result orca_plater_instance_mirror(orca_plater *plater,
                                         orca_object_id object_id,
                                         orca_instance_id instance_id,
                                         int32_t axis, orca_revision *out_revision);
+/// Group (multi-selection) operations: N parallel (object, instance) pairs,
+/// applied atomically as ONE mutation and ONE undo step.
+/// orca_plater_instances_set applies absolute transforms (rested on bed);
+/// `label` names the undo step (NULL/empty = "Transform").
+orca_result orca_plater_instances_set(
+    orca_plater *plater,
+    const orca_object_id *object_ids,
+    const orca_instance_id *instance_ids,
+    const orca_instance_transform *transforms,
+    int32_t count, const char *label,
+    orca_revision *out_revision);
+/// Rotates every listed instance by the same world-axis step through its own
+/// origin (desktop multi-selection rotate), rested on bed.
+orca_result orca_plater_instances_rotate(
+    orca_plater *plater,
+    const orca_object_id *object_ids,
+    const orca_instance_id *instance_ids,
+    int32_t count, int32_t axis, double radians,
+    orca_revision *out_revision);
 /// Desktop clipboard: copies one object (volumes + instances). No document
 /// change, no undo step.
 orca_result orca_plater_object_copy(orca_plater *plater, orca_object_id object_id);

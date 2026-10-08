@@ -34,9 +34,19 @@ final class DocumentStore {
     private let status: StatusCenter
     private var plater: EnginePlater?
     private(set) var scene: SceneSnapshot?
+    /// Primary selection (panels and single-object actions).
     private(set) var selection: InstanceSelection?
-    /// Live gesture preview of the selected instance (engine-frame matrix).
-    private(set) var previewMatrix: simd_float4x4?
+    /// Multi-selection members (desktop ctrl+click), primary included.
+    private(set) var multiSelection: [InstanceSelection] = []
+    /// Live gesture previews (engine-frame matrices), one per instance.
+    private(set) var previewMatrices: [InstanceID: simd_float4x4] = [:]
+
+    /// Every selected instance (multi when active, else the primary).
+    var selectedGroup: [InstanceSelection] {
+        multiSelection.isEmpty ? selection.map { [$0] } ?? [] : multiSelection
+    }
+
+    var hasMultiSelection: Bool { multiSelection.count > 1 }
     private(set) var presentationRevision: UInt64 = 0
     private(set) var frameRequest: UInt64 = 0
     private(set) var cameraRequestID: UInt64 = 0
@@ -327,6 +337,32 @@ final class DocumentStore {
         )
     }
 
+    /// Desktop "Delete selected" for a multi-selection: whole objects when
+    /// every instance is selected, otherwise the selected instances.
+    func deleteSelectedGroup() async {
+        guard let scene else { return }
+        let group = selectedGroup
+        guard !group.isEmpty else { return }
+        let byObject = Dictionary(grouping: group, by: \.objectID)
+        var objectsToDelete: [ObjectID] = []
+        var instancesToDelete: [InstanceSelection] = []
+        for (objectID, members) in byObject {
+            guard let object = scene.object(id: objectID) else { continue }
+            if members.count >= object.instances.count {
+                objectsToDelete.append(objectID)
+            } else {
+                instancesToDelete.append(contentsOf: members)
+            }
+        }
+        for member in instancesToDelete {
+            await deleteInstance(member.instanceID, of: member.objectID)
+        }
+        if !objectsToDelete.isEmpty {
+            await deleteObjects(objectsToDelete)
+        }
+        multiSelection = []
+    }
+
     // MARK: Mirror / clipboard (desktop object menu)
 
     func mirrorSelected(axis: EngineAxis) async {
@@ -451,16 +487,58 @@ final class DocumentStore {
                   instanceID: instanceID
               ) != nil else {
             selection = nil
-            previewMatrix = nil
-            presentationRevision += 1
+            multiSelection = []
+            clearPreview()
             return
         }
-        selection = InstanceSelection(
-            objectID: objectID,
-            instanceID: instanceID
-        )
-        previewMatrix = nil
-        presentationRevision += 1
+        selection = InstanceSelection(objectID: objectID, instanceID: instanceID)
+        if multiSelection.count > 1 { multiSelection = [selection!] }
+        clearPreview()
+    }
+
+    /// Desktop ctrl+click: toggles membership of a multi-selection; the
+    /// toggled instance becomes the primary when added.
+    func toggleSelect(objectID: ObjectID, instanceID: InstanceID) {
+        guard scene?.instance(objectID: objectID, instanceID: instanceID) != nil else {
+            return
+        }
+        let member = InstanceSelection(objectID: objectID, instanceID: instanceID)
+        if let index = multiSelection.firstIndex(of: member) {
+            multiSelection.remove(at: index)
+            if multiSelection.isEmpty {
+                selection = member  // deselected the last member: keep primary
+            } else {
+                selection = multiSelection.first
+            }
+        } else {
+            if selection != nil && multiSelection.isEmpty {
+                multiSelection = [selection!]
+            }
+            multiSelection.append(member)
+            selection = member
+        }
+        clearPreview()
+    }
+
+    /// Desktop "Select all": every instance of every object.
+    func selectAll() {
+        guard let scene else { return }
+        var all: [InstanceSelection] = []
+        for object in scene.objects {
+            for instance in object.instances {
+                all.append(InstanceSelection(objectID: object.id, instanceID: instance.id))
+            }
+        }
+        guard !all.isEmpty else { return }
+        multiSelection = all
+        selection = all.first
+        clearPreview()
+    }
+
+    func clearMultiSelection() {
+        guard !multiSelection.isEmpty else { return }
+        multiSelection = selection.map { [$0] } ?? []
+        clearPreview()
     }
 
     // MARK: Manipulation (gesture previews on the engine matrix → one
@@ -483,6 +561,11 @@ final class DocumentStore {
         return scene?.instance(objectID: selection.objectID, instanceID: selection.instanceID)
     }
 
+    private func instanceMatrix(_ member: InstanceSelection) -> simd_float4x4? {
+        scene?.instance(objectID: member.objectID, instanceID: member.instanceID)
+            .map { EngineMatrix.float($0.matrix) }
+    }
+
     var selectedAuthoritativeTransform: InstanceTransform? { selectedInstance?.transform }
 
     private var selectedAuthoritativeMatrix: simd_float4x4? {
@@ -502,25 +585,37 @@ final class DocumentStore {
     }
 
     func moveSelected(by delta: SIMD2<Float>) {
-        guard !isBusy, let current = previewMatrix ?? selectedAuthoritativeMatrix else { return }
-        previewMatrix = EngineMatrix.translation(SIMD3(delta.x, delta.y, 0)) * current
+        guard !isBusy else { return }
+        for member in selectedGroup {
+            guard let current = previewMatrices[member.instanceID] ?? instanceMatrix(member) else {
+                continue
+            }
+            previewMatrices[member.instanceID] =
+                EngineMatrix.translation(SIMD3(delta.x, delta.y, 0)) * current
+        }
         pending = .move
         presentationRevision += 1
     }
 
     func beginManipulation() {
         guard !isBusy else { return }
-        manipulationBase = previewMatrix ?? selectedAuthoritativeMatrix
+        manipulationBase = selection.flatMap { previewMatrices[$0.instanceID] }
+            ?? selectedAuthoritativeMatrix
+        groupBases = selectedGroup.reduce(into: [:]) { bases, member in
+            if let matrix = instanceMatrix(member) { bases[member.instanceID] = matrix }
+        }
     }
+
+    private var groupBases: [InstanceID: simd_float4x4] = [:]
 
     /// Live rotation preview about a world axis through the object center,
     /// snapped to `rotationSnapDegrees`.
     func previewRotation(axis: EngineAxis, deltaRadians: Double) {
-        guard !isBusy, let base = manipulationBase else { return }
+        guard !isBusy, let selection, let base = manipulationBase else { return }
         let step = Self.rotationSnapDegrees * .pi / 180
         let snapped = (deltaRadians / step).rounded() * step
         let origin = EngineMatrix.origin(base)
-        previewMatrix = EngineMatrix.translation(origin)
+        previewMatrices[selection.instanceID] = EngineMatrix.translation(origin)
             * EngineMatrix.rotation(axis, radians: Float(snapped))
             * EngineMatrix.translation(-origin)
             * base
@@ -530,16 +625,17 @@ final class DocumentStore {
 
     /// Live uniform-scale preview (local axes, about the object center).
     func previewScale(factor: Double) {
-        guard !isBusy, let base = manipulationBase, factor.isFinite, factor > 0 else { return }
+        guard !isBusy, let selection, let base = manipulationBase,
+              factor.isFinite, factor > 0 else { return }
         let clamped = min(max(factor, 0.01), 100)
-        previewMatrix = base * EngineMatrix.scale(SIMD3(repeating: Float(clamped)))
+        previewMatrices[selection.instanceID] =
+            base * EngineMatrix.scale(SIMD3(repeating: Float(clamped)))
         pending = .scale(clamped)
         presentationRevision += 1
     }
 
     func commitSelectedTransform() async {
         let gesture = pending
-        let previewed = previewMatrix
         pending = nil
         manipulationBase = nil
         guard let selection,
@@ -551,8 +647,36 @@ final class DocumentStore {
         }
         switch gesture {
         case .move:
-            guard let previewed else { clearPreview(); return }
+            guard let previewed = previewMatrices[selection.instanceID] else {
+                clearPreview()
+                return
+            }
             let delta = EngineMatrix.origin(previewed) - EngineMatrix.origin(authoritativeMatrix)
+            if selectedGroup.count > 1 {
+                var group: [EnginePlater.GroupTransform] = []
+                for member in selectedGroup {
+                    guard
+                        groupBases[member.instanceID] != nil,
+                        let transform = scene?.instance(
+                            objectID: member.objectID, instanceID: member.instanceID
+                        )?.transform
+                    else { continue }
+                    var moved = transform
+                    moved.offsetX += Double(delta.x)
+                    moved.offsetY += Double(delta.y)
+                    group.append(EnginePlater.GroupTransform(
+                        instance: EnginePlater.GroupInstance(
+                            objectID: member.objectID, instanceID: member.instanceID
+                        ),
+                        transform: moved
+                    ))
+                }
+                _ = await applyMutation(
+                    .groupSetTransforms(group, label: "Move"),
+                    operation: "move selection"
+                )
+                return
+            }
             var moved = authoritative
             moved.offsetX += Double(delta.x)
             moved.offsetY += Double(delta.y)
@@ -670,9 +794,20 @@ final class DocumentStore {
 
     func rotateSelected(axis: EngineAxis, degrees: Double) async {
         guard let selection else { return }
+        let radians = degrees * .pi / 180
+        if selectedGroup.count > 1 {
+            let group = selectedGroup.map {
+                EnginePlater.GroupInstance(objectID: $0.objectID, instanceID: $0.instanceID)
+            }
+            _ = await applyMutation(
+                .groupRotate(group, axis: axis, radians: radians),
+                operation: "rotate selection"
+            )
+            return
+        }
         _ = await applyMutation(
             .rotate(objectID: selection.objectID, instanceID: selection.instanceID,
-                    axis: axis, radians: degrees * .pi / 180),
+                    axis: axis, radians: radians),
             operation: "rotate"
         )
     }
@@ -686,7 +821,7 @@ final class DocumentStore {
     }
 
     private func clearPreview() {
-        previewMatrix = nil
+        previewMatrices = [:]
         presentationRevision += 1
     }
 
@@ -721,8 +856,7 @@ final class DocumentStore {
             install(mutation.snapshot)
             return mutation
         case .failure(let failure):
-            previewMatrix = nil
-            presentationRevision += 1
+            clearPreview()
             status.report(.document, failure: failure)
             return nil
         }
@@ -732,7 +866,7 @@ final class DocumentStore {
         if let current = scene,
            current.documentID == authoritativeScene.documentID,
            authoritativeScene.revision < current.revision {
-            previewMatrix = nil
+            previewMatrices = [:]
             presentationRevision += 1
             status.report(
                 .document,
@@ -744,7 +878,7 @@ final class DocumentStore {
             return
         }
         scene = authoritativeScene
-        previewMatrix = nil
+        previewMatrices = [:]
         if let selection,
            authoritativeScene.instance(
                objectID: selection.objectID,
@@ -752,6 +886,12 @@ final class DocumentStore {
            ) == nil {
             self.selection = nil
         }
+        multiSelection.removeAll { member in
+            authoritativeScene.instance(
+                objectID: member.objectID, instanceID: member.instanceID
+            ) == nil
+        }
+        if multiSelection.count <= 1 { multiSelection = [] }
         presentationRevision += 1
     }
 }

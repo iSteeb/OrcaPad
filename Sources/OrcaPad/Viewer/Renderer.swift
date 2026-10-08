@@ -274,7 +274,8 @@ final class Renderer: NSObject, MTKViewDelegate {
         bed: EngineBed,
         selectedObjectID: ObjectID?,
         selectedInstanceID: InstanceID?,
-        previewMatrix: simd_float4x4?
+        highlightedInstanceIDs: Set<InstanceID>,
+        previewMatrices: [InstanceID: simd_float4x4]
     ) throws {
         if bed != self.bed {
             buildScene(for: bed)
@@ -292,19 +293,17 @@ final class Renderer: NSObject, MTKViewDelegate {
         rebuilt.reserveCapacity(scene.objects.count)
         for sceneObject in scene.objects {
             let instances = sceneObject.instances.map { instance in
-                let usesPreview = sceneObject.id == selectedObjectID &&
-                    instance.id == selectedInstanceID
                 return InstanceDraw(
                     instanceID: instance.id,
                     model: CoordinateMapper.modelMatrix(
-                        engineMatrix: usesPreview
-                            ? previewMatrix ?? EngineMatrix.float(instance.matrix)
-                            : EngineMatrix.float(instance.matrix),
+                        engineMatrix: previewMatrices[instance.id]
+                            ?? EngineMatrix.float(instance.matrix),
                         enginePivot: sceneObject.mesh.pivot,
                         bedCenter: bed.center
                     ),
-                    selected: sceneObject.id == selectedObjectID &&
-                        instance.id == selectedInstanceID,
+                    selected: (sceneObject.id == selectedObjectID &&
+                        instance.id == selectedInstanceID) ||
+                        highlightedInstanceIDs.contains(instance.id),
                     mirrored: instance.mirrored
                 )
             }
@@ -402,6 +401,8 @@ final class Renderer: NSObject, MTKViewDelegate {
         objects = rebuilt
         documentID = scene.documentID
         appliedRevision = scene.revision
+        primaryObjectID = selectedObjectID
+        primaryInstanceID = selectedInstanceID
         selectedInstanceIDs = rebuilt.flatMap { object in
             object.instances.filter(\.selected).map {
                 (objectID: object.objectID, instanceID: $0.instanceID)
@@ -753,8 +754,15 @@ final class Renderer: NSObject, MTKViewDelegate {
     }
 
     func selectedGizmo() -> SelectedGizmo? {
-        gizmo { _, instance in instance.selected }
+        if let primaryObjectID, let primaryInstanceID {
+            return gizmo(objectID: primaryObjectID, instanceID: primaryInstanceID)
+        }
+        return gizmo { _, instance in instance.selected }
     }
+
+    /// The primary selection (gizmo owner) of the applied scene.
+    private var primaryObjectID: ObjectID?
+    private var primaryInstanceID: InstanceID?
 
     /// Gizmo geometry for a specific instance (used when a drag selects and
     /// manipulates in one gesture, before the scene re-applies selection).

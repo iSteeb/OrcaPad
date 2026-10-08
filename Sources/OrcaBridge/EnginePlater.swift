@@ -58,6 +58,32 @@ public final class EnginePlater: @unchecked Sendable {
         /// Desktop clipboard.
         case copyObject(objectID: ObjectID)
         case pasteObject(bedCenter: SIMD2<Double>)
+        /// Group (multi-selection) absolute transforms; one undo step.
+        case groupSetTransforms([GroupTransform], label: String)
+        /// Group rotation about each instance's own origin; one undo step.
+        case groupRotate([GroupInstance], axis: EngineAxis, radians: Double)
+    }
+
+    /// One (object, instance) pair of a multi-selection.
+    public struct GroupInstance: Sendable {
+        public let objectID: ObjectID
+        public let instanceID: InstanceID
+
+        public init(objectID: ObjectID, instanceID: InstanceID) {
+            self.objectID = objectID
+            self.instanceID = instanceID
+        }
+    }
+
+    /// An absolute transform for one group member.
+    public struct GroupTransform: Sendable {
+        public let instance: GroupInstance
+        public let transform: InstanceTransform
+
+        public init(instance: GroupInstance, transform: InstanceTransform) {
+            self.instance = instance
+            self.transform = transform
+        }
     }
 
     public struct MutationResult: Sendable {
@@ -401,6 +427,72 @@ public final class EnginePlater: @unchecked Sendable {
                 try BridgeResult.consume(
                     orca_plater_object_copy(handle, objectID.rawValue),
                     operation: "copy object \(objectID)"
+                )
+
+            case .groupSetTransforms(let group, let label):
+                var objectIDs = [UInt64](repeating: 0, count: group.count)
+                var instanceIDs = [UInt64](repeating: 0, count: group.count)
+                var rawTransforms = [orca_instance_transform](
+                    repeating: orca_instance_transform(
+                        offset_x: 0, offset_y: 0, offset_z: 0,
+                        rotation_x: 0, rotation_y: 0, rotation_z: 0,
+                        scale_x: 1, scale_y: 1, scale_z: 1
+                    ),
+                    count: group.count
+                )
+                for (index, member) in group.enumerated() {
+                    objectIDs[index] = member.instance.objectID.rawValue
+                    instanceIDs[index] = member.instance.instanceID.rawValue
+                    let t = member.transform
+                    rawTransforms[index] = orca_instance_transform(
+                        offset_x: t.offsetX, offset_y: t.offsetY, offset_z: t.offsetZ,
+                        rotation_x: t.rotationX, rotation_y: t.rotationY, rotation_z: t.rotationZ,
+                        scale_x: t.scaleX, scale_y: t.scaleY, scale_z: t.scaleZ
+                    )
+                }
+                try BridgeResult.consume(
+                    label.withCString { labelPointer in
+                        objectIDs.withUnsafeBufferPointer { objects in
+                            instanceIDs.withUnsafeBufferPointer { instances in
+                                rawTransforms.withUnsafeBufferPointer { transforms in
+                                    orca_plater_instances_set(
+                                        handle,
+                                        objects.baseAddress,
+                                        instances.baseAddress,
+                                        transforms.baseAddress,
+                                        Int32(group.count),
+                                        labelPointer,
+                                        &mutationRevision
+                                    )
+                                }
+                            }
+                        }
+                    },
+                    operation: "move \(group.count) instance(s)"
+                )
+
+            case .groupRotate(let group, let axis, let radians):
+                var objectIDs = [UInt64](repeating: 0, count: group.count)
+                var instanceIDs = [UInt64](repeating: 0, count: group.count)
+                for (index, member) in group.enumerated() {
+                    objectIDs[index] = member.objectID.rawValue
+                    instanceIDs[index] = member.instanceID.rawValue
+                }
+                try BridgeResult.consume(
+                    objectIDs.withUnsafeBufferPointer { objects in
+                        instanceIDs.withUnsafeBufferPointer { instances in
+                            orca_plater_instances_rotate(
+                                handle,
+                                objects.baseAddress,
+                                instances.baseAddress,
+                                Int32(group.count),
+                                axis.rawValue,
+                                radians,
+                                &mutationRevision
+                            )
+                        }
+                    },
+                    operation: "rotate \(group.count) instance(s)"
                 )
 
             case .pasteObject(let bedCenter):
