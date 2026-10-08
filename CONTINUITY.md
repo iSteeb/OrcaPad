@@ -41,6 +41,11 @@
 
 ## PROGRESS
 
+- [2026-10-07 CODE][TOOL] ABI v20: mirror (left-handed instances in
+  snapshots + renderer normal-sign flip), object copy/paste clipboard,
+  camera view presets (client), copy/paste keyboard shortcuts.
+  Host tests 50,862 PASS. Parity 27% (30 done). Phone disconnected:
+  v18-v20 NOT installed yet (v17 is on the device).
 - [2026-10-07 CODE][TOOL] ABI v19: volumes in snapshots (per-volume id/name/
   role/extruder + own meshes for non-parts), split to objects/parts,
   shape objects + shape/file volumes, volume type/delete/rename; renderer

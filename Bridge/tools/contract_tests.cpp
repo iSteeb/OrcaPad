@@ -273,7 +273,7 @@ static void test_md5_shim() {
 
 static void test_abi_version() {
     CHECK_EQ(orca_bridge_abi_version(), ORCA_BRIDGE_ABI_VERSION);
-    CHECK_EQ(ORCA_BRIDGE_ABI_VERSION, 19);
+    CHECK_EQ(ORCA_BRIDGE_ABI_VERSION, 20);
 }
 
 static std::string snapshot_label(const orca_owned_string &label) {
@@ -940,6 +940,89 @@ static void test_volumes(const std::string &dir) {
     expect_code(e10, ORCA_STATUS_INVALID_MODEL, "single body cannot split to objects");
     GUARD(e11, orca_plater_split_parts(plater, object_id, 0, &parts, &revision));
     expect_code(e11, ORCA_STATUS_INVALID_MODEL, "single body cannot split to parts");
+
+    orca_plater_free(plater);
+}
+
+// ABI v20: mirroring (left-handed instances in snapshots) and the
+// copy / paste clipboard.
+static void test_mirror_clipboard(const std::string &dir) {
+    orca_plater *plater = nullptr;
+    GUARD(g0, orca_plater_new(&plater));
+    expect_ok(g0, "plater_new");
+    orca_revision revision = 0;
+    const std::string cube = write_cube_stl(dir, "mirror_cube.stl");
+    orca_object_id object_id = 0;
+    GUARD(g1, import_one(plater, cube.c_str(), 100, 100, &object_id, &revision));
+    expect_ok(g1, "import");
+
+    // paste with an empty clipboard
+    orca_object_id pasted_id = 0;
+    GUARD(e1, orca_plater_object_paste(plater, 60, 60, &pasted_id, &revision));
+    expect_code(e1, ORCA_STATUS_NOT_FOUND, "paste empty clipboard");
+
+    // copy / paste
+    GUARD(g2, orca_plater_object_copy(plater, object_id));
+    expect_ok(g2, "copy");
+    GUARD(g3, orca_plater_object_paste(plater, 60, 60, &pasted_id, &revision));
+    expect_ok(g3, "paste");
+    CHECK(pasted_id != 0 && pasted_id != object_id);
+    orca_scene_snapshot snap = take_snapshot(plater);
+    CHECK_EQ(snap.object_count, 2);
+    CHECK(find_object(snap, pasted_id) != nullptr);
+    orca_scene_snapshot_dispose(&snap);
+    GUARD(g4, orca_plater_undo(plater, &revision));
+    expect_ok(g4, "undo paste");
+    snap = take_snapshot(plater);
+    CHECK_EQ(snap.object_count, 1);
+    orca_scene_snapshot_dispose(&snap);
+
+    // mirror
+    orca_instance_id instance_id = 0;
+    snap = take_snapshot(plater);
+    instance_id = snap.objects[0].instances[0].id;
+    CHECK_EQ(snap.objects[0].instances[0].mirrored, 0);
+    const double matrix_before[16] = {
+        snap.objects[0].instances[0].matrix[0], snap.objects[0].instances[0].matrix[1],
+        snap.objects[0].instances[0].matrix[4], snap.objects[0].instances[0].matrix[5],
+        snap.objects[0].instances[0].matrix[8], snap.objects[0].instances[0].matrix[9],
+        snap.objects[0].instances[0].matrix[12], snap.objects[0].instances[0].matrix[13]};
+    (void) matrix_before;
+    orca_scene_snapshot_dispose(&snap);
+    GUARD(e2, orca_plater_instance_mirror(plater, object_id, instance_id, 3, &revision));
+    expect_code(e2, ORCA_STATUS_INVALID_ARGUMENT, "mirror bogus axis");
+    GUARD(g5, orca_plater_instance_mirror(plater, object_id, instance_id, 0, &revision));
+    expect_ok(g5, "mirror X");
+    snap = take_snapshot(plater);
+    const orca_scene_instance &mirrored = snap.objects[0].instances[0];
+    CHECK_EQ(mirrored.mirrored, 1);
+    // transform stays representable (positive scales)
+    CHECK(mirrored.transform.scale_x > 0 && mirrored.transform.scale_y > 0);
+    // matrix determinant < 0 (left handed)
+    const double *m = mirrored.matrix;
+    const double det =
+        m[0] * (m[5] * m[10] * m[15] + m[6] * m[11] * m[13] + m[7] * m[9] * m[14]
+             - m[7] * m[10] * m[13] - m[6] * m[9] * m[15] - m[5] * m[11] * m[14])
+      - m[4] * (m[1] * m[10] * m[15] + m[2] * m[11] * m[13] + m[3] * m[9] * m[14]
+             - m[3] * m[10] * m[13] - m[2] * m[9] * m[15] - m[1] * m[11] * m[14])
+      + m[8] * (m[1] * m[6] * m[15] + m[2] * m[7] * m[13] + m[3] * m[5] * m[14]
+             - m[3] * m[6] * m[13] - m[2] * m[5] * m[15] - m[1] * m[7] * m[14])
+      - m[12] * (m[1] * m[6] * m[11] + m[2] * m[7] * m[9] + m[3] * m[5] * m[10]
+              - m[3] * m[6] * m[9] - m[2] * m[5] * m[11] - m[1] * m[7] * m[10]);
+    CHECK(det < 0.0);
+    orca_scene_snapshot_dispose(&snap);
+    // mirror again toggles back
+    GUARD(g6, orca_plater_instance_mirror(plater, object_id, instance_id, 0, &revision));
+    expect_ok(g6, "mirror X again");
+    snap = take_snapshot(plater);
+    CHECK_EQ(snap.objects[0].instances[0].mirrored, 0);
+    orca_scene_snapshot_dispose(&snap);
+    // undo restores the mirrored state
+    GUARD(g7, orca_plater_undo(plater, &revision));
+    expect_ok(g7, "undo unmirror");
+    snap = take_snapshot(plater);
+    CHECK_EQ(snap.objects[0].instances[0].mirrored, 1);
+    orca_scene_snapshot_dispose(&snap);
 
     orca_plater_free(plater);
 }
@@ -2512,6 +2595,7 @@ int main() {
     test_document_lifecycle(dir);
     test_history(dir);
     test_volumes(dir);
+    test_mirror_clipboard(dir);
     test_add_failures(dir);
     test_stable_ids_and_revisions(dir);
     test_not_found_and_validation(dir);

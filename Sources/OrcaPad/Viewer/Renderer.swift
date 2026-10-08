@@ -20,6 +20,7 @@ private struct InstanceDraw {
     let instanceID: InstanceID
     let model: simd_float4x4
     let selected: Bool
+    let mirrored: Bool
 }
 
 /// A translucent non-part volume (desktop color_from_model_volume) drawn
@@ -101,7 +102,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         model: .init(diagonal: .one),
         color: SIMD4<Float>(0.96, 0.52, 0.11, 1),
         lightDir: SIMD3<Float>(0.35, -0.85, 0.40),
-        pad: 0
+        normalSign: 1
     )
     private var lineUniforms = LineUniforms(mvp: .init(diagonal: .one))
 
@@ -303,7 +304,8 @@ final class Renderer: NSObject, MTKViewDelegate {
                         bedCenter: bed.center
                     ),
                     selected: sceneObject.id == selectedObjectID &&
-                        instance.id == selectedInstanceID
+                        instance.id == selectedInstanceID,
+                    mirrored: instance.mirrored
                 )
             }
 
@@ -903,6 +905,7 @@ final class Renderer: NSObject, MTKViewDelegate {
                 cubeUniforms.mvp = viewProj * model
                 cubeUniforms.model = model
                 cubeUniforms.color = inst.selected ? Renderer.selectedColor : Renderer.objectColor
+                cubeUniforms.normalSign = inst.mirrored ? -1 : 1
                 var cu = cubeUniforms
                 encoder.setVertexBytes(&cu, length: MemoryLayout<CubeUniforms>.stride, index: 1)
                 encoder.setFragmentBytes(&cu, length: MemoryLayout<CubeUniforms>.stride, index: 1)
@@ -926,6 +929,7 @@ final class Renderer: NSObject, MTKViewDelegate {
                     cubeUniforms.mvp = viewProj * inst.model
                     cubeUniforms.model = inst.model
                     cubeUniforms.color = draw.color
+                    cubeUniforms.normalSign = inst.mirrored ? -1 : 1
                     var cu = cubeUniforms
                     encoder.setVertexBytes(&cu, length: MemoryLayout<CubeUniforms>.stride, index: 1)
                     encoder.setFragmentBytes(&cu, length: MemoryLayout<CubeUniforms>.stride, index: 1)
@@ -992,7 +996,7 @@ struct CubeUniforms {
     var model: simd_float4x4
     var color: SIMD4<Float>
     var lightDir: SIMD3<Float>
-    var pad: Float
+    var normalSign: Float
 }
 
 struct LineUniforms {

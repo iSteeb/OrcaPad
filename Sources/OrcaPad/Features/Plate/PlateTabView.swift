@@ -141,6 +141,7 @@ struct PlateTabView: View {
                     previewMatrix: document.previewMatrix,
                     presentationRevision: document.presentationRevision,
                     frameRequest: document.frameRequest,
+                    cameraRequest: (document.cameraRequestID, document.cameraPreset),
                     gizmoMode: gizmoMode,
                     rotationAxis: rotationAxis
                 ),
@@ -202,6 +203,15 @@ struct PlateTabView: View {
                     Label("Import model…", systemImage: "plus.square")
                 }
                 Menu {
+                    ForEach(CameraViewPreset.allCases) { preset in
+                        Button(preset.rawValue) {
+                            document.applyCameraView(preset)
+                        }
+                    }
+                } label: {
+                    Label("View", systemImage: "camera")
+                }
+                Menu {
                     ForEach(
                         PrimitiveShape.allCases.filter(\.isObjectShape),
                         id: \.self
@@ -238,6 +248,23 @@ struct PlateTabView: View {
                         Label("Share \(project.lastPathComponent)", systemImage: "square.and.arrow.up")
                     }
                 }
+                Divider()
+                Button {
+                    Task { await document.copySelected() }
+                } label: {
+                    Label("Copy", systemImage: "doc.on.doc")
+                }
+                .disabled(document.selection == nil)
+                .keyboardShortcut("c", modifiers: .command)
+                Button {
+                    Task {
+                        await document.pasteObject(bedCenter: bedCenter)
+                    }
+                } label: {
+                    Label("Paste", systemImage: "clipboard")
+                }
+                .disabled(document.isBusy)
+                .keyboardShortcut("v", modifiers: .command)
             } label: {
                 VStack(spacing: 2) {
                     Image(systemName: "doc.badge.plus")
@@ -488,6 +515,21 @@ extension PlateTabView {
             Divider()
             ForEach([VolumeRole.part, .negative, .modifier, .supportBlocker, .supportEnforcer], id: \.self) { role in
                 volumeAddMenu(role: role, object: object)
+            }
+            Divider()
+            Menu {
+                ForEach(EngineAxis.allCases, id: \.self) { axis in
+                    Button("\(axis.label) axis") {
+                        guard let instanceID = object.instances.first?.id else { return }
+                        Task {
+                            await document.mirrorObject(
+                                objectID: object.id, instanceID: instanceID, axis: axis
+                            )
+                        }
+                    }
+                }
+            } label: {
+                Label("Mirror", systemImage: "arrow.left.and.right.righttriangle.left.righttriangle.right")
             }
             Divider()
             Button {

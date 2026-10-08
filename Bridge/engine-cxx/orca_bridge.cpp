@@ -13,6 +13,7 @@
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <new>
 #include <stdexcept>
 #include <string>
@@ -908,6 +909,8 @@ struct orca_plater {
     uint64_t next_mesh_revision = 1;
     std::deque<OrcapadHistoryStep> undo;
     std::deque<OrcapadHistoryStep> redo;
+    /// Desktop clipboard: at most one object (volumes + instances).
+    std::optional<Slic3r::Model> clipboard;
 };
 
 /// Desktop keeps a memory-bounded undo stack; OrcaPad bounds it by steps.
@@ -1915,6 +1918,100 @@ orca_result orca_plater_split_parts(orca_plater *plater, orca_object_id object_i
     });
 }
 
+orca_result orca_plater_instance_mirror(orca_plater *plater,
+                                        orca_object_id object_id,
+                                        orca_instance_id instance_id,
+                                        int32_t axis, orca_revision *out_revision) {
+    constexpr const char *operation = "orca_plater_instance_mirror";
+    if (out_revision) *out_revision = 0;
+    if (!plater)
+        return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation, "plater handle is null");
+    if (!out_revision)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation, "output pointer is null");
+    if (axis < 0 || axis > 2)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "axis must be 0 (X), 1 (Y), or 2 (Z)");
+    return orcapad_guard(operation, [&]() -> orca_result {
+        Slic3r::ModelObject *object = plater_obj(plater, object_id);
+        if (!object)
+            return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation, "object was not found");
+        Slic3r::ModelInstance *instance = plater_instance(object, instance_id);
+        if (!instance)
+            return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation, "instance was not found");
+        if (!orcapad_revision_available(*plater))
+            return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
+                                "document revision is exhausted");
+        OrcapadMutation mutation(*plater, "Mirror");
+        // ModelInstance has no mirror() toggle (ModelObject does):
+        // flip the axis mirror flag like Selection::mirror does.
+        instance->set_mirror(static_cast<Slic3r::Axis>(axis),
+                             -instance->get_mirror(static_cast<Slic3r::Axis>(axis)));
+        orcapad_rest_on_bed(object, instance);
+        *out_revision = mutation.commit();
+        return orcapad_ok();
+    });
+}
+
+orca_result orca_plater_object_copy(orca_plater *plater, orca_object_id object_id) {
+    constexpr const char *operation = "orca_plater_object_copy";
+    if (!plater)
+        return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation, "plater handle is null");
+    return orcapad_guard(operation, [&]() -> orca_result {
+        const Slic3r::ModelObject *object = plater_obj(plater, object_id);
+        if (!object)
+            return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation, "object was not found");
+        Slic3r::Model clipboard;
+        if (!clipboard.add_object(*object))
+            return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
+                                "engine refused to copy the object");
+        plater->clipboard = std::move(clipboard);
+        return orcapad_ok();
+    });
+}
+
+orca_result orca_plater_object_paste(orca_plater *plater, double bed_center_x,
+                                     double bed_center_y,
+                                     orca_object_id *out_object_id,
+                                     orca_revision *out_revision) {
+    constexpr const char *operation = "orca_plater_object_paste";
+    if (out_object_id) *out_object_id = 0;
+    if (out_revision) *out_revision = 0;
+    if (!plater)
+        return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation, "plater handle is null");
+    if (!out_object_id || !out_revision)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation, "output pointer is null");
+    if (!std::isfinite(bed_center_x) || !std::isfinite(bed_center_y))
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "bed center contains a non-finite value");
+    return orcapad_guard(operation, [&]() -> orca_result {
+        if (!plater->clipboard || plater->clipboard->objects.empty())
+            return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation,
+                                "the clipboard is empty");
+        if (!orcapad_revision_available(*plater))
+            return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
+                                "document revision is exhausted");
+        OrcapadMutation mutation(*plater, "Paste");
+        Slic3r::ModelObject *object =
+            plater->model.add_object(*plater->clipboard->objects.front());
+        if (!object)
+            return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
+                                "engine did not create the pasted object");
+        object->center_around_origin();
+        if (object->instances.empty())
+            object->add_instance();
+        object->instances.front()->set_offset(
+            Slic3r::Vec3d(bed_center_x, bed_center_y, 0.0));
+        object->ensure_on_bed(false);
+        if (!orcapad_register_object(*plater, *object))
+            return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
+                                "engine returned an invalid or reused object ID");
+        const orca_object_id id = static_cast<orca_object_id>(object->id().id);
+        *out_revision = mutation.commit();
+        *out_object_id = id;
+        return orcapad_ok();
+    });
+}
+
 static orca_scene_snapshot orcapad_empty_snapshot() noexcept {
     return orca_scene_snapshot{};
 }
@@ -2101,10 +2198,7 @@ orca_result orca_plater_snapshot(orca_plater *plater,
                 const Slic3r::Vec3d rotation = model_instance->get_rotation();
                 const Slic3r::Vec3d scaling =
                     model_instance->get_scaling_factor();
-                if (model_instance->is_left_handed())
-                    return fail_snapshot(
-                        ORCA_STATUS_UNSUPPORTED_CAPABILITY,
-                        "mirrored instances are not supported");
+                instance.mirrored = model_instance->is_left_handed() ? 1 : 0;
                 const Slic3r::Vec3d offset = model_instance->get_offset();
                 instance.transform.offset_x = offset.x();
                 instance.transform.offset_y = offset.y();

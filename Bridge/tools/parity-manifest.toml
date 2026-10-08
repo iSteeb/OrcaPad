@@ -217,12 +217,10 @@ priority = 18
 id = "plate.mirror"
 area = "plate"
 title = "Mirror (X / Y / Z)"
-status = "missing"
+status = "done"
 desktop = ["context:Mirror", "context:Along X axis", "context:Along Y axis", "context:Along Z axis"]
-work = "Bridge + UI"
-priority = 6
-note = "snapshot contract rejects left-handed instances today; renderer needs winding flip"
-
+evidence = ["abi:orca_plater_instance_mirror", 'client:func mirrorObject\(',
+            "client:normalSign = inst.mirrored"]
 [[feature]]
 id = "plate.undo-redo"
 area = "plate"
@@ -236,11 +234,13 @@ note = "transactional Bridge mutations, 64-step history with labels (ABI v18)"
 id = "plate.copy-paste"
 area = "plate"
 title = "Cut / copy / paste objects"
-status = "missing"
+status = "partial"
 desktop = ["menu:Copy", "menu:Paste", "menu:Cut"]
-work = "Bridge + UI"
+evidence = ["abi:orca_plater_object_copy", "abi:orca_plater_object_paste",
+            'client:func pasteObject\(']
+gap = "copy + paste of whole objects only: no cut and no multi-object clipboard"
+work = "UI"
 priority = 8
-
 [[feature]]
 id = "plate.object-list"
 area = "plate"
@@ -570,11 +570,9 @@ note = "touch: one-finger orbit, two-finger pan, pinch zoom"
 id = "plate.camera-views"
 area = "plate"
 title = "Camera view presets (default / top / bottom / front / rear / left / right)"
-status = "missing"
+status = "done"
 desktop = ["menu:Default View", "menu:Top", "menu:Bottom", "menu:Front", "menu:Rear", "menu:Left", "menu:Right"]
-work = "UI"
-priority = 9
-
+evidence = ["client:enum CameraViewPreset", "client:func applyCameraView"]
 [[feature]]
 id = "plate.camera-projection"
 area = "plate"
@@ -637,8 +635,8 @@ id = "plate.keyboard"
 area = "plate"
 title = "Hardware-keyboard shortcuts: 3D editor"
 status = "partial"
-evidence = ['client:keyboardShortcut\("z"']
-gap = "only undo / redo (\u2318Z, \u21e7\u2318Z) so far"
+evidence = ['client:keyboardShortcut\("z"', 'client:keyboardShortcut\("c"']
+gap = "undo / redo (\u2318Z, \u21e7\u2318Z) and copy / paste (\u2318C, \u2318V) so far"
 desktop = ["kb:Arrange all objects", "kb:Arrange objects on selected plates",
            "kb:Auto orients all objects on the active plate.",
            "kb:Auto orients selected objects or all objects. If there are selected objects, it just orients the selected ones. Otherwise, it will orient all objects in the current project.",

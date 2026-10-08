@@ -7,7 +7,7 @@ extern "C" {
 #endif
 
 /// Version of the C ABI contract in this header. Callers verify it at runtime.
-#define ORCA_BRIDGE_ABI_VERSION ((uint32_t)19)
+#define ORCA_BRIDGE_ABI_VERSION ((uint32_t)20)
 
 typedef int32_t orca_status_code;
 #define ORCA_STATUS_OK                     ((orca_status_code)0)
@@ -64,6 +64,10 @@ typedef struct {
 typedef struct {
     orca_instance_id id;
     orca_instance_transform transform;
+    /// 1 when the instance matrix is left-handed (mirrored on an odd number
+    /// of axes); renderers flip face winding / normals for it.
+    uint8_t mirrored;
+    uint8_t reserved[3];
     /// The engine's instance matrix (ModelInstance::get_matrix()),
     /// column-major. Clients render and preview from this matrix and never
     /// re-derive it from the Euler angles.
@@ -261,6 +265,23 @@ orca_result orca_plater_split_parts(orca_plater *plater, orca_object_id object_i
                                     orca_volume_id volume_id,
                                     uint32_t *out_part_count,
                                     orca_revision *out_revision);
+/// Desktop Selection::mirror: toggles the instance mirror on one axis
+/// (0 = X, 1 = Y, 2 = Z); the instance is rested on the bed again. Mirrored
+/// instances report `mirrored` in snapshots; their transform fields stay
+/// absolute (positive scales).
+orca_result orca_plater_instance_mirror(orca_plater *plater,
+                                        orca_object_id object_id,
+                                        orca_instance_id instance_id,
+                                        int32_t axis, orca_revision *out_revision);
+/// Desktop clipboard: copies one object (volumes + instances). No document
+/// change, no undo step.
+orca_result orca_plater_object_copy(orca_plater *plater, orca_object_id object_id);
+/// Pastes the clipboard object at (bed_center_x, bed_center_y)
+/// (ORCA_STATUS_NOT_FOUND when the clipboard is empty). One undo step.
+orca_result orca_plater_object_paste(orca_plater *plater, double bed_center_x,
+                                     double bed_center_y,
+                                     orca_object_id *out_object_id,
+                                     orca_revision *out_revision);
 
 /// Produces a deep copy at one authoritative document revision. The caller
 /// owns every nested allocation and must call orca_scene_snapshot_dispose().

@@ -53,6 +53,11 @@ public final class EnginePlater: @unchecked Sendable {
         case splitObjects(objectID: ObjectID)
         /// Desktop "Split to parts" (nil = the object's only model part).
         case splitParts(objectID: ObjectID, volumeID: VolumeID?)
+        /// Desktop Selection::mirror (toggles one axis).
+        case mirrorInstance(objectID: ObjectID, instanceID: InstanceID, axis: EngineAxis)
+        /// Desktop clipboard.
+        case copyObject(objectID: ObjectID)
+        case pasteObject(bedCenter: SIMD2<Double>)
     }
 
     public struct MutationResult: Sendable {
@@ -382,6 +387,33 @@ public final class EnginePlater: @unchecked Sendable {
                     operation: "split object \(objectID) to parts"
                 )
                 createdPartCount = Int(partCount)
+
+            case .mirrorInstance(let objectID, let instanceID, let axis):
+                try BridgeResult.consume(
+                    orca_plater_instance_mirror(
+                        handle, objectID.rawValue, instanceID.rawValue,
+                        axis.rawValue, &mutationRevision
+                    ),
+                    operation: "mirror instance \(instanceID)"
+                )
+
+            case .copyObject(let objectID):
+                try BridgeResult.consume(
+                    orca_plater_object_copy(handle, objectID.rawValue),
+                    operation: "copy object \(objectID)"
+                )
+
+            case .pasteObject(let bedCenter):
+                var rawObjectID: UInt64 = 0
+                try BridgeResult.consume(
+                    orca_plater_object_paste(
+                        handle, bedCenter.x, bedCenter.y, &rawObjectID,
+                        &mutationRevision
+                    ),
+                    operation: "paste object"
+                )
+                createdObjectCount = 1
+                createdObjectID = try Self.objectID(rawObjectID, operation: "paste object")
             }
 
             let scene = try snapshotLocked()
@@ -633,7 +665,8 @@ public final class EnginePlater: @unchecked Sendable {
                         instances.append(SceneInstance(
                             id: instanceID,
                             transform: transform,
-                            matrix: matrix
+                            matrix: matrix,
+                            mirrored: rawInstance.mirrored != 0
                         ))
                     }
                 }

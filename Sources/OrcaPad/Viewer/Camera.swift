@@ -58,6 +58,34 @@ enum Math {
     }
 }
 
+/// Desktop camera view presets (MainFrame select_view).
+enum CameraViewPreset: String, CaseIterable, Identifiable, Sendable {
+    case defaultValue = "Default View"
+    case top = "Top"
+    case bottom = "Bottom"
+    case front = "Front"
+    case rear = "Rear"
+    case left = "Left"
+    case right = "Right"
+
+    var id: String { rawValue }
+
+    /// Yaw/pitch in the viewer frame (engine +X is viewer +X, engine +Y is
+    /// viewer -Z): eye azimuth and elevation above the horizon.
+    var angles: (yaw: Float, pitch: Float) {
+        switch self {
+        case .defaultValue: return (-0.65, 0.42)
+        case .top: return (0, OrbitCamera.maxPitch)
+        case .bottom: return (0, OrbitCamera.minPitch)
+        // engine -Y (the printer front) is viewer +Z -> yaw +pi/2
+        case .front: return (Float.pi / 2, 0)
+        case .rear: return (-Float.pi / 2, 0)
+        case .right: return (0, 0)
+        case .left: return (Float.pi, 0)
+        }
+    }
+}
+
 // MARK: - Orbit ("turntable") camera
 
 /// Spherical camera around a target point — the classic slicer view.
@@ -92,7 +120,17 @@ final class OrbitCamera {
 
     func orbit(dx: Float, dy: Float) {
         yaw += dx * 0.008
-        pitch = min(max(pitch + dy * 0.006, 0.06), Float.pi / 2 - 0.04)
+        pitch = min(max(pitch + dy * 0.006, Self.minPitch), Self.maxPitch)
+    }
+
+    static let maxPitch = Float.pi / 2 - 0.04
+    static let minPitch = -(Float.pi / 2 - 0.04)
+
+    /// Applies a desktop camera view preset (keeps target and distance).
+    func apply(_ preset: CameraViewPreset) {
+        let angles = preset.angles
+        yaw = angles.yaw
+        pitch = angles.pitch
     }
 
     func zoom(by scale: Float) {

@@ -14,6 +14,8 @@ struct SceneSync {
     var previewMatrix: simd_float4x4?
     var presentationRevision: UInt64
     var frameRequest: UInt64
+    /// Camera view preset request (advances when a preset is chosen).
+    var cameraRequest: (id: UInt64, preset: CameraViewPreset)
     var gizmoMode: GizmoMode
     var rotationAxis: EngineAxis
 }
@@ -106,6 +108,10 @@ struct MetalCanvas: UIViewRepresentable {
             coordinator.lastFrameRequest = scene.frameRequest
             coordinator.renderer?.frameScene()
         }
+        if scene.cameraRequest.id != coordinator.lastCameraRequest {
+            coordinator.lastCameraRequest = scene.cameraRequest.id
+            coordinator.renderer?.camera.apply(scene.cameraRequest.preset)
+        }
     }
 
     // MARK: Coordinator — gestures + renderer lifetime
@@ -119,6 +125,7 @@ struct MetalCanvas: UIViewRepresentable {
         var lastSelectedObjectID: ObjectID?
         var lastSelectedInstanceID: InstanceID?
         var lastFrameRequest: UInt64?
+        var lastCameraRequest: UInt64?
 
         var manipulation: CanvasManipulation?
         private var onStatus: ((String) -> Void)?

@@ -39,6 +39,8 @@ final class DocumentStore {
     private(set) var previewMatrix: simd_float4x4?
     private(set) var presentationRevision: UInt64 = 0
     private(set) var frameRequest: UInt64 = 0
+    private(set) var cameraRequestID: UInt64 = 0
+    private(set) var cameraPreset: CameraViewPreset = .defaultValue
     private(set) var isMutating = false
     private(set) var isSlicing = false
     private(set) var isBootstrapping = false
@@ -323,6 +325,59 @@ final class DocumentStore {
             .volumeRename(objectID: objectID, volumeID: volumeID, name: trimmed),
             operation: "rename volume"
         )
+    }
+
+    // MARK: Mirror / clipboard (desktop object menu)
+
+    func mirrorSelected(axis: EngineAxis) async {
+        guard let selection else { return }
+        await mirrorObject(
+            objectID: selection.objectID,
+            instanceID: selection.instanceID,
+            axis: axis
+        )
+    }
+
+    func mirrorObject(
+        objectID: ObjectID, instanceID: InstanceID, axis: EngineAxis
+    ) async {
+        _ = await applyMutation(
+            .mirrorInstance(objectID: objectID, instanceID: instanceID, axis: axis),
+            operation: "mirror"
+        )
+    }
+
+    func copySelected() async {
+        guard let selection else { return }
+        if await applyMutation(
+            .copyObject(objectID: selection.objectID),
+            operation: "copy object"
+        ) != nil {
+            status.report(.document, "object copied")
+        }
+    }
+
+    /// Pastes the clipboard object beside the current selection (or at the
+    /// bed center) and selects it.
+    func pasteObject(bedCenter: SIMD2<Double>) async {
+        var target = bedCenter
+        if let selection, let instance = selectedInstance {
+            target = SIMD2(instance.transform.offsetX + 15, instance.transform.offsetY + 15)
+        }
+        if let mutation = await applyMutation(
+            .pasteObject(bedCenter: target),
+            operation: "paste object"
+        ), let objectID = mutation.createdObjectID,
+            let instanceID = mutation.snapshot.object(id: objectID)?.instances.first?.id {
+            selection = InstanceSelection(objectID: objectID, instanceID: instanceID)
+            frameRequest += 1
+        }
+    }
+
+    /// Applies a desktop camera view preset to the canvas camera.
+    func applyCameraView(_ preset: CameraViewPreset) {
+        cameraPreset = preset
+        cameraRequestID += 1
     }
 
     // MARK: Split (desktop Split to objects / parts)

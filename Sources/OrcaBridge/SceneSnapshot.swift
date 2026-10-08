@@ -180,11 +180,18 @@ public struct SceneInstance: Identifiable, Sendable {
     /// The engine's instance matrix (ModelInstance::get_matrix()); render and
     /// preview from this — never re-derive it from the Euler angles.
     public let matrix: simd_double4x4
+    /// Left-handed matrix (mirrored on an odd number of axes): renderers flip
+    /// winding/normals; the transform fields stay absolute.
+    public let mirrored: Bool
 
-    public init(id: InstanceID, transform: InstanceTransform, matrix: simd_double4x4) {
+    public init(
+        id: InstanceID, transform: InstanceTransform, matrix: simd_double4x4,
+        mirrored: Bool
+    ) {
         self.id = id
         self.transform = transform
         self.matrix = matrix
+        self.mirrored = mirrored
     }
 }
 

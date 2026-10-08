@@ -245,6 +245,9 @@ in ~/xtool-cheatsheet.md — link, don't duplicate.)
   Swift imports C fixed-size arrays as tuples — index them via byte offsets.
 - Never use `rm -rf ./*` style cleanup [USER 2026-10-07]: create a fresh
   scratch dir instead of emptying one.
+- Python edit scripts MUST assert t.count(old) before replace: two silent
+  no-op replaces today shipped v20 without the snapshot mirrored flag
+  (only the host test caught it).
 - Edits whose oldText contains non-ASCII punctuation (em dash, ellipsis,
   arrows) repeatedly came out corrupted (a stray "\r" + garbage, or no
   match). Anchor edits on ASCII-only substrings, or rewrite the lines with a

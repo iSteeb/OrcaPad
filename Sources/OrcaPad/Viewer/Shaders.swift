@@ -16,7 +16,7 @@ enum Shaders {
         float4x4 model;
         float4 color;
         float3 lightDir;
-        float pad;
+        float normalSign; // -1 for mirrored (left-handed) instances
     };
 
     struct VIn {
@@ -33,7 +33,7 @@ enum Shaders {
                               constant CubeUniforms &u [[buffer(1)]]) {
         VOutLit out;
         out.position = u.mvp * float4(in.position, 1.0);
-        out.worldNormal = (u.model * float4(in.normal, 0.0)).xyz;
+        out.worldNormal = (u.model * float4(in.normal, 0.0)).xyz * u.normalSign;
         return out;
     }
 
