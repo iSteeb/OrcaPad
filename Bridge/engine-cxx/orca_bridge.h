@@ -7,7 +7,7 @@ extern "C" {
 #endif
 
 /// Version of the C ABI contract in this header. Callers verify it at runtime.
-#define ORCA_BRIDGE_ABI_VERSION ((uint32_t)22)
+#define ORCA_BRIDGE_ABI_VERSION ((uint32_t)23)
 
 typedef int32_t orca_status_code;
 #define ORCA_STATUS_OK                     ((orca_status_code)0)
@@ -67,7 +67,9 @@ typedef struct {
     /// 1 when the instance matrix is left-handed (mirrored on an odd number
     /// of axes); renderers flip face winding / normals for it.
     uint8_t mirrored;
-    uint8_t reserved[3];
+    /// 0 when excluded from slicing (desktop printable toggle).
+    uint8_t printable;
+    uint8_t reserved[2];
     /// The engine's instance matrix (ModelInstance::get_matrix()),
     /// column-major. Clients render and preview from this matrix and never
     /// re-derive it from the Euler angles.
@@ -316,6 +318,40 @@ orca_result orca_plater_settings_set(orca_plater *plater, orca_object_id object_
 orca_result orca_plater_settings_erase(orca_plater *plater, orca_object_id object_id,
                                        orca_volume_id volume_id, const char *key,
                                        orca_revision *out_revision);
+/// Desktop printable toggle: `instance_id` 0 applies to the object and all
+/// its instances. Non-printable instances are skipped by slicing.
+orca_result orca_plater_set_printable(orca_plater *plater, orca_object_id object_id,
+                                      orca_instance_id instance_id, uint8_t printable,
+                                      orca_revision *out_revision);
+/// Desktop "Set number of instances": adds (offset copies of the last
+/// instance) or removes trailing instances; count 1..1000. One undo step.
+orca_result orca_plater_set_instance_count(orca_plater *plater, orca_object_id object_id,
+                                           int32_t count, orca_revision *out_revision);
+/// Desktop Clone: `count` (1..100) object copies beside the original;
+/// callers arrange afterwards when requested. One undo step.
+orca_result orca_plater_clone_object(orca_plater *plater, orca_object_id object_id,
+                                     int32_t count, orca_object_id *out_first_object_id,
+                                     orca_revision *out_revision);
+/// Desktop "Set as an individual object": moves one instance (of an object
+/// with several) into a new object.
+orca_result orca_plater_instance_to_object(orca_plater *plater, orca_object_id object_id,
+                                           orca_instance_id instance_id,
+                                           orca_object_id *out_object_id,
+                                           orca_revision *out_revision);
+/// Desktop "Assemble" (ObjectList::merge): >= 2 single-instance objects
+/// become one multi-part object named "Assembly", world placement kept.
+orca_result orca_plater_merge_objects(orca_plater *plater, const orca_object_id *object_ids,
+                                      int32_t count, orca_object_id *out_object_id,
+                                      orca_revision *out_revision);
+/// Desktop unit conversion (ModelObject::convert_units); the converted
+/// object replaces the original.
+#define ORCA_UNITS_FROM_INCH  ((int32_t)0)
+#define ORCA_UNITS_TO_INCH    ((int32_t)1)
+#define ORCA_UNITS_FROM_METER ((int32_t)2)
+#define ORCA_UNITS_TO_METER   ((int32_t)3)
+orca_result orca_plater_convert_units(orca_plater *plater, orca_object_id object_id,
+                                      int32_t conversion, orca_object_id *out_object_id,
+                                      orca_revision *out_revision);
 /// Desktop clipboard: copies one object (volumes + instances). No document
 /// change, no undo step.
 orca_result orca_plater_object_copy(orca_plater *plater, orca_object_id object_id);
@@ -492,6 +528,12 @@ typedef struct {
 } orca_project_info;
 orca_result orca_project_open(orca_plater *plater, orca_presets *presets,
                               const char *path, orca_project_info *out_info);
+
+/// Desktop "Scale to build volume": uniform scale so the instance fits the
+/// selected machine's volume (0.01 mm slack), centered on the bed.
+orca_result orca_plater_scale_to_fit(orca_plater *plater, orca_presets *presets,
+                                     orca_object_id object_id, orca_instance_id instance_id,
+                                     orca_revision *out_revision);
 
 /// Desktop "Auto orient" (OrientJob): orients the selected instance, or
 /// every instance when object_id == 0, using the engine's orienter

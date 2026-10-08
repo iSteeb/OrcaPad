@@ -394,6 +394,93 @@ final class DocumentStore {
         )
     }
 
+    // MARK: Object operations (desktop object menu, ABI v23)
+
+    func setPrintable(objectID: ObjectID, instanceID: InstanceID?, printable: Bool) async {
+        _ = await applyMutation(
+            .setPrintable(objectID: objectID, instanceID: instanceID, printable: printable),
+            operation: "set printable"
+        )
+    }
+
+    func setInstanceCount(objectID: ObjectID, count: Int) async {
+        _ = await applyMutation(
+            .setInstanceCount(objectID: objectID, count: count),
+            operation: "set number of instances"
+        )
+    }
+
+    /// Desktop Clone dialog: `count` copies, optionally followed by Arrange
+    /// (desktop "Auto arrange plate after cloning").
+    func cloneObject(objectID: ObjectID, count: Int, arrangeWith presets: EnginePresets?) async {
+        guard await applyMutation(
+            .cloneObject(objectID: objectID, count: count),
+            operation: "clone object"
+        ) != nil else { return }
+        if let presets {
+            await arrangeAll(presets: presets, allowRotations: false)
+        }
+    }
+
+    func separateInstance(objectID: ObjectID, instanceID: InstanceID) async {
+        if let mutation = await applyMutation(
+            .instanceToObject(objectID: objectID, instanceID: instanceID),
+            operation: "set instance as object"
+        ), let created = mutation.createdObjectID,
+            let createdInstance = mutation.snapshot.object(id: created)?.instances.first?.id {
+            selection = InstanceSelection(objectID: created, instanceID: createdInstance)
+        }
+    }
+
+    /// Desktop "Assemble": the distinct objects of the multi-selection.
+    func assembleSelection() async {
+        var objectIDs: [ObjectID] = []
+        for member in selectedGroup where !objectIDs.contains(member.objectID) {
+            objectIDs.append(member.objectID)
+        }
+        guard objectIDs.count >= 2 else {
+            status.report(.document, failure: .invariant(
+                operation: "assemble", diagnostic: "select at least two objects"))
+            return
+        }
+        if let mutation = await applyMutation(.mergeObjects(objectIDs), operation: "assemble"),
+           let created = mutation.createdObjectID,
+           let instanceID = mutation.snapshot.object(id: created)?.instances.first?.id {
+            multiSelection = []
+            selection = InstanceSelection(objectID: created, instanceID: instanceID)
+        }
+    }
+
+    func scaleToFit(objectID: ObjectID, instanceID: InstanceID, presets: EnginePresets) async {
+        guard let plater, !isBusy else {
+            status.report(.document, "scale to fit blocked: document is busy")
+            return
+        }
+        isMutating = true
+        let result = await BackgroundWork.run(operation: "scale to build volume") {
+            try plater.apply(.scaleToFit(objectID: objectID, instanceID: instanceID), presets: presets)
+        }
+        isMutating = false
+        switch result {
+        case .success(let mutation):
+            install(mutation.snapshot)
+            frameRequest += 1
+        case .failure(let failure):
+            status.report(.document, failure: failure)
+        }
+    }
+
+    func convertUnits(objectID: ObjectID, conversion: UnitConversion) async {
+        if let mutation = await applyMutation(
+            .convertUnits(objectID: objectID, conversion),
+            operation: conversion.label
+        ), let created = mutation.createdObjectID,
+            let instanceID = mutation.snapshot.object(id: created)?.instances.first?.id {
+            selection = InstanceSelection(objectID: created, instanceID: instanceID)
+            frameRequest += 1
+        }
+    }
+
     // MARK: Mirror / clipboard (desktop object menu)
 
     func mirrorSelected(axis: EngineAxis) async {

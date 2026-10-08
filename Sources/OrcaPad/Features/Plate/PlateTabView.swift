@@ -19,6 +19,8 @@ struct PlateTabView: View {
     @State private var rotationAxis: EngineAxis = .z
     @State private var renameTarget: RenameTarget?
     @State private var settingsTarget: SettingsTarget?
+    @State private var countTarget: CountPrompt?
+    @State private var countText = ""
     @State private var renameText = ""
     @State private var deleteAllConfirmation = false
 
@@ -413,7 +415,13 @@ struct PlateTabView: View {
                 }
                 ToolbarItem(placement: .topBarLeading) {
                     if document.hasMultiSelection {
-                        Button("Clear selection") { document.clearMultiSelection() }
+                        HStack {
+                            Button("Clear selection") { document.clearMultiSelection() }
+                            Button("Assemble") {
+                                Task { await document.assembleSelection() }
+                            }
+                            .disabled(document.isBusy)
+                        }
                     } else {
                         Button("Select all") { document.selectAll() }
                             .disabled(objects.isEmpty)
@@ -442,6 +450,25 @@ struct PlateTabView: View {
                     renameTarget = nil
                 }
                 Button("Cancel", role: .cancel) { renameTarget = nil }
+            }
+            .alert(
+                countTarget?.kind == .clones ? "Clone object" : "Number of instances",
+                isPresented: Binding(
+                    get: { countTarget != nil },
+                    set: { if !$0 { countTarget = nil } }
+                )
+            ) {
+                TextField("Count", text: $countText)
+                    .keyboardType(.numberPad)
+                if let target = countTarget {
+                    if target.kind == .clones {
+                        Button("Clone") { runCount(target, arrange: false) }
+                        Button("Clone and arrange") { runCount(target, arrange: true) }
+                    } else {
+                        Button("Set") { runCount(target, arrange: false) }
+                    }
+                }
+                Button("Cancel", role: .cancel) { countTarget = nil }
             }
             .sheet(item: $settingsTarget) { target in
                 ObjectSettingsSheet(
@@ -538,6 +565,27 @@ extension PlateTabView {
         }
     }
 
+    /// Runs a count prompt (desktop "Set number of instances" / Clone).
+    private func runCount(_ target: CountPrompt, arrange: Bool) {
+        countTarget = nil
+        guard let count = Int(countText.trimmingCharacters(in: .whitespaces)), count >= 1 else {
+            environment.status.report(.document, failure: .invariant(
+                operation: target.kind == .clones ? "clone" : "set number of instances",
+                diagnostic: "\"\(countText)\" is not a positive whole number"))
+            return
+        }
+        Task {
+            switch target.kind {
+            case .instances:
+                await document.setInstanceCount(objectID: target.objectID, count: count)
+            case .clones:
+                await document.cloneObject(
+                    objectID: target.objectID, count: count,
+                    arrangeWith: arrange ? environment.presets.engineForSlicing : nil)
+            }
+        }
+    }
+
     private func isMultiSelected(_ object: SceneObject) -> Bool {
         document.selectedGroup.contains { $0.objectID == object.id }
     }
@@ -577,6 +625,57 @@ extension PlateTabView {
                 }
             } label: {
                 Label("Mirror", systemImage: "arrow.left.and.right.righttriangle.left.righttriangle.right")
+            }
+            Divider()
+            let printable = object.instances.allSatisfy(\.printable)
+            Button {
+                Task {
+                    await document.setPrintable(
+                        objectID: object.id, instanceID: nil, printable: !printable)
+                }
+            } label: {
+                Label(printable ? "Printable" : "Not printable",
+                      systemImage: printable ? "checkmark.square" : "square")
+            }
+            Button {
+                countText = "\(object.instances.count)"
+                countTarget = CountPrompt(kind: .instances, objectID: object.id)
+            } label: {
+                Label("Set number of instances…", systemImage: "number")
+            }
+            Button {
+                countText = "1"
+                countTarget = CountPrompt(kind: .clones, objectID: object.id)
+            } label: {
+                Label("Clone…", systemImage: "square.on.square")
+            }
+            Button {
+                let instanceID = document.selection?.objectID == object.id
+                    ? document.selection?.instanceID : object.instances.last?.id
+                guard let instanceID else { return }
+                Task { await document.separateInstance(objectID: object.id, instanceID: instanceID) }
+            } label: {
+                Label("Set as an individual object", systemImage: "square.and.arrow.up.on.square")
+            }
+            .disabled(object.instances.count < 2)
+            Button {
+                guard let engine = environment.presets.engineForSlicing,
+                      let instanceID = object.instances.first?.id else { return }
+                Task {
+                    await document.scaleToFit(
+                        objectID: object.id, instanceID: instanceID, presets: engine)
+                }
+            } label: {
+                Label("Scale to build volume", systemImage: "arrow.up.left.and.arrow.down.right.square")
+            }
+            Menu {
+                ForEach(UnitConversion.allCases, id: \.self) { conversion in
+                    Button(conversion.label) {
+                        Task { await document.convertUnits(objectID: object.id, conversion: conversion) }
+                    }
+                }
+            } label: {
+                Label("Convert units", systemImage: "ruler")
             }
             Divider()
             Button {
@@ -706,6 +805,13 @@ extension PlateTabView {
         }
         .padding(.leading, 16)
     }
+}
+
+/// Count prompt routing (instances / clones).
+private struct CountPrompt {
+    enum Kind { case instances, clones }
+    let kind: Kind
+    let objectID: ObjectID
 }
 
 /// Settings sheet routing: an object (volumeID nil) or one of its volumes.

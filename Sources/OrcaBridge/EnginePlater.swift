@@ -65,6 +65,15 @@ public final class EnginePlater: @unchecked Sendable {
         /// Per-object (volumeID nil) / per-part setting override.
         case setSetting(objectID: ObjectID, volumeID: VolumeID?, key: String, value: String)
         case eraseSetting(objectID: ObjectID, volumeID: VolumeID?, key: String)
+        /// Desktop printable toggle (instanceID nil = whole object).
+        case setPrintable(objectID: ObjectID, instanceID: InstanceID?, printable: Bool)
+        case setInstanceCount(objectID: ObjectID, count: Int)
+        case cloneObject(objectID: ObjectID, count: Int)
+        case instanceToObject(objectID: ObjectID, instanceID: InstanceID)
+        case mergeObjects([ObjectID])
+        /// Needs the presets session (machine volume).
+        case scaleToFit(objectID: ObjectID, instanceID: InstanceID)
+        case convertUnits(objectID: ObjectID, UnitConversion)
     }
 
     /// One (object, instance) pair of a multi-selection.
@@ -557,6 +566,83 @@ public final class EnginePlater: @unchecked Sendable {
                     operation: "remove \(key) from object \(objectID)"
                 )
 
+            case .setPrintable(let objectID, let instanceID, let printable):
+                try BridgeResult.consume(
+                    orca_plater_set_printable(
+                        handle, objectID.rawValue, instanceID?.rawValue ?? 0,
+                        printable ? 1 : 0, &mutationRevision
+                    ),
+                    operation: "set printable"
+                )
+
+            case .setInstanceCount(let objectID, let count):
+                try BridgeResult.consume(
+                    orca_plater_set_instance_count(
+                        handle, objectID.rawValue, Int32(clamping: count), &mutationRevision
+                    ),
+                    operation: "set number of instances"
+                )
+
+            case .cloneObject(let objectID, let count):
+                var rawObjectID: UInt64 = 0
+                try BridgeResult.consume(
+                    orca_plater_clone_object(
+                        handle, objectID.rawValue, Int32(clamping: count), &rawObjectID,
+                        &mutationRevision
+                    ),
+                    operation: "clone object \(objectID)"
+                )
+                createdObjectCount = count
+                createdObjectID = try Self.objectID(rawObjectID, operation: "clone object")
+
+            case .instanceToObject(let objectID, let instanceID):
+                var rawObjectID: UInt64 = 0
+                try BridgeResult.consume(
+                    orca_plater_instance_to_object(
+                        handle, objectID.rawValue, instanceID.rawValue, &rawObjectID,
+                        &mutationRevision
+                    ),
+                    operation: "set instance as object"
+                )
+                createdObjectCount = 1
+                createdObjectID = try Self.objectID(rawObjectID, operation: "instance to object")
+
+            case .mergeObjects(let objectIDs):
+                var rawObjectID: UInt64 = 0
+                let raw = objectIDs.map(\.rawValue)
+                try BridgeResult.consume(
+                    raw.withUnsafeBufferPointer { ids in
+                        orca_plater_merge_objects(
+                            handle, ids.baseAddress, Int32(clamping: raw.count),
+                            &rawObjectID, &mutationRevision
+                        )
+                    },
+                    operation: "assemble \(objectIDs.count) objects"
+                )
+                createdObjectCount = 1
+                createdObjectID = try Self.objectID(rawObjectID, operation: "assemble")
+
+            case .scaleToFit(let objectID, let instanceID):
+                try BridgeResult.consume(
+                    orca_plater_scale_to_fit(
+                        handle, presetHandle, objectID.rawValue, instanceID.rawValue,
+                        &mutationRevision
+                    ),
+                    operation: "scale to build volume"
+                )
+
+            case .convertUnits(let objectID, let conversion):
+                var rawObjectID: UInt64 = 0
+                try BridgeResult.consume(
+                    orca_plater_convert_units(
+                        handle, objectID.rawValue, conversion.rawValue, &rawObjectID,
+                        &mutationRevision
+                    ),
+                    operation: conversion.label
+                )
+                createdObjectCount = 1
+                createdObjectID = try Self.objectID(rawObjectID, operation: "convert units")
+
             case .pasteObject(let bedCenter):
                 var rawObjectID: UInt64 = 0
                 try BridgeResult.consume(
@@ -820,7 +906,8 @@ public final class EnginePlater: @unchecked Sendable {
                             id: instanceID,
                             transform: transform,
                             matrix: matrix,
-                            mirrored: rawInstance.mirrored != 0
+                            mirrored: rawInstance.mirrored != 0,
+                            printable: rawInstance.printable != 0
                         ))
                     }
                 }

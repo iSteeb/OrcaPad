@@ -64,6 +64,23 @@ public enum EngineAxis: Int32, CaseIterable, Sendable {
     case z = 2
 }
 
+/// Desktop unit conversions (ModelObject::convert_units).
+public enum UnitConversion: Int32, CaseIterable, Sendable {
+    case fromInch = 0
+    case toInch = 1
+    case fromMeter = 2
+    case toMeter = 3
+
+    public var label: String {
+        switch self {
+        case .fromInch: return "Convert from inches"
+        case .toInch: return "Revert conversion from inches"
+        case .fromMeter: return "Convert from metres"
+        case .toMeter: return "Revert conversion from metres"
+        }
+    }
+}
+
 /// Built-in primitive shapes (desktop Add Primitive).
 public enum PrimitiveShape: Int32, CaseIterable, Sendable {
     case cube = 0
@@ -183,15 +200,18 @@ public struct SceneInstance: Identifiable, Sendable {
     /// Left-handed matrix (mirrored on an odd number of axes): renderers flip
     /// winding/normals; the transform fields stay absolute.
     public let mirrored: Bool
+    /// False when excluded from slicing (desktop printable toggle).
+    public let printable: Bool
 
     public init(
         id: InstanceID, transform: InstanceTransform, matrix: simd_double4x4,
-        mirrored: Bool
+        mirrored: Bool, printable: Bool
     ) {
         self.id = id
         self.transform = transform
         self.matrix = matrix
         self.mirrored = mirrored
+        self.printable = printable
     }
 }
 

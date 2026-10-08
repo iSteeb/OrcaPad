@@ -41,6 +41,9 @@
 
 ## PROGRESS
 
+- [2026-10-07 CODE][TOOL] ABI v23: printable toggle (greyed render),
+  instance count, clone (+arrange), instance->object, assemble, scale to
+  build volume, unit conversion. Host tests 50,951 PASS.
 - [2026-10-07 CODE][TOOL] ABI v22: per-object / per-part setting overrides
   (desktop allowed-key rule, dump/set/erase, override counts in snapshots);
   ObjectSettingsSheet reuses the Prepare row editor, seeds from the

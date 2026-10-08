@@ -21,6 +21,7 @@ private struct InstanceDraw {
     let model: simd_float4x4
     let selected: Bool
     let mirrored: Bool
+    let printable: Bool
 }
 
 /// A translucent non-part volume (desktop color_from_model_volume) drawn
@@ -84,6 +85,8 @@ final class Renderer: NSObject, MTKViewDelegate {
 
     private static let objectColor = SIMD4<Float>(0.96, 0.52, 0.11, 1)
     private static let selectedColor = SIMD4<Float>(0.16, 0.80, 0.95, 1)
+    /// Desktop draws non-printable instances greyed out.
+    private static let unprintableColor = SIMD4<Float>(0.42, 0.42, 0.44, 1)
 
     /// Desktop GLVolume colors for non-part volumes (3DScene.cpp).
     static func volumeColor(_ role: VolumeRole) -> SIMD4<Float> {
@@ -304,7 +307,8 @@ final class Renderer: NSObject, MTKViewDelegate {
                     selected: (sceneObject.id == selectedObjectID &&
                         instance.id == selectedInstanceID) ||
                         highlightedInstanceIDs.contains(instance.id),
-                    mirrored: instance.mirrored
+                    mirrored: instance.mirrored,
+                    printable: instance.printable
                 )
             }
 
@@ -912,7 +916,8 @@ final class Renderer: NSObject, MTKViewDelegate {
                 let model = inst.model
                 cubeUniforms.mvp = viewProj * model
                 cubeUniforms.model = model
-                cubeUniforms.color = inst.selected ? Renderer.selectedColor : Renderer.objectColor
+                cubeUniforms.color = inst.selected ? Renderer.selectedColor
+                    : (inst.printable ? Renderer.objectColor : Renderer.unprintableColor)
                 cubeUniforms.normalSign = inst.mirrored ? -1 : 1
                 var cu = cubeUniforms
                 encoder.setVertexBytes(&cu, length: MemoryLayout<CubeUniforms>.stride, index: 1)

@@ -2226,6 +2226,333 @@ orca_result orca_plater_settings_erase(orca_plater *plater, orca_object_id objec
     });
 }
 
+// --- object operations (ABI v23) -------------------------------------------
+
+static Slic3r::DynamicPrintConfig orcapad_arrange_config(orca_presets *presets);
+
+#define ORCAPAD_BEGIN(op_name)                                                     \
+    constexpr const char *operation = op_name;                                     \
+    if (out_revision) *out_revision = 0;                                           \
+    if (!plater)                                                                   \
+        return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation,                 \
+                            "plater handle is null");                              \
+    if (!out_revision)                                                             \
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,               \
+                            "output pointer is null");
+
+orca_result orca_plater_set_printable(orca_plater *plater, orca_object_id object_id,
+                                      orca_instance_id instance_id, uint8_t printable,
+                                      orca_revision *out_revision) {
+    ORCAPAD_BEGIN("orca_plater_set_printable")
+    return orcapad_guard(operation, [&]() -> orca_result {
+        Slic3r::ModelObject *object = plater_obj(plater, object_id);
+        if (!object)
+            return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation, "object was not found");
+        Slic3r::ModelInstance *instance = nullptr;
+        if (instance_id != 0) {
+            instance = plater_instance(object, instance_id);
+            if (!instance)
+                return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation, "instance was not found");
+        }
+        if (!orcapad_revision_available(*plater))
+            return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
+                                "document revision is exhausted");
+        OrcapadMutation mutation(*plater, printable ? "Set printable" : "Set unprintable");
+        if (instance) {
+            instance->printable = printable != 0;
+        } else {
+            object->printable = printable != 0;
+            for (Slic3r::ModelInstance *each : object->instances) each->printable = printable != 0;
+        }
+        *out_revision = mutation.commit();
+        return orcapad_ok();
+    });
+}
+
+orca_result orca_plater_set_instance_count(orca_plater *plater, orca_object_id object_id,
+                                           int32_t count, orca_revision *out_revision) {
+    ORCAPAD_BEGIN("orca_plater_set_instance_count")
+    if (count < 1 || count > 1000)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "instance count must be 1..1000");
+    return orcapad_guard(operation, [&]() -> orca_result {
+        Slic3r::ModelObject *object = plater_obj(plater, object_id);
+        if (!object)
+            return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation, "object was not found");
+        if (object->instances.empty())
+            return orcapad_fail(ORCA_STATUS_INVALID_MODEL, operation, "object has no instance");
+        if (static_cast<size_t>(count) == object->instances.size())
+            return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                                "the object already has that many instances");
+        if (!orcapad_revision_available(*plater))
+            return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
+                                "document revision is exhausted");
+        OrcapadMutation mutation(*plater, "Set number of instances");
+        while (object->instances.size() > static_cast<size_t>(count))
+            object->delete_instance(object->instances.size() - 1);
+        while (object->instances.size() < static_cast<size_t>(count)) {
+            Slic3r::ModelInstance *instance = object->add_instance(*object->instances.back());
+            instance->set_offset(instance->get_offset() + Slic3r::Vec3d(10.0, 10.0, 0.0));
+        }
+        object->invalidate_bounding_box();
+        *out_revision = mutation.commit();
+        return orcapad_ok();
+    });
+}
+
+orca_result orca_plater_clone_object(orca_plater *plater, orca_object_id object_id,
+                                     int32_t count, orca_object_id *out_first_object_id,
+                                     orca_revision *out_revision) {
+    if (out_first_object_id) *out_first_object_id = 0;
+    ORCAPAD_BEGIN("orca_plater_clone_object")
+    if (!out_first_object_id)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation, "output pointer is null");
+    if (count < 1 || count > 100)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation, "clone count must be 1..100");
+    return orcapad_guard(operation, [&]() -> orca_result {
+        Slic3r::ModelObject *source = plater_obj(plater, object_id);
+        if (!source)
+            return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation, "object was not found");
+        if (!orcapad_revision_available(*plater))
+            return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
+                                "document revision is exhausted");
+        OrcapadMutation mutation(*plater, "Clone");
+        orca_object_id first = 0;
+        for (int32_t index = 1; index <= count; ++index) {
+            Slic3r::ModelObject *clone = plater->model.add_object(*source);
+            if (!clone)
+                return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
+                                    "engine did not create the clone");
+            clone->translate_instances(Slic3r::Vec3d(10.0 * index, 10.0 * index, 0.0));
+            clone->ensure_on_bed(false);
+            if (!orcapad_register_object(*plater, *clone))
+                return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
+                                    "engine returned an invalid or reused object ID");
+            if (first == 0) first = static_cast<orca_object_id>(clone->id().id);
+        }
+        *out_revision = mutation.commit();
+        *out_first_object_id = first;
+        return orcapad_ok();
+    });
+}
+
+orca_result orca_plater_instance_to_object(orca_plater *plater, orca_object_id object_id,
+                                           orca_instance_id instance_id,
+                                           orca_object_id *out_object_id,
+                                           orca_revision *out_revision) {
+    if (out_object_id) *out_object_id = 0;
+    ORCAPAD_BEGIN("orca_plater_instance_to_object")
+    if (!out_object_id)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation, "output pointer is null");
+    return orcapad_guard(operation, [&]() -> orca_result {
+        Slic3r::ModelObject *object = plater_obj(plater, object_id);
+        if (!object)
+            return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation, "object was not found");
+        size_t index = 0;
+        if (!plater_instance(object, instance_id, &index))
+            return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation, "instance was not found");
+        if (object->instances.size() < 2)
+            return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                                "the object has a single instance");
+        if (!orcapad_revision_available(*plater))
+            return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
+                                "document revision is exhausted");
+        OrcapadMutation mutation(*plater, "Instance to object");
+        // desktop instances_to_separated_object: a copy keeping only that instance
+        Slic3r::ModelObject *separated = plater->model.add_object(*object);
+        if (!separated)
+            return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
+                                "engine did not create the object");
+        for (size_t i = separated->instances.size(); i-- > 0;)
+            if (i != index) separated->delete_instance(i);
+        object->delete_instance(index);
+        object->invalidate_bounding_box();
+        separated->invalidate_bounding_box();
+        if (!orcapad_register_object(*plater, *separated))
+            return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
+                                "engine returned an invalid or reused object ID");
+        const orca_object_id id = static_cast<orca_object_id>(separated->id().id);
+        *out_revision = mutation.commit();
+        *out_object_id = id;
+        return orcapad_ok();
+    });
+}
+
+orca_result orca_plater_merge_objects(orca_plater *plater, const orca_object_id *object_ids,
+                                      int32_t count, orca_object_id *out_object_id,
+                                      orca_revision *out_revision) {
+    if (out_object_id) *out_object_id = 0;
+    ORCAPAD_BEGIN("orca_plater_merge_objects")
+    if (!object_ids || !out_object_id)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation, "input or output pointer is null");
+    if (count < 2 || count > 1000)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "assembling needs at least two objects");
+    return orcapad_guard(operation, [&]() -> orca_result {
+        std::vector<Slic3r::ModelObject *> sources;
+        std::set<orca_object_id> seen;
+        for (int32_t i = 0; i < count; ++i) {
+            Slic3r::ModelObject *object = plater_obj(plater, object_ids[i]);
+            if (!object)
+                return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation, "object was not found");
+            if (!seen.insert(object_ids[i]).second)
+                return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                                    "an object is listed twice");
+            if (object->instances.size() != 1)
+                return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                                    "assemble single-instance objects (split instances first)");
+            sources.push_back(object);
+        }
+        if (!orcapad_revision_available(*plater))
+            return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
+                                "document revision is exhausted");
+        OrcapadMutation mutation(*plater, "Assemble");
+        // desktop ObjectList::merge(true)
+        Slic3r::ModelObject *assembly = plater->model.add_object();
+        assembly->name = "Assembly";
+        assembly->add_instance();
+        for (Slic3r::ModelObject *object : sources) {
+            const Slic3r::Transform3d matrix = object->instances[0]->get_transformation().get_matrix();
+            for (const Slic3r::ModelVolume *volume : object->volumes) {
+                Slic3r::ModelVolume *merged = assembly->add_volume(*volume);
+                merged->set_transformation(matrix * merged->get_matrix());
+                if (object->volumes.size() > 1) merged->config.assign_config(volume->config);
+                if (!merged->config.has("extruder") && object->config.has("extruder"))
+                    merged->config.set_key_value(
+                        "extruder", new Slic3r::ConfigOptionInt(object->config.opt_int("extruder")));
+            }
+            for (const std::string &key : object->config.keys())
+                if (!assembly->config.has(key))
+                    assembly->config.set_key_value(key, object->config.option(key)->clone());
+            if (!object->instances[0]->printable) {
+                assembly->printable = false;
+                assembly->instances[0]->printable = false;
+            }
+            for (const auto &range : object->layer_config_ranges)
+                assembly->layer_config_ranges.emplace(range);
+        }
+        assembly->sort_volumes(true);
+        assembly->ensure_on_bed();
+        assembly->center_around_origin();
+        assembly->translate_instances(-assembly->origin_translation);
+        assembly->origin_translation = Slic3r::Vec3d::Zero();
+        for (Slic3r::ModelObject *object : sources) {
+            const orca_object_id id = static_cast<orca_object_id>(object->id().id);
+            plater->mesh_revisions.erase(id);
+            plater->model.delete_object(object);
+        }
+        if (!orcapad_register_object(*plater, *assembly))
+            return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
+                                "engine returned an invalid or reused object ID");
+        const orca_object_id id = static_cast<orca_object_id>(assembly->id().id);
+        *out_revision = mutation.commit();
+        *out_object_id = id;
+        return orcapad_ok();
+    });
+}
+
+orca_result orca_plater_scale_to_fit(orca_plater *plater, orca_presets *presets,
+                                     orca_object_id object_id, orca_instance_id instance_id,
+                                     orca_revision *out_revision) {
+    ORCAPAD_BEGIN("orca_plater_scale_to_fit")
+    if (!presets)
+        return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation, "presets handle is null");
+    return orcapad_guard(operation, [&]() -> orca_result {
+        Slic3r::ModelObject *object = plater_obj(plater, object_id);
+        if (!object)
+            return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation, "object was not found");
+        Slic3r::ModelInstance *instance = plater_instance(object, instance_id);
+        if (!instance)
+            return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation, "instance was not found");
+        const Slic3r::DynamicPrintConfig config = orcapad_arrange_config(presets);
+        const auto *area = config.option<Slic3r::ConfigOptionPoints>("printable_area");
+        if (!area || area->values.empty() || !config.has("printable_height"))
+            return orcapad_fail(ORCA_STATUS_INVALID_CONFIGURATION, operation,
+                                "the machine has no printable area / height");
+        Slic3r::BoundingBoxf bed;
+        for (const auto &point : area->values) bed.merge(Slic3r::Vec2d(point.x(), point.y()));
+        const Slic3r::Vec3d volume_size(bed.size().x(), bed.size().y(),
+                                        config.opt_float("printable_height"));
+        object->invalidate_bounding_box();
+        const Slic3r::Vec3d box =
+            object->instance_bounding_box(*instance).size() + 0.01 * Slic3r::Vec3d::Ones();
+        if (box.x() <= 0 || box.y() <= 0 || box.z() <= 0)
+            return orcapad_fail(ORCA_STATUS_INVALID_MODEL, operation, "the instance has no extent");
+        const double s = std::min({volume_size.x() / box.x(), volume_size.y() / box.y(),
+                                   volume_size.z() / box.z()});
+        if (std::abs(s - 1.0) < 1e-9)
+            return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                                "the instance already fits the build volume exactly");
+        if (!orcapad_revision_available(*plater))
+            return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
+                                "document revision is exhausted");
+        OrcapadMutation mutation(*plater, "Scale To Fit");
+        instance->set_scaling_factor(instance->get_scaling_factor() * s);
+        object->invalidate_bounding_box();
+        const Slic3r::BoundingBoxf3 scaled = object->instance_bounding_box(*instance);
+        const Slic3r::Vec3d shift(bed.center().x() - scaled.center().x(),
+                                  bed.center().y() - scaled.center().y(), 0.0);
+        instance->set_offset(instance->get_offset() + shift);
+        orcapad_rest_on_bed(object, instance);
+        *out_revision = mutation.commit();
+        return orcapad_ok();
+    });
+}
+
+orca_result orca_plater_convert_units(orca_plater *plater, orca_object_id object_id,
+                                      int32_t conversion, orca_object_id *out_object_id,
+                                      orca_revision *out_revision) {
+    if (out_object_id) *out_object_id = 0;
+    ORCAPAD_BEGIN("orca_plater_convert_units")
+    if (!out_object_id)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation, "output pointer is null");
+    Slic3r::ConversionType type;
+    switch (conversion) {
+    case ORCA_UNITS_FROM_INCH: type = Slic3r::ConversionType::CONV_FROM_INCH; break;
+    case ORCA_UNITS_TO_INCH: type = Slic3r::ConversionType::CONV_TO_INCH; break;
+    case ORCA_UNITS_FROM_METER: type = Slic3r::ConversionType::CONV_FROM_METER; break;
+    case ORCA_UNITS_TO_METER: type = Slic3r::ConversionType::CONV_TO_METER; break;
+    default:
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation, "unknown unit conversion");
+    }
+    return orcapad_guard(operation, [&]() -> orca_result {
+        Slic3r::ModelObject *object = plater_obj(plater, object_id);
+        if (!object)
+            return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation, "object was not found");
+        if (!orcapad_revision_available(*plater))
+            return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
+                                "document revision is exhausted");
+        OrcapadMutation mutation(*plater, "Convert units");
+        // convert_units returns detached clones (set_model(nullptr)) whose
+        // destructor is private to Model: a scratch Model owns and frees
+        // them; they enter the document as copies through add_object.
+        Slic3r::Model scratch;
+        object->convert_units(scratch.objects, type, {});
+        if (scratch.objects.empty())
+            return orcapad_fail(ORCA_STATUS_INVALID_MODEL, operation,
+                                "the conversion produced no object");
+        orca_object_id first = 0;
+        for (const Slic3r::ModelObject *clone : scratch.objects) {
+            Slic3r::ModelObject *added = plater->model.add_object(*clone);
+            if (!added)
+                return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
+                                    "engine did not add the converted object");
+            added->ensure_on_bed(false);
+            if (!orcapad_register_object(*plater, *added))
+                return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
+                                    "engine returned an invalid or reused object ID");
+            if (first == 0) first = static_cast<orca_object_id>(added->id().id);
+        }
+        plater->mesh_revisions.erase(object_id);
+        plater->model.delete_object(object);
+        *out_revision = mutation.commit();
+        *out_object_id = first;
+        return orcapad_ok();
+    });
+}
+
+#undef ORCAPAD_BEGIN
+
 orca_result orca_plater_object_copy(orca_plater *plater, orca_object_id object_id) {
     constexpr const char *operation = "orca_plater_object_copy";
     if (!plater)
@@ -2475,6 +2802,7 @@ orca_result orca_plater_snapshot(orca_plater *plater,
                 const Slic3r::Vec3d scaling =
                     model_instance->get_scaling_factor();
                 instance.mirrored = model_instance->is_left_handed() ? 1 : 0;
+                instance.printable = model_instance->printable ? 1 : 0;
                 const Slic3r::Vec3d offset = model_instance->get_offset();
                 instance.transform.offset_x = offset.x();
                 instance.transform.offset_y = offset.y();

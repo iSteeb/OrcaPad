@@ -273,7 +273,7 @@ static void test_md5_shim() {
 
 static void test_abi_version() {
     CHECK_EQ(orca_bridge_abi_version(), ORCA_BRIDGE_ABI_VERSION);
-    CHECK_EQ(ORCA_BRIDGE_ABI_VERSION, 22);
+    CHECK_EQ(ORCA_BRIDGE_ABI_VERSION, 23);
 }
 
 static std::string snapshot_label(const orca_owned_string &label) {
@@ -1169,6 +1169,132 @@ static void test_object_settings(const std::string &dir) {
         CHECK_EQ(snap.objects[0].volumes[0].override_count, 0u);
         orca_scene_snapshot_dispose(&snap);
     }
+    orca_plater_free(plater);
+}
+// ABI v23: object operations (printable, instance count, clone, instance to
+// object, assemble, scale to fit, unit conversion).
+static void test_object_ops(const std::string &dir, const std::string &data_dir) {
+    orca_plater *plater = nullptr;
+    GUARD(g0, orca_plater_new(&plater));
+    expect_ok(g0, "plater_new");
+    orca_revision revision = 0;
+    const std::string cube = write_cube_stl(dir, "ops_cube.stl");
+    orca_object_id a = 0, b = 0;
+    GUARD(g1, import_one(plater, cube.c_str(), 60, 60, &a, &revision));
+    expect_ok(g1, "import a");
+    GUARD(g2, import_one(plater, cube.c_str(), 140, 60, &b, &revision));
+    expect_ok(g2, "import b");
+
+    // printable
+    GUARD(g3, orca_plater_set_printable(plater, a, 0, 0, &revision));
+    expect_ok(g3, "object unprintable");
+    orca_scene_snapshot snap = take_snapshot(plater);
+    CHECK_EQ(find_object(snap, a)->instances[0].printable, 0);
+    CHECK_EQ(find_object(snap, b)->instances[0].printable, 1);
+    orca_scene_snapshot_dispose(&snap);
+    GUARD(g4, orca_plater_undo(plater, &revision));
+    expect_ok(g4, "undo unprintable");
+
+    // instance count
+    GUARD(e1, orca_plater_set_instance_count(plater, a, 0, &revision));
+    expect_code(e1, ORCA_STATUS_INVALID_ARGUMENT, "count 0");
+    GUARD(e2, orca_plater_set_instance_count(plater, a, 1, &revision));
+    expect_code(e2, ORCA_STATUS_INVALID_ARGUMENT, "unchanged count");
+    GUARD(g5, orca_plater_set_instance_count(plater, a, 3, &revision));
+    expect_ok(g5, "three instances");
+    snap = take_snapshot(plater);
+    CHECK_EQ(find_object(snap, a)->instance_count, 3);
+    const orca_instance_id second = find_object(snap, a)->instances[1].id;
+    orca_scene_snapshot_dispose(&snap);
+
+    // instance to object
+    orca_object_id separated = 0;
+    GUARD(g6, orca_plater_instance_to_object(plater, a, second, &separated, &revision));
+    expect_ok(g6, "instance to object");
+    snap = take_snapshot(plater);
+    CHECK_EQ(snap.object_count, 3);
+    CHECK_EQ(find_object(snap, a)->instance_count, 2);
+    CHECK(find_object(snap, separated) != nullptr && find_object(snap, separated)->instance_count == 1);
+    const orca_instance_id b_instance = find_object(snap, b)->instances[0].id;
+    orca_scene_snapshot_dispose(&snap);
+    orca_object_id unused = 0;
+    GUARD(e3, orca_plater_instance_to_object(plater, b, b_instance, &unused, &revision));
+    expect_code(e3, ORCA_STATUS_INVALID_ARGUMENT, "single instance to object");
+    CHECK_EQ(unused, 0u); // outputs are defensively zeroed on failure
+
+    // clone
+    orca_object_id first_clone = 0;
+    GUARD(g7, orca_plater_clone_object(plater, b, 2, &first_clone, &revision));
+    expect_ok(g7, "clone x2");
+    snap = take_snapshot(plater);
+    CHECK_EQ(snap.object_count, 5);
+    CHECK(find_object(snap, first_clone) != nullptr);
+    orca_scene_snapshot_dispose(&snap);
+    GUARD(g8, orca_plater_undo(plater, &revision));
+    expect_ok(g8, "undo clone");
+
+    // assemble (merge)
+    const orca_object_id pair[2] = { b, separated };
+    orca_object_id assembly = 0;
+    GUARD(e4, orca_plater_merge_objects(plater, pair, 1, &assembly, &revision));
+    expect_code(e4, ORCA_STATUS_INVALID_ARGUMENT, "assemble one object");
+    const orca_object_id with_multi[2] = { a, b };
+    GUARD(e5, orca_plater_merge_objects(plater, with_multi, 2, &assembly, &revision));
+    expect_code(e5, ORCA_STATUS_INVALID_ARGUMENT, "assemble multi-instance object");
+    GUARD(g9, orca_plater_merge_objects(plater, pair, 2, &assembly, &revision));
+    expect_ok(g9, "assemble two");
+    snap = take_snapshot(plater);
+    CHECK_EQ(snap.object_count, 2);
+    const orca_scene_object *merged = find_object(snap, assembly);
+    CHECK(merged != nullptr);
+    if (merged) {
+        CHECK(snapshot_label(merged->name) == "Assembly");
+        CHECK_EQ(merged->volume_count, 2);
+        CHECK(merged->bbox_max[0] - merged->bbox_min[0] > 60.0);
+    }
+    orca_scene_snapshot_dispose(&snap);
+
+    // unit conversion: inch -> mm scales by 25.4
+    snap = take_snapshot(plater);
+    const orca_scene_object *obj_a = find_object(snap, a);
+    const float width_before = obj_a->bbox_max[0] - obj_a->bbox_min[0];
+    orca_scene_snapshot_dispose(&snap);
+    orca_object_id converted = 0;
+    GUARD(e6, orca_plater_convert_units(plater, a, 9, &converted, &revision));
+    expect_code(e6, ORCA_STATUS_INVALID_ARGUMENT, "bogus conversion");
+    GUARD(g10, orca_plater_convert_units(plater, a, ORCA_UNITS_FROM_INCH, &converted, &revision));
+    expect_ok(g10, "from inch");
+    snap = take_snapshot(plater);
+    CHECK(find_object(snap, a) == nullptr);
+    const orca_scene_object *big = find_object(snap, converted);
+    CHECK(big != nullptr);
+    if (big) CHECK_NEAR(big->bbox_max[0] - big->bbox_min[0], width_before * 25.4f, 0.05);
+    orca_scene_snapshot_dispose(&snap);
+    GUARD(g11, orca_plater_undo(plater, &revision));
+    expect_ok(g11, "undo conversion");
+
+    // scale to fit: a 20 mm cube grows to the machine volume
+    orca_presets *presets = nullptr;
+    GUARD(g12, orca_presets_new(data_dir.c_str(), &presets));
+    expect_ok(g12, "presets");
+    GUARD(g13, orca_presets_select(presets, "Anycubic Vyper 0.4 nozzle", "Anycubic Generic PLA",
+                                   "0.20mm Standard @Anycubic Vyper"));
+    expect_ok(g13, "select Vyper");
+    GUARD(g14, orca_plater_scale_to_fit(plater, presets, assembly, 0x7fffffff, &revision));
+    expect_code(g14, ORCA_STATUS_NOT_FOUND, "scale to fit bogus instance");
+    snap = take_snapshot(plater);
+    const orca_instance_id assembly_instance = find_object(snap, assembly)->instances[0].id;
+    orca_scene_snapshot_dispose(&snap);
+    GUARD(g15, orca_plater_scale_to_fit(plater, presets, assembly, assembly_instance, &revision));
+    expect_ok(g15, "scale to fit");
+    snap = take_snapshot(plater);
+    const orca_scene_object *fitted = find_object(snap, assembly);
+    if (fitted) {
+        CHECK(fitted->instances[0].transform.scale_x > 1.5);
+        CHECK_NEAR(instance_min_z(*fitted, fitted->instances[0].matrix), 0.0, 1e-6);
+    }
+    orca_scene_snapshot_dispose(&snap);
+    orca_presets_free(presets);
     orca_plater_free(plater);
 }
 
@@ -2743,6 +2869,7 @@ int main() {
     test_mirror_clipboard(dir);
     test_group_transforms(dir);
     test_object_settings(dir);
+    test_object_ops(dir, data_dir);
     test_add_failures(dir);
     test_stable_ids_and_revisions(dir);
     test_not_found_and_validation(dir);

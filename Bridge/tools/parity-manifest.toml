@@ -77,20 +77,17 @@ evidence = ["abi:orca_plater_instance_add", "abi:orca_plater_instance_delete", '
 id = "plate.instance-count"
 area = "plate"
 title = "Set number of instances"
-status = "missing"
+status = "done"
 desktop = ["context:Set number of instances"]
-work = "UI"
-priority = 15
-
+evidence = ["abi:orca_plater_set_instance_count", 'client:func setInstanceCount\(']
 [[feature]]
 id = "plate.clone"
 area = "plate"
 title = "Clone selected (N copies as objects, optional arrange)"
-status = "missing"
+status = "done"
 desktop = ["menu:Clone selected", "context:Clone", "dialog:CloneDialog", "pref:Auto arrange plate after cloning"]
-work = "Bridge + UI"
-priority = 16
-
+evidence = ["abi:orca_plater_clone_object", 'client:func cloneObject\(']
+note = "the arrange choice is per clone (\"Clone and arrange\"), not a stored preference"
 [[feature]]
 id = "plate.selection"
 area = "plate"
@@ -147,11 +144,9 @@ priority = 12
 id = "plate.scale-to-fit"
 area = "plate"
 title = "Scale to build volume"
-status = "missing"
+status = "done"
 desktop = ["context:Scale to build volume"]
-work = "Bridge"
-priority = 17
-
+evidence = ["abi:orca_plater_scale_to_fit", 'client:func scaleToFit\(']
 [[feature]]
 id = "plate.lay-flat"
 area = "plate"
@@ -210,11 +205,10 @@ evidence = ["abi:orca_plater_split_objects", "abi:orca_plater_split_parts", 'cli
 id = "plate.merge"
 area = "plate"
 title = "Assemble objects into one multi-part object"
-status = "missing"
+status = "done"
 desktop = ["context:Assemble"]
-work = "Bridge"
-priority = 18
-
+evidence = ["abi:orca_plater_merge_objects", 'client:func assembleSelection\(']
+note = "single-instance objects (desktop splits instances first)"
 [[feature]]
 id = "plate.mirror"
 area = "plate"
@@ -331,11 +325,9 @@ note = "needs prepare.multi-filament"
 id = "plate.printable"
 area = "plate"
 title = "Printable toggle"
-status = "missing"
+status = "done"
 desktop = ["context:Printable"]
-work = "Bridge + UI"
-priority = 21
-
+evidence = ["abi:orca_plater_set_printable", 'client:func setPrintable\(', "client:unprintableColor"]
 [[feature]]
 id = "plate.visibility"
 area = "plate"
@@ -349,11 +341,9 @@ priority = 33
 id = "plate.instance-to-object"
 area = "plate"
 title = "Set instance as an individual object"
-status = "missing"
+status = "done"
 desktop = ["context:Set as an individual object"]
-work = "Bridge"
-priority = 22
-
+evidence = ["abi:orca_plater_instance_to_object", 'client:func separateInstance\(']
 [[feature]]
 id = "plate.fill-bed"
 area = "plate"
@@ -377,11 +367,9 @@ note = "multi-material; per-object flush_into_* options"
 id = "plate.convert-units"
 area = "plate"
 title = "Convert units (inch / metre)"
-status = "missing"
+status = "done"
 desktop = ["context:{item.second}@append_menu_items_convert_unit"]
-work = "Bridge + UI"
-priority = 34
-
+evidence = ["abi:orca_plater_convert_units", 'client:func convertUnits\(']
 [[feature]]
 id = "plate.reload"
 area = "plate"
