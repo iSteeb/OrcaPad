@@ -2640,6 +2640,59 @@ static void cancel_trampoline(int32_t percent, const char *, void *context) {
         orca_slice_job_cancel(record->job);
 }
 
+// Regression (user report 2026-10-07): a G-code-processor warning with the
+// engine's OWN severity level 3 used to reach the ABI raw and fail the
+// slice at decode time. The Bridge must map engine levels onto the ABI's
+// (2 and 3 -> CRITICAL) and keep the slice successful.
+static void test_slice_gcode_warning_levels(const std::string &dir, const std::string &data_dir) {
+    orca_presets *presets = nullptr;
+    GUARD(g0, orca_presets_new(data_dir.c_str(), &presets));
+    expect_ok(g0, "presets_new");
+    // X1C triple (the Vyper profile fails Print::validate: no G92 E0).
+    GUARD(g1, orca_presets_select(presets, "Bambu Lab X1 Carbon 0.4 nozzle",
+                                  "Bambu PLA Basic @BBL X1C",
+                                  "0.20mm Standard @BBL X1C"));
+    expect_ok(g1, "select X1C triple");
+    // vitrification threshold 1 C: any bed temperature trips the engine's
+    // level-3 bed_temperature_too_high_than_filament warning.
+    GUARD(g2, orca_presets_set_value(presets, 1, "temperature_vitrification", "1"));
+    expect_ok(g2, "set vitrification threshold");
+
+    orca_plater *plater = nullptr;
+    GUARD(g3, orca_plater_new(&plater));
+    expect_ok(g3, "plater_new");
+    const std::string cube = write_cube_stl(dir, "warnlevel_cube.stl");
+    orca_object_id object_id = 0;
+    orca_revision revision = 0;
+    GUARD(g4, import_one(plater, cube.c_str(), 110, 105, &object_id, &revision));
+    expect_ok(g4, "import cube");
+
+    orca_slice_report report;
+    const std::string gcode = dir + "/warnlevel.gcode";
+    GUARD(g5, orca_plater_slice_to_gcode_with_presets(
+                   plater, presets, gcode.c_str(), nullptr, nullptr, nullptr, &report));
+    expect_ok(g5, "slice with a level-3 engine warning");
+
+    bool saw_mapped_warning = false;
+    for (uint32_t index = 0; index < report.warning_count; ++index) {
+        const orca_slice_warning &warning = report.warnings[index];
+        CHECK(warning.level == ORCA_SLICE_WARNING_TIP ||
+              warning.level == ORCA_SLICE_WARNING_WARNING ||
+              warning.level == ORCA_SLICE_WARNING_CRITICAL);
+        if (warning.source == ORCA_SLICE_SOURCE_GCODE &&
+            warning.code.data &&
+            strcmp(warning.code.data, "bed_temperature_too_high_than_filament") == 0) {
+            CHECK_EQ(warning.level, ORCA_SLICE_WARNING_CRITICAL);
+            saw_mapped_warning = true;
+        }
+    }
+    CHECK(saw_mapped_warning);
+    CHECK(report.gcode_bytes > 0);
+    orca_slice_report_dispose(&report);
+    orca_plater_free(plater);
+    orca_presets_free(presets);
+}
+
 static void test_slice_cancel(const std::string &dir) {
     GUARD(g0, orca_slice_job_new(nullptr));
     expect_code(g0, ORCA_STATUS_INVALID_ARGUMENT, "job_new(null)");
@@ -2886,6 +2939,7 @@ int main() {
     test_slice_defaults(dir);
     test_slice_with_presets(dir, data_dir);
     test_standalone_slice(dir);
+    test_slice_gcode_warning_levels(dir, data_dir);
     test_slice_cancel(dir);
     test_project_roundtrip(dir, data_dir);
     test_user_presets(data_dir);

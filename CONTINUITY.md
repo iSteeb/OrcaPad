@@ -41,6 +41,11 @@
 
 ## PROGRESS
 
+- [2026-10-07 CODE][USER] Bug: slice failed "warning level 3 source 4" -
+  engine G-code warning severity 3 reached the ABI raw and the facade
+  decode rejected it. Bridge now maps 2/3->CRITICAL (desktop never fails
+  on these); error_code forwarded as message. Regression test slices with
+  temperature_vitrification=1. Host tests 50,962 PASS.
 - [2026-10-07 CODE][TOOL] ABI v23: printable toggle (greyed render),
   instance count, clone (+arrange), instance->object, assemble, scale to
   build volume, unit conversion. Host tests 50,951 PASS.

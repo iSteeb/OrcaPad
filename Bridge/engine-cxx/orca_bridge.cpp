@@ -3479,8 +3479,17 @@ static orca_result orcapad_run_print(const char *operation,
                 std::string detail;
                 for (const std::string &param : warning.params)
                     detail += (detail.empty() ? "" : "\n") + param;
-                warnings.push_back({warning.level, ORCA_SLICE_SOURCE_GCODE,
-                                    warning.msg, "", detail});
+                // The engine's G-code warnings use its own severity scale
+                // (0 tip, 1 warning, 2 error, 3 blocking-error for Studio,
+                // emitted ALONGSIDE a 2); the ABI owns its values, so map:
+                // 2 and 3 are CRITICAL here. Desktop never fails a slice on
+                // these (it matches them by message).
+                const int32_t level = warning.level >= 2
+                    ? ORCA_SLICE_WARNING_CRITICAL
+                    : (warning.level <= 0 ? ORCA_SLICE_WARNING_TIP
+                                          : ORCA_SLICE_WARNING_WARNING);
+                warnings.push_back({level, ORCA_SLICE_SOURCE_GCODE,
+                                    warning.msg, warning.error_code, detail});
             }
             if (const auto conflict = print.get_conflict_result()) {
                 warnings.push_back({ORCA_SLICE_WARNING_CRITICAL, ORCA_SLICE_SOURCE_CONFLICT,

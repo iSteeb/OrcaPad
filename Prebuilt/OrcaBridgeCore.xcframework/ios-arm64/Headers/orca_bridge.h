@@ -671,6 +671,8 @@ void orca_slice_job_free(orca_slice_job *job);
 orca_result orca_slice_job_set_thumbnail(orca_slice_job *job, uint32_t size,
                                          const uint8_t *rgba);
 
+/// Engine G-code-processor severities map onto these (its level 2 and 3
+/// both arrive as CRITICAL; slicing is never failed on them, like desktop).
 #define ORCA_SLICE_WARNING_TIP      ((int32_t)0)
 #define ORCA_SLICE_WARNING_WARNING  ((int32_t)1)
 #define ORCA_SLICE_WARNING_CRITICAL ((int32_t)2)

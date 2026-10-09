@@ -240,6 +240,12 @@ in ~/xtool-cheatsheet.md — link, don't duplicate.)
 - The Swift ABI literal, the header macro and the contract-test literal must
   move together; only a RUNTIME check compared Swift vs header, so the Swift
   value drifted silently (8 vs 14). The audit now enforces the match.
+- The engine's GCodeProcessor SliceWarning levels are its OWN scale (0/1/2
+  plus a Studio-only 3 emitted beside a 2); desktop never fails a slice on
+  them. Map engine enums onto ABI values at the Bridge - forwarding them raw
+  made a successful slice fail at facade decode ("level 3 source 4"). The
+  vitrification key is `temperature_vitrification` (coInts), not
+  filament_vitrification_temperature.
 - Before exposing an engine option, read its real key in PrintConfig.cpp
   (physical-printer host is `host_type`, coEnum — not `print_host_type`).
   Swift imports C fixed-size arrays as tuples — index them via byte offsets.
