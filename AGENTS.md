@@ -63,10 +63,14 @@ Sources/OrcaPad/Viewer/     everything Metal: Renderer, Geometry, Camera,
                             CoordinateMapper, Shaders (runtime MSL), MetalCanvas,
                             ToolpathRenderer + GcodeCanvas (Preview)
 Distribution/               App Store packaging, used ONLY by CI on macOS:
-                            AppIcon.xcassets (actool), PrivacyInfo.xcprivacy,
-                            package-testflight.sh (stamp, sign, IPA, upload)
-.github/workflows/          testflight.yml: Linux audit + parity gate, xcode-27
-                            release build, main builds uploaded to TestFlight
+                            project.yml (XcodeGen app target: App/empty.c +
+                            the OrcaPad library), AppIcon.xcassets,
+                            PrivacyInfo.xcprivacy, release-testflight.sh
+                            (archive, sign, check, upload), asc_testflight.py
+                            (external TestFlight group + Beta App Review)
+.github/workflows/          testflight.yml: on `release*` tags only - Linux
+                            audit + parity, then Xcode archive -> TestFlight
+PRIVACY.md                  privacy policy (TestFlight/App Store URL)
 ```
 
 ## The contract (summary — full text in ARCHITECTURE.md)
@@ -142,14 +146,19 @@ contract test literal in the same commit)**
   macOS-only): all MSL lives in `Viewer/Shaders.swift` and is compiled at
   runtime via `MTLDevice.makeLibrary(source:)`. Keep it that way.
 - `xtool dev build` release artifacts are UNSIGNED — never install them.
-- **CI** (GitHub Actions `.github/workflows/testflight.yml`, public repo
-  `iSteeb/OrcaPad`): audit + parity check on Linux; the app is built with
-  Apple's toolchain on the GitHub-hosted `xcode-27` macOS runner (xtool
-  1.20.1, pinned by sha256) and every push to `main` is signed and uploaded
-  to TestFlight (internal testing group). CI does NOT rebuild the engine: it
+- **CI = releases only** [USER 2026-10-13] (GitHub Actions
+  `.github/workflows/testflight.yml`, public repo `iSteeb/OrcaPad`): it runs
+  ONLY when a `release*` tag is pushed, and every such build goes to the
+  external TestFlight group (Beta App Review). Linux job: audit + parity
+  check. macOS job (hosted `xcode-27`): Xcode only, NO xtool (the xtool.app
+  binary hung at launch on the runner): XcodeGen generates the app project
+  from `Distribution/project.yml`, `xcodebuild` archives with App Store
+  signing, then export, `altool` upload, `asc_testflight.py` (external
+  group, What to Test, review submission). CI does NOT rebuild the engine: it
   links the committed `Prebuilt/` archive, so the matrix below still governs
-  it. Docs-only pushes (`*.md` except PARITY.md) skip CI; `[skip ci]` skips
-  any push.
+  it. Release: `git tag release-X.Y.Z && git push origin release-X.Y.Z`
+  (the tag sets the version; a plain `release*` tag keeps
+  MARKETING_VERSION from `Distribution/project.yml`).
 - TestFlight builds are `ie.duz.OrcaPad`: a separate app (and data container)
   from the xtool dev install `XTL-C93C0481.ie.duz.OrcaPad`. CFBundleVersion
   is `<run number>.<attempt>`. Signing material stays with the user
@@ -165,7 +174,7 @@ contract test literal in the same commit)**
 | `Sources/OrcaPad` (Swift client / viewer) | `xtool dev build`; device run for UI/gesture paths |
 | Upstream pin change, or `Bridge/tools/extract_config.cpp` | after host tests: `./Bridge/tools/build-extract-config.sh` (regenerates the committed `Resources/config-schema.json`) |
 | Contract-adjacent docs (`ARCHITECTURE.md`, this file) | nothing — but keep the tables truthful |
-| `Distribution/` or `.github/` | `shellcheck Distribution/*.sh` and `mise exec actionlint@latest -- actionlint`; then watch the CI run (`gh run watch`) |
+| `Distribution/` or `.github/` | `shellcheck Distribution/*.sh`, `python3 -m py_compile Distribution/*.py`, `mise exec actionlint@latest -- actionlint`; CI only runs on a `release*` tag, so the next release is the real test (`gh run watch`) |
 | A feature lands or changes status (any layer) | update `Bridge/tools/parity-manifest.toml` (status + evidence), then `./Bridge/tools/parity-check.py --write` |
 | **Before every commit, any change** | `./Bridge/tools/architecture-audit.sh` and `./Bridge/tools/parity-check.py --check` |
 
@@ -220,5 +229,7 @@ Ground rules for the matrix:
 - Commits use the repo-local GitHub noreply identity
   (`65476863+iSteeb@users.noreply.github.com`) [USER 2026-10-13]; history
   was rewritten to it on 2026-10-13, so every earlier commit SHA changed.
-- Every push to `main` ships a TestFlight build: push meaningful batches.
+- Pushes to `main` run no CI. A `release*` tag ships an external TestFlight
+  build and costs a Beta App Review: tag deliberately, only after the local
+  gates and a device check.
 - Never commit built artifacts, logs, or provision profiles.

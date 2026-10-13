@@ -5,10 +5,12 @@
 - Current goal: desktop feature parity over the three-module architecture
   (Swift Client → Bridge → untouched Engine). [USER 2026-10-07: "complete
   feature parity, highest priority first, mark completions in the .md files"]
-- [2026-10-13 USER] Gate D: public repo `iSteeb/OrcaPad`; every main push →
-  TestFlight (chosen over ad hoc OTA). Next: user loads the `testflight`
-  environment secrets, first CI run, install from TestFlight on iPoke; later
-  host contract tests + engine cross-build in CI.
+- [2026-10-13 USER] Gate D: public repo `iSteeb/OrcaPad`. CI runs ONLY on
+  `release*` tags and every release goes to EXTERNAL TestFlight (chosen
+  over ad hoc OTA; supersedes "every main push"). Secrets loaded by the
+  user. Next: user's one-time App Store Connect setup (app record, Test
+  Information, external group `External`), then the first release tag;
+  later host tests + engine build in CI.
 - Parity source of truth: `Bridge/tools/parity-manifest.toml` → generated
   PARITY.md "Remaining work" (551 desktop items, 152 features, 33% at v24).
 - [2026-10-07 USER] Order: Device printer web UI, then plate/object editing →
@@ -36,45 +38,45 @@
   recreates). Icon = user artwork, not OrcaSlicer's logo (impersonation
   risk). Export compliance: no non-exempt encryption.
 - [2026-10-13] CI on GitHub-hosted runners only: Linux for the gates,
-  `xcode-27` macOS for build/sign/upload. The Apple SDK stays on Apple
-  hardware; self-hosted runners are unsafe on a public repo.
+  `xcode-27` macOS with Xcode only (XcodeGen + xcodebuild; xtool removed
+  from CI after its binary hung at launch) for archive/sign/upload. The
+  Apple SDK stays on Apple hardware; self-hosted runners are unsafe on a
+  public repo.
 
 ## PROGRESS
 
-- [2026-10-13 CODE][TOOL] Gate D: ABI v24 WIP committed (per-layer custom
-  G-code C ABI + tests, 51,004 PASS; Swift expectation 24; no client UI yet).
-  Engine archive in Darwin format with `__.SYMDEF` (llvm-ar). Distribution/:
-  AppIcon catalog, PrivacyInfo.xcprivacy, package-testflight.sh; workflow
-  testflight.yml (actionlint + shellcheck clean). Apple side done by user:
-  App ID ie.duz.OrcaPad, Apple Distribution cert, App Store profile, CI API
-  key 8XDBKRMA4V. UNCONFIRMED until the first run: Apple link + upload.
-- [2026-10-07 CODE][TOOL] ABI v17–v23 (compressed): printer web UI, undo/redo
-  + transactional mutations, volumes, mirror/clipboard/view presets, group
-  transforms, per-object settings, object ops, slice warning-level fix. Host
-  tests 50,962 PASS at v23; parity checker gates commits.
-- [2026-10-07 CODE][TOOL] ABI v8–v16: plate type, slice jobs/validate/
-  warnings, import_model, projects, user presets, arrange/orient/lay flat,
-  preview v14, physical printers + upload, thumbnails. Closure: 225 upstream
-  TUs (3mf, NSVG, Emboss, Arrange, libnest2d, NLopt 2.5.0, Boost.Thread).
-- [2026-10-06 CODE][TOOL] Gates A–C6 (compressed): contract suite + audit,
-  stable IDs/revisions/snapshots, four-tab shell, Prepare editor, Preview.
+- [2026-10-13 CODE][TOOL] CI rework: the first run (workflow_dispatch) hung
+  35 min in `xtool --version` on the runner and was cancelled. CI is now
+  release-tag-only and Xcode-only: Distribution/project.yml (XcodeGen),
+  release-testflight.sh (archive/sign/check/export/upload),
+  asc_testflight.py (external group + Beta App Review; JWT self-test
+  passed locally), PRIVACY.md. Environment `testflight` deploys only
+  `release*` tags. UNCONFIRMED until the first release tag runs.
+- [2026-10-13 CODE][TOOL] ABI v24 committed (per-layer custom G-code C ABI
+  + tests, 51,004 PASS; no client UI yet); Darwin-format engine archive;
+  Distribution/ icon + privacy manifest. Apple side by the user: App ID
+  ie.duz.OrcaPad, distribution cert, App Store profile, CI key 8XDBKRMA4V.
+- [2026-10-06/07 CODE][TOOL] (compressed) Gates A-C6, then ABI v8-v23:
+  presets/projects/import, slice jobs, arrange/orient, preview v14,
+  printers + upload + printer web UI, thumbnails, undo/redo, volumes,
+  transforms, per-object settings, object ops. Host tests 50,962 PASS at
+  v23; closure 225 upstream TUs; parity checker gates commits.
 
 ## DISCOVERIES
 
-- [2026-10-13 TOOL] Host GNU ar cannot read Mach-O, so the shipped archive
-  had NO symbol index: lld tolerated it, Apple's ld rejects it. Fixed at the
-  source (build-core.sh), enforced by the audit.
-- [2026-10-13 TOOL] App Store needs what xtool omits: asset-catalog icon
-  (actool, macOS only), DT* toolchain keys (Linux-built resource bundles
-  carry placeholders such as DTXcodeBuild 99T999), privacy manifest. The
-  RELEASE binary references stat/lstat + NSUserDefaults only; debug builds
-  also pull statfs/fstat from boost.filesystem (dead-strip removes them).
-- [2026-10-13 TOOL] The Linux-linked app loads SwiftUICore (iOS 18+) strongly
-  despite the iOS 17 target; the SDK's SwiftUICore.tbd is arm64e-only with
-  allowable-clients. Watch the first Apple-linked build (UNCONFIRMED impact).
+- [2026-10-13 TOOL] The shipped archive had NO symbol index (host GNU ar
+  can't read Mach-O): lld tolerated it, Apple's ld rejects it. Fixed in
+  build-core.sh, enforced by the audit.
+- [2026-10-13 TOOL] App Store needs what xtool omits (asset-catalog icon,
+  DT* keys, privacy manifest); Xcode in CI now supplies them. Release binary
+  references stat/lstat + NSUserDefaults only (dead-strip drops statfs).
+- [2026-10-13 TOOL] xtool 1.20.1's macOS binary hung at launch on the
+  `xcode-27` runner (`xtool --version` silent for 35 min).
+- [2026-10-13 TOOL] Linux-linked app loads SwiftUICore (iOS 18+) strongly
+  despite the iOS 17 target (UNCONFIRMED impact; Xcode links in CI).
 - [2026-10-07 CODE] Upstream quirks: Anycubic Vyper profile lacks G92 E0;
   `save_to_json` fails silently on a missing parent dir; physical-printer
-  host key is `host_type`; expat include path had pointed nowhere (fixed).
+  host key is `host_type`.
 
 ## OUTCOMES
 

@@ -195,6 +195,13 @@ in ~/xtool-cheatsheet.md — link, don't duplicate.)
 
 ### CI / App Store distribution (2026-10-13)
 
+- Never run xtool in CI: its macOS release binary (xtool.app) hung at launch
+  on the GitHub runner (`xtool --version` printed nothing for 35 minutes;
+  the build never started). CI builds with Xcode itself (XcodeGen project +
+  xcodebuild); xtool stays the local Linux loop.
+- Give every CI step that can block a `timeout-minutes`. A silent step is
+  not necessarily a slow build: check whether its FIRST command printed.
+
 - A static archive needs a symbol index for Apple's linker. Host GNU
   `ar rcs` cannot read Mach-O members and silently wrote an index-less
   archive that only lld tolerated. Use the toolchain's

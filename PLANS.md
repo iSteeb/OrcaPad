@@ -43,26 +43,36 @@ Bridge; Swift and Metal consume revisioned derived state; all failures are
 typed and loud; current physical-device slice behavior remains green.
 
 ## Gate D — CI + TestFlight distribution (in progress)
-**Goal:** every `main` push is verified and reaches the user's devices via
-TestFlight, with no Mac on the user's side.
+**Goal:** every `release*` tag is verified and reaches external TestFlight
+testers (after Beta App Review), with no Mac on the user's side.
+[USER 2026-10-13: CI only on release tags; every release goes external]
 
 - [x] Public GitHub repo `iSteeb/OrcaPad`: AGPL-3.0 LICENSE, history on the
       GitHub noreply address
 - [x] Engine archive is a valid Apple static library (Darwin format with a
       `__.SYMDEF` index; build-core.sh and the audit enforce it)
-- [x] Workflow `.github/workflows/testflight.yml`: Linux audit + parity gate;
-      release build with xtool on the hosted `xcode-27` runner; main builds
-      signed with the App Store profile and uploaded with `altool`
-      (`Distribution/package-testflight.sh`)
+- [x] Workflow `.github/workflows/testflight.yml` on `release*` tags: Linux
+      audit + parity gate; Xcode-only macOS job (XcodeGen project from
+      `Distribution/project.yml`, `xcodebuild` archive with App Store
+      signing, export, `altool` upload); xtool dropped from CI after its
+      binary hung at launch on the runner
 - [x] App Store requirements: asset-catalog icon (user artwork), privacy
       manifest checked against the release binary's required-reason APIs,
-      truthful DT* toolchain keys, ITSAppUsesNonExemptEncryption=NO
-- [ ] First build processed and installed from TestFlight on iPoke
+      ITSAppUsesNonExemptEncryption=NO, PRIVACY.md policy
+- [x] External TestFlight automation (`Distribution/asc_testflight.py`):
+      wait for processing, What to Test from commits, external group,
+      Beta App Review submission
+- [ ] One-time App Store Connect setup by the user: app record, Test
+      Information (description, feedback email, privacy policy URL, review
+      contact), external group `External`
+- [ ] First `release*` tag green end to end; build approved and installed
+      from TestFlight on iPoke
 - [ ] Host contract tests in CI (Ubuntu 26.04 container + ccache)
 - [ ] Engine cross-build in CI (reproducible archive; stop committing it)
 
-**Accept:** a push to `main` yields a TestFlight build that installs and
-slices on the device; a red audit or parity check blocks the upload.
+**Accept:** a `release*` tag yields an external TestFlight build that
+installs and slices on the device; a red audit or parity check blocks the
+upload.
 
 ## Gate C — Four-tab desktop-parity UX (in progress)
 **Goal:** the app reads like desktop OrcaSlicer: Plate → Prepare → Preview →
