@@ -1,0 +1,6 @@
+# actionlint configuration. `xcode-27` is GitHub's hosted Xcode 27 image
+# (public preview), not a self-hosted runner; actionlint only learns labels
+# through this list.
+self-hosted-runner:
+  labels:
+    - xcode-27
