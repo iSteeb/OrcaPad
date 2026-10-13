@@ -11,6 +11,31 @@
   user. Next: user's one-time App Store Connect setup (app record, Test
   Information, external group `External`), then the first release tag;
   later host tests + engine build in CI.
+- [2026-10-14 USER] New: AGPL/App Store compliance plan in COMPLIANCE.md
+  (Gate E in PLANS.md). Constraints: NO licensing waivers/permissions from
+  upstream holders; app stays free/open (repo is public, AGPL-3.0). Plan
+  pillars: notices+attribution, per-release complete-source archive (GitHub
+  tag tarballs lack submodule contents — must attach vendored tarball),
+  in-app About/Licenses screen, license-inventory CI gate (LGPL trio:
+  libnoise, nlopt 2.5.0, libnest2d — upstream-parity static-link position),
+  BUILDING.md, §8 30-day cure protocol. Residual risk (Apple EULA conflicts,
+  FSF position) accepted and documented; §13 N/A (no server).
+- [2026-10-14] IMPLEMENTED all of Gate E (W1–W6): README+BUILDING+metadata
+  template, SPDX on 97 files (orca_bridge.h excluded — byte-mirrored into
+  Prebuilt), AboutView + ORCAPAD_SOURCE_REF (PlistBuddy in
+  release-testflight.sh, checked post-archive), license-inventory.sh gate
+  (312 TUs + host-header rows: CGAL 6.1.1 GPL-3+, GMP, MPFR, Eigen, boost
+  headers — all vendored into the release archive by
+  make-source-archive.sh with Prebuilt/HOST-HEADERS.txt provenance stamp,
+  verify job now ubuntu-26.04 + gh release publish). DISCOVERY: engine
+  compiles against HOST headers (gen/ symlinks) — they are part of the
+  binary and Corresponding Source. Pushed to main, NO release tag
+  [USER 2026-10-14: more changes pending — other agent's preset/ABI v25
+  work continues in the same tree; its files (orca_bridge.{h,cpp},
+  contract_tests.cpp, PresetStore.swift, Prebuilt archive) left
+  uncommitted for it to finish and commit]. Local Prebuilt/.a was relinked
+  (my comment TUs + its v25 objects) — NOT committed; next agent must
+  rebuild/commit the archive for v25.
 - Parity source of truth: `Bridge/tools/parity-manifest.toml` → generated
   PARITY.md "Remaining work" (551 desktop items, 152 features, 33% at v24).
 - [2026-10-07 USER] Order: Device printer web UI, then plate/object editing →
@@ -37,6 +62,10 @@
   (xtool keeps `XTL-C93C0481.ie.duz.OrcaPad`, whose profiles it deletes and
   recreates). Icon = user artwork, not OrcaSlicer's logo (impersonation
   risk). Export compliance: no non-exempt encryption.
+- [2026-10-14 USER] No licensing waivers ever (no upstream exceptions,
+  no relicensing asks). Compliance = everything in our control + documented
+  risk acceptance; enforcement reality (SFC targets closed black boxes,
+  fully-sourced forks respected) recorded in COMPLIANCE.md §2.
 - [2026-10-13] CI on GitHub-hosted runners only: Linux for the gates,
   `xcode-27` macOS with Xcode only (XcodeGen + xcodebuild; xtool removed
   from CI after its binary hung at launch) for archive/sign/upload. The

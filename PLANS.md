@@ -267,10 +267,36 @@ in desktop OrcaSlicer identically.
 
 ---
 
+## Gate E — AGPL App Store compliance (planned)
+**Goal:** distribute the AGPL-3.0 combined work on Apple's channels with
+every controllable obligation satisfied and the uncontrollable Apple-terms
+risk documented and governed. Normative detail: `COMPLIANCE.md` (W1–W8,
+release checklist delta). [USER 2026-10-14: no licensing waivers; risk
+accepted]
+
+- [x] README.md + SPDX sweep (W1)
+- [x] CI source archive + ORCAPAD_SOURCE_REF (W2 — make-source-archive.sh,
+      Prebuilt/HOST-HEADERS.txt provenance stamp, ubuntu-26.04 verify job
+      publishes the GitHub Release archive)
+- [x] In-app About/Licenses screen (W3 — AboutView + Plate tab button)
+- [x] license-inventory.sh → THIRD_PARTY.md + CI gate (W4 — 312-TU closure
+      + host-header components; CGAL GPL-3+ noted)
+- [x] BUILDING.md build-your-own guide (W5)
+- [x] Store metadata template + release checklist wiring (W6,
+      Distribution/app-store-metadata.md)
+- [ ] First compliant release tagged (withheld [USER 2026-10-14] until
+      remaining feature work lands)
+
+**Accept:** any shipped build traces to a public complete-source archive;
+the license, attribution, and exact-build source link are reachable in-app;
+the closure's license inventory is CI-gated.
+
 ## Risk register (live)
 
 | Risk | Mitigation |
 |---|---|
+| Rights-holder complaint removes the App Store listing (AGPL ↔ Apple terms conflict) | COMPLIANCE.md W1–W8 good-faith posture + §8 30-day cure protocol; §13 N/A documented; worst case = listing pull, not litigation |
+| Non-AGPL component drifts into the closure | license-inventory gate on every release (W4/W8) |
 | Deps (OCCT/OpenVDB) too heavy for first bring-up | Phase 1 uses minimal link set; heavy deps enter only when a feature demands them |
 | TBB unsupported on iOS | Swap to libdispatch-based pool behind engine's thread API; measure first |
 | Runtime MSL compile cost grows with shader count | Cache `MTLLibrary` in Caches dir once offline compile is possible (Mac collaborator) |
