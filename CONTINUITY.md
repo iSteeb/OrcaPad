@@ -74,6 +74,12 @@
 
 ## PROGRESS
 
+- [2026-10-13 TOOL] release-0.1.1 run 38413247330 SUCCESS end to end:
+  license gate green after engine_fetch_deps fetched the full cache
+  closure (libnoise had no fetch; CI saw 277/312 TUs), 0.1.1 (4.1)
+  uploaded, What to Test set, external group 'External', Beta App
+  Review submitted; complete source published as the tag's GitHub
+  Release. Awaiting: review approval + on-device preset-fix check.
 - [2026-10-13 CODE][USER] ABI v25 select_machine: the TestFlight 0.1.0
   fresh-install bug (picking a printer kept the default process ->
   'process preset was not found', slicing defaults -> relative-E error;

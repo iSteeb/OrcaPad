@@ -65,8 +65,12 @@ testers (after Beta App Review), with no Mac on the user's side.
 - [ ] One-time App Store Connect setup by the user: app record, Test
       Information (description, feedback email, privacy policy URL, review
       contact), external group `External`
-- [ ] First `release*` tag green end to end; build approved and installed
-      from TestFlight on iPoke
+- [x] `release-0.1.1` green end to end (2026-10-13): audit + parity +
+      license gate + complete-source GitHub Release, Xcode archive/sign/
+      export/upload, external group + Beta App Review submission (run
+      38413247330, build 0.1.1 (4.1), app "OrcaPad Slicer")
+- [ ] Build approved by Beta App Review and installed from TestFlight on
+      iPoke (preset fix verified: pick printer -> slice)
 - [ ] Host contract tests in CI (Ubuntu 26.04 container + ccache)
 - [ ] Engine cross-build in CI (reproducible archive; stop committing it)
 
