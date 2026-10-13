@@ -1,0 +1,62 @@
+# Xcode project for CI ONLY: XcodeGen generates Distribution/OrcaPad.xcodeproj
+# on the macOS runner (release-testflight.sh); the Linux dev loop keeps using
+# xtool. Same shape as `xtool dev generate-xcode-project`: an iOS app target
+# made of an empty C stub plus the OrcaPad SwiftPM library (which holds
+# @main), with the App Store icon catalog and the privacy manifest as app
+# resources. Package.swift stays the single definition of the code.
+name: OrcaPad
+options:
+  bundleIdPrefix: ie.duz
+packages:
+  OrcaPad:
+    path: ..
+targets:
+  OrcaPadApp:
+    type: application
+    platform: iOS
+    deploymentTarget: "17.0"
+    sources:
+      - path: App/empty.c
+      - path: AppIcon.xcassets
+        buildPhase: resources
+      - path: PrivacyInfo.xcprivacy
+        buildPhase: resources
+    dependencies:
+      - package: OrcaPad
+        product: OrcaPad
+    settings:
+      base:
+        PRODUCT_NAME: OrcaPad
+        PRODUCT_BUNDLE_IDENTIFIER: ie.duz.OrcaPad
+        TARGETED_DEVICE_FAMILY: "1,2"
+        MARKETING_VERSION: "1.0.0"
+        CURRENT_PROJECT_VERSION: "1"
+        # Info.plist = the shared App-Info.plist plus the keys xtool's planner
+        # writes for the Linux build (xtool PackLib/Planner.swift).
+        INFOPLIST_FILE: ../App-Info.plist
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_CFBundleDisplayName: OrcaPad
+        INFOPLIST_KEY_LSRequiresIPhoneOS: YES
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone: UIInterfaceOrientationPortrait
+        INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad: >-
+          UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown
+          UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        # the engine archive is C++; a static .a does not autolink libc++
+        OTHER_LDFLAGS: ["$(inherited)", "-lc++"]
+        # App Store signing for THIS target only: the same settings passed on
+        # the xcodebuild command line would also hit the package's resource
+        # bundle target and fail it. Values come from the provisioning profile
+        # (release-testflight.sh exports them before generating).
+        CODE_SIGN_STYLE: Manual
+        DEVELOPMENT_TEAM: ${ORCAPAD_TEAM_ID}
+        CODE_SIGN_IDENTITY: Apple Distribution
+        PROVISIONING_PROFILE_SPECIFIER: ${ORCAPAD_PROFILE_UUID}
+schemes:
+  OrcaPadApp:
+    build:
+      targets:
+        OrcaPadApp: all
+    archive:
+      config: Release

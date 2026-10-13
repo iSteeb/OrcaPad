@@ -1,36 +1,40 @@
-# CI for OrcaPad: architecture gates on Linux, the app built with Apple's own
-# toolchain on a GitHub-hosted macOS runner, and every main build signed and
-# uploaded to TestFlight (internal testing).
+# Release pipeline: runs ONLY when a `release*` tag is pushed (user decision
+# 2026-10-13, keeps Beta App Review from being flooded). Every such build goes
+# to the external TestFlight group:
+#   verify      Linux: architecture audit + parity check (no Apple tooling)
+#   testflight  macOS (Xcode 27, no xtool): XcodeGen project -> xcodebuild
+#               archive with App Store signing -> checks -> export -> upload,
+#               then the build is added to the external group and submitted
+#               for Beta App Review (Distribution/asc_testflight.py)
 #
 # The engine is NOT rebuilt here: the app links the committed
 # Prebuilt/OrcaBridgeCore.xcframework (cross-built on the Linux dev box by
 # Bridge/build-core.sh; the audit checks it matches the Bridge header).
 #
-# Repository setup (once): environment "testflight" (deployment branch: main)
+# Release: git tag release-1.2.3 && git push origin release-1.2.3
+#   (a `release-X.Y[.Z]` tag sets the app version; plain `release*` tags keep
+#   MARKETING_VERSION from Distribution/project.yml)
+#
+# Repository setup (once): environment "testflight" (deployment tags: release*)
 #   secrets   DIST_P12_BASE64, DIST_P12_PASSWORD, APPSTORE_PROFILE_BASE64, ASC_KEY_P8
-#   variables ASC_KEY_ID, ASC_ISSUER_ID
-name: CI + TestFlight
+#   variables ASC_KEY_ID, ASC_ISSUER_ID, TESTFLIGHT_GROUP (external group name)
+name: Release to TestFlight
 
 on:
   push:
-    branches: [main]
-    paths: ['**', '!**.md', 'PARITY.md', '!LICENSE']
-  pull_request:
-    paths: ['**', '!**.md', 'PARITY.md', '!LICENSE']
-  workflow_dispatch:
+    tags: ['release*']
 
 permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  # never cancel an upload in flight on main; superseded PR runs may go
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: release-testflight
+  cancel-in-progress: false
 
 env:
   XCODE_APP: /Applications/Xcode_27.app
-  XTOOL_VERSION: 1.20.1
-  XTOOL_SHA256: 39123efc283528b119fa3567dc1123059d6690aab76c80e6003470d17c333ca2
+  XCODEGEN_VERSION: 2.46.0
+  XCODEGEN_SHA256: 4d9e34b62172d645eed6457cac13fc222569974098ef4ee9c3368bedf0196806
 
 jobs:
   verify:
@@ -61,13 +65,16 @@ jobs:
       - name: Parity check
         run: ./Bridge/tools/parity-check.py --check
 
-  build:
-    name: Build app (Xcode 27, unsigned)
+  testflight:
+    name: Archive, upload, submit to external TestFlight
+    needs: verify
     runs-on: xcode-27
-    timeout-minutes: 60
+    timeout-minutes: 150
+    environment: testflight
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          fetch-depth: 0 # release notes = commits since the previous release tag
           persist-credentials: false # no submodule: the app links Prebuilt/
       - name: Select Xcode 27
         run: |
@@ -75,60 +82,66 @@ jobs:
           sudo xcode-select -s "$XCODE_APP/Contents/Developer"
           xcodebuild -version
           xcrun --sdk iphoneos --show-sdk-version
-          swift --version
           case "$(xcodebuild -version | awk 'NR==1 {print $2}')" in
             27.*) ;;
             *) echo "::error::expected Xcode 27"; exit 1 ;;
           esac
-      - name: Install xtool ${{ env.XTOOL_VERSION }}
+      - name: Install XcodeGen ${{ env.XCODEGEN_VERSION }}
         run: |
-          curl -fsSL -o "$RUNNER_TEMP/xtool.app.zip" \
-            "https://github.com/xtool-org/xtool/releases/download/$XTOOL_VERSION/xtool.app.zip"
-          echo "$XTOOL_SHA256  $RUNNER_TEMP/xtool.app.zip" | shasum -a 256 -c -
-          ditto -x -k "$RUNNER_TEMP/xtool.app.zip" "$RUNNER_TEMP/xtool"
-          echo "$RUNNER_TEMP/xtool/xtool.app/Contents/MacOS" >> "$GITHUB_PATH"
-      - name: Build (release)
+          curl -fsSL -o "$RUNNER_TEMP/xcodegen.zip" \
+            "https://github.com/yonaskolb/XcodeGen/releases/download/$XCODEGEN_VERSION/xcodegen.zip"
+          echo "$XCODEGEN_SHA256  $RUNNER_TEMP/xcodegen.zip" | shasum -a 256 -c -
+          ditto -x -k "$RUNNER_TEMP/xcodegen.zip" "$RUNNER_TEMP"
+          "$RUNNER_TEMP/xcodegen/bin/xcodegen" --version
+      - name: Release notes ("What to Test")
+        id: notes
         run: |
-          xtool --version
-          xtool dev build -c release
-      - name: Archive the app (tar keeps the executable bit)
-        run: tar -C xtool -cf "$RUNNER_TEMP/OrcaPad-app.tar" OrcaPad.app
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: OrcaPad-app-unsigned
-          path: ${{ runner.temp }}/OrcaPad-app.tar
-          retention-days: 1
-          if-no-files-found: error
-
-  testflight:
-    name: Sign + upload to TestFlight
-    needs: [verify, build]
-    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
-    runs-on: xcode-27
-    timeout-minutes: 45
-    environment: testflight
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          name: OrcaPad-app-unsigned
-          path: ${{ runner.temp }}
-      - name: Unpack the app
-        run: mkdir -p xtool && tar -C xtool -xf "$RUNNER_TEMP/OrcaPad-app.tar"
-      - name: Select Xcode 27
-        run: |
-          sudo xcode-select -s "$XCODE_APP/Contents/Developer"
-          xcodebuild -version
-      - name: Package, sign, validate, upload
+          notes="$RUNNER_TEMP/whats-new.txt"
+          previous="$(git for-each-ref --count=1 --sort=-creatordate --merged "$GITHUB_SHA^" \
+                       --format='%(refname:short)' 'refs/tags/release*')"
+          {
+            # an annotated tag's message leads the notes
+            if [ "$(git cat-file -t "refs/tags/$GITHUB_REF_NAME")" = tag ]; then
+              git tag --list --format='%(contents)' "$GITHUB_REF_NAME"
+            fi
+            if [ -n "$previous" ]; then
+              echo "Changes since $previous:"
+              git log --no-merges --format='- %s' "$previous..$GITHUB_SHA"
+            else
+              echo "Changes:"
+              git log --no-merges --format='- %s' -30 "$GITHUB_SHA"
+            fi
+          } > "$notes"
+          cat "$notes"
+          version=""
+          if [[ "$GITHUB_REF_NAME" =~ ^release-v?([0-9]+\.[0-9]+(\.[0-9]+)?)$ ]]; then
+            version="${BASH_REMATCH[1]}"
+          fi
+          echo "marketing_version=$version" >> "$GITHUB_OUTPUT"
+      - name: Archive, check, export, upload
+        id: upload
+        timeout-minutes: 90
         env:
           BUILD_NUMBER: ${{ github.run_number }}.${{ github.run_attempt }}
-          ORCAPAD_UPLOAD: "1"
+          MARKETING_VERSION: ${{ steps.notes.outputs.marketing_version }}
+          XCODEGEN: ${{ runner.temp }}/xcodegen/bin/xcodegen
           DIST_P12_BASE64: ${{ secrets.DIST_P12_BASE64 }}
           DIST_P12_PASSWORD: ${{ secrets.DIST_P12_PASSWORD }}
           APPSTORE_PROFILE_BASE64: ${{ secrets.APPSTORE_PROFILE_BASE64 }}
           ASC_KEY_ID: ${{ vars.ASC_KEY_ID }}
           ASC_ISSUER_ID: ${{ vars.ASC_ISSUER_ID }}
           ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
-        run: ./Distribution/package-testflight.sh
+        run: ./Distribution/release-testflight.sh
+      - name: Submit to the external TestFlight group
+        timeout-minutes: 60
+        env:
+          ASC_KEY_ID: ${{ vars.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ vars.ASC_ISSUER_ID }}
+          ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
+          TESTFLIGHT_GROUP: ${{ vars.TESTFLIGHT_GROUP }}
+          VERSION: ${{ steps.upload.outputs.version }}
+          BUILD: ${{ steps.upload.outputs.build }}
+        run: |
+          python3 Distribution/asc_testflight.py --bundle-id ie.duz.OrcaPad \
+            --version "$VERSION" --build "$BUILD" --group "$TESTFLIGHT_GROUP" \
+            --notes-file "$RUNNER_TEMP/whats-new.txt"
