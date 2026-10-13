@@ -51,7 +51,11 @@
   release-testflight.sh (archive/sign/check/export/upload),
   asc_testflight.py (external group + Beta App Review; JWT self-test
   passed locally), PRIVACY.md. Environment `testflight` deploys only
-  `release*` tags. UNCONFIRMED until the first release tag runs.
+  `release*` tags. Scratch-branch dry run (no secrets): XcodeGen +
+  unsigned xcodebuild archive OK in ~1 min; Info.plist, icons, privacy
+  manifest, DT keys correct; Apple ld links the engine and SwiftUI (not
+  SwiftUICore). Signing/export/upload/submission UNCONFIRMED until the
+  first release tag.
 - [2026-10-13 CODE][TOOL] ABI v24 committed (per-layer custom G-code C ABI
   + tests, 51,004 PASS; no client UI yet); Darwin-format engine archive;
   Distribution/ icon + privacy manifest. Apple side by the user: App ID
@@ -72,8 +76,9 @@
   references stat/lstat + NSUserDefaults only (dead-strip drops statfs).
 - [2026-10-13 TOOL] xtool 1.20.1's macOS binary hung at launch on the
   `xcode-27` runner (`xtool --version` silent for 35 min).
-- [2026-10-13 TOOL] Linux-linked app loads SwiftUICore (iOS 18+) strongly
-  despite the iOS 17 target (UNCONFIRMED impact; Xcode links in CI).
+- [2026-10-13 TOOL] Linux-linked (lld) app loads SwiftUICore (iOS 18+)
+  strongly despite the iOS 17 target; the Xcode-linked release build
+  loads SwiftUI only, so shipped builds are unaffected.
 - [2026-10-07 CODE] Upstream quirks: Anycubic Vyper profile lacks G92 E0;
   `save_to_json` fails silently on a missing parent dir; physical-printer
   host key is `host_type`.
