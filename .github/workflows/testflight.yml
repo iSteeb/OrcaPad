@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Copyright (c) 2026 OrcaPad contributors
+
 # Release pipeline: runs ONLY when a `release*` tag is pushed (user decision
 # 2026-10-13, keeps Beta App Review from being flooded). Every such build goes
 # to the external TestFlight group:
@@ -38,9 +41,13 @@ env:
 
 jobs:
   verify:
-    name: Architecture audit + parity check
-    runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    name: Audit, parity, licenses, complete-source archive
+    runs-on: ubuntu-26.04
+    # contents:write — this job also publishes the GitHub Release that
+    # carries the complete corresponding source archive (COMPLIANCE.md W2).
+    permissions:
+      contents: write
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -63,7 +70,47 @@ jobs:
       - name: Architecture audit
         run: ./Bridge/tools/architecture-audit.sh
       - name: Parity check
-        run: ./Bridge/tools/parity-check.py --check
+        run: python3 Bridge/tools/parity-check.py --check
+      - name: License inventory gate
+        # THIRD_PARTY.md and the bundled license texts must match the
+        # compiled closure (COMPLIANCE.md W4).
+        run: |
+          source Bridge/engine-sources.sh
+          engine_fetch_deps
+          ./Bridge/tools/license-inventory.sh --check
+      - name: Install host headers matching the engine provenance
+        # The source archive vendors the exact host headers the engine was
+        # compiled against; make-source-archive.sh verifies them against
+        # Prebuilt/HOST-HEADERS.txt and fails on any mismatch.
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y --no-install-recommends \
+            libboost-dev libeigen3-dev libcgal-dev libgmp-dev libmpfr-dev
+      - name: Publish complete corresponding source (GitHub Release)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          out="$RUNNER_TEMP/OrcaPad-${GITHUB_REF_NAME}-full-source.tar.gz"
+          ./Bridge/tools/make-source-archive.sh "$out"
+          notes="$RUNNER_TEMP/release-notes.md"
+          printf '%s\n' \
+            'Complete corresponding source for this OrcaPad release:' \
+            'every tracked file, the pinned OrcaSlicer submodule, the' \
+            'build-only dependency pins, and the host headers the engine' \
+            'compiles against (ARCHIVE-MANIFEST.txt records every pin).' \
+            '' \
+            'License: GNU AGPL-3.0 (see LICENSE and THIRD_PARTY.md inside).' \
+            'Build instructions: BUILDING.md.' \
+            'The app binary itself is distributed via Apple TestFlight under' \
+            'the terms described in COMPLIANCE.md.' \
+            > "$notes"
+          if gh release view "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" "$out" --clobber -R "$GITHUB_REPOSITORY"
+          else
+            gh release create "$GITHUB_REF_NAME" "$out" -R "$GITHUB_REPOSITORY" \
+              --title "OrcaPad $GITHUB_REF_NAME (complete source)" \
+              --notes-file "$notes"
+          fi
 
   testflight:
     name: Archive, upload, submit to external TestFlight
@@ -124,6 +171,7 @@ jobs:
         env:
           BUILD_NUMBER: ${{ github.run_number }}.${{ github.run_attempt }}
           MARKETING_VERSION: ${{ steps.notes.outputs.marketing_version }}
+          ORCAPAD_SOURCE_REF: ${{ github.ref_name }}+${{ github.sha }}
           XCODEGEN: ${{ runner.temp }}/xcodegen/bin/xcodegen
           DIST_P12_BASE64: ${{ secrets.DIST_P12_BASE64 }}
           DIST_P12_PASSWORD: ${{ secrets.DIST_P12_PASSWORD }}

@@ -1,0 +1,12 @@
+# Host headers the engine archive was compiled against (COMPLIANCE.md W2).
+boost: #define BOOST_LIB_VERSION "1_90"
+cgal:  #define CGAL_VERSION 6.1.1
+eigen: #define EIGEN_WORLD_VERSION 3
+gmp:   #define __GNU_MP_VERSION            6
+mpfr:  #define MPFR_VERSION_STRING "4.2.2"
+packages:
+libboost-dev:amd64 1.90.0.1ubuntu3
+libcgal-dev:amd64 6.1.1-2
+libeigen3-dev 3.4.0-5
+libgmp-dev:amd64 2:6.3.0+dfsg-5ubuntu2
+libmpfr-dev:amd64 4.2.2-3

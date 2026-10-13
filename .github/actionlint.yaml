@@ -1,6 +1,8 @@
 # actionlint configuration. `xcode-27` is GitHub's hosted Xcode 27 image
 # (public preview), not a self-hosted runner; actionlint only learns labels
-# through this list.
+# through this list. `ubuntu-26.04` is likewise a hosted image (the engine's
+# host-header provenance requires that exact distro — COMPLIANCE.md W2).
 self-hosted-runner:
   labels:
     - xcode-27
+    - ubuntu-26.04

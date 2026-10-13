@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: AGPL-3.0-only
+# Copyright (c) 2026 OrcaPad contributors
 # Cross-builds OrcaBridgeCore (untouched libslic3r sources + the C++ Bridge)
 # for iOS arm64 from Linux and packs a hand-rolled xcframework under Prebuilt/.
 # This machine-local build is temporary; ARCHITECTURE.md defines the boundary.
@@ -229,4 +231,7 @@ module OrcaBridgeCore {
 }
 EOF
 file "$OUT/libOrcaBridgeCore.a"
+# Host-header provenance (COMPLIANCE.md W2): make-source-archive.sh
+# refuses to archive on a host whose headers differ from this stamp.
+"$ROOT/Bridge/tools/host-header-stamp.sh" > "$ROOT/Prebuilt/HOST-HEADERS.txt"
 echo "==> done: $OUT/libOrcaBridgeCore.a ($(wc -l < "$MANIFEST") objects)"

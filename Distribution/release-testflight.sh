@@ -1,4 +1,6 @@
 #!/bin/bash
+# SPDX-License-Identifier: AGPL-3.0-only
+# Copyright (c) 2026 OrcaPad contributors
 # Release build for TestFlight, with Xcode only (no xtool in CI):
 #   App Store profile + Apple Distribution identity -> temporary keychain
 #   XcodeGen project (Distribution/project.yml) -> xcodebuild archive
@@ -12,6 +14,9 @@
 # Environment:
 #   BUILD_NUMBER             CFBundleVersion, strictly increasing per upload
 #   MARKETING_VERSION        optional CFBundleShortVersionString override
+#   ORCAPAD_SOURCE_REF        optional exact-source identity (COMPLIANCE.md
+#                            W2: "<release-tag>+<commit-sha>") baked into
+#                            App-Info.plist and shown by the About screen
 #   XCODEGEN                 path to the pinned xcodegen binary
 #   DIST_P12_BASE64          Apple Distribution identity (.p12, base64)
 #   DIST_P12_PASSWORD        its export password
@@ -123,6 +128,15 @@ if wanted not in found:
 PY
 
 # --- 3. Xcode project + archive ---
+step "baking the exact-source identity into App-Info.plist"
+SRC_REF="${ORCAPAD_SOURCE_REF:-}"
+if [ -n "$SRC_REF" ]; then
+    # printable single line only — it lands in a plist and on the About screen
+    if ! printf '%s' "$SRC_REF" | grep -Eq '^[A-Za-z0-9._+/: -]+$'; then
+        fail "ORCAPAD_SOURCE_REF has unexpected characters: $SRC_REF"
+    fi
+    $PLISTBUDDY -c "Set :ORCAPAD_SOURCE_REF $SRC_REF" "$ROOT/App-Info.plist"
+fi
 step "generating the Xcode project (XcodeGen $("$XCODEGEN" --version))"
 ORCAPAD_TEAM_ID="$TEAM_ID" ORCAPAD_PROFILE_UUID="$PROFILE_UUID" \
     "$XCODEGEN" generate --spec "$ROOT/Distribution/project.yml" --project "$ROOT/Distribution"
@@ -151,6 +165,12 @@ $PLISTBUDDY -c 'Print :CFBundleIcons:CFBundlePrimaryIcon:CFBundleIconName' "$PLI
 $PLISTBUDDY -c 'Print :DTXcodeBuild' "$PLIST" >/dev/null || fail "no DTXcodeBuild in Info.plist"
 [ -f "$APP/Assets.car" ] || fail "no Assets.car in the app"
 [ -f "$APP/PrivacyInfo.xcprivacy" ] || fail "no PrivacyInfo.xcprivacy at the app root"
+SRCREF_PLIST="$($PLISTBUDDY -c 'Print :ORCAPAD_SOURCE_REF' "$PLIST" 2>/dev/null || true)"
+[ -n "$SRCREF_PLIST" ] || fail "no ORCAPAD_SOURCE_REF in the app Info.plist (AGPL source traceability, COMPLIANCE.md W2)"
+if [ -n "$SRC_REF" ] && [ "$SRCREF_PLIST" != "$SRC_REF" ]; then
+    fail "archived ORCAPAD_SOURCE_REF '$SRCREF_PLIST' != requested '$SRC_REF'"
+fi
+echo "source ref: $SRCREF_PLIST"
 VERSION="$($PLISTBUDDY -c 'Print :CFBundleShortVersionString' "$PLIST")"
 codesign --verify --deep --strict --verbose=2 "$APP"
 
