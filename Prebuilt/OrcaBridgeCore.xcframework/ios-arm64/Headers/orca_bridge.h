@@ -7,7 +7,7 @@ extern "C" {
 #endif
 
 /// Version of the C ABI contract in this header. Callers verify it at runtime.
-#define ORCA_BRIDGE_ABI_VERSION ((uint32_t)24)
+#define ORCA_BRIDGE_ABI_VERSION ((uint32_t)25)
 
 typedef int32_t orca_status_code;
 #define ORCA_STATUS_OK                     ((orca_status_code)0)
@@ -677,6 +677,16 @@ orca_result orca_gcode_toolpath(orca_gcode *gcode,
 void orca_toolpath_dispose(orca_toolpath *toolpath);
 orca_result orca_presets_select(orca_presets *presets, const char *machine,
                                 const char *filament, const char *process);
+
+/// Desktop Sidebar printer change (ABI v25): selects `machine` and lets the
+/// engine resolve a compatible process and filament — the machine's declared
+/// default_print_profile / default_filament_profile is adopted while the
+/// current selection is still a default preset (upstream load_selections /
+/// ConfigWizard semantics), then update_compatible(Always) swaps any
+/// incompatible selection. Read the resulting selection back with
+/// orca_presets_current. No undo step (preset session, not a document).
+orca_result orca_presets_select_machine(orca_presets *presets,
+                                        const char *machine);
 orca_result orca_presets_current(orca_presets *presets, int32_t kind,
                                  orca_owned_string *out_name);
 

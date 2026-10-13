@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (c) 2026 OrcaPad contributors
+
 import Foundation
 import OrcaBridgeCore
 
@@ -179,6 +182,24 @@ public final class EnginePresets: @unchecked Sendable {
                         )
                     }
                 }
+            }
+        }) {
+            return .failure(error)
+        }
+        return .success(())
+    }
+
+    /// Desktop printer change: the engine resolves a compatible process and
+    /// filament (machine-declared defaults while the selection is still a
+    /// default preset, then update_compatible(Always)). Read the resulting
+    /// selection back with `current(kind:)`.
+    public func selectMachine(_ machine: String) -> Result<Void, BridgeError> {
+        let operation = "EnginePresets.selectMachine"
+        lock.lock(); defer { lock.unlock() }
+        guard let handle else { return .failure(invalidHandle(operation)) }
+        if let error = bridgeFailure(operation: operation, call: {
+            machine.withCString { machineName in
+                orca_presets_select_machine(handle, machineName)
             }
         }) {
             return .failure(error)

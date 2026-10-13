@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (c) 2026 OrcaPad contributors
+
 // Bridge contract tests — host executable.
 //
 // Exercises the C ABI exactly as the Swift facade consumes it: ABI version,
@@ -273,7 +276,7 @@ static void test_md5_shim() {
 
 static void test_abi_version() {
     CHECK_EQ(orca_bridge_abi_version(), ORCA_BRIDGE_ABI_VERSION);
-    CHECK_EQ(ORCA_BRIDGE_ABI_VERSION, 24);
+    CHECK_EQ(ORCA_BRIDGE_ABI_VERSION, 25);
 }
 
 static std::string snapshot_label(const orca_owned_string &label) {
@@ -1684,6 +1687,96 @@ static void test_presets(const std::string &data_dir) {
     orca_presets_free(presets);
 }
 
+static std::string select_machine_current(orca_presets *presets, int32_t kind) {
+    orca_owned_string name{};
+    orca_result r = orca_presets_current(presets, kind, &name);
+    CHECK_EQ(r.code, ORCA_STATUS_OK);
+    std::string value = name.data ? name.data : "";
+    orca_result_dispose(&r);
+    orca_owned_string_dispose(&name);
+    return value;
+}
+
+// ABI v25: the desktop printer change. A fresh bundle has the "- default -"
+// presets selected (not listed, not passable to orca_presets_select); a
+// machine pick must resolve a compatible process and filament instead.
+// Regression for the TestFlight 0.1.0 (2.1) failure: selecting a printer
+// with the default process still selected failed NOT_FOUND and slicing the
+// defaults hit relative-E-without-G92 validation.
+static void test_select_machine(const std::string &dir, const std::string &data_dir) {
+    orca_presets *presets = nullptr;
+    GUARD(g0, orca_presets_new(data_dir.c_str(), &presets));
+    expect_ok(g0, "presets_new");
+
+    CHECK(select_machine_current(presets, 0) == "Default Printer");
+    CHECK(select_machine_current(presets, 2) == "Default Setting");
+
+    // the fresh default triple is NOT passable to the strict triple select
+    GUARD(e0, orca_presets_select(presets, "Bambu Lab X1 Carbon 0.4 nozzle",
+                                  "Generic PLA @System", "Default Setting"));
+    expect_code(e0, ORCA_STATUS_NOT_FOUND, "triple select with default process");
+
+    GUARD(e1, orca_presets_select_machine(nullptr, "x"));
+    expect_code(e1, ORCA_STATUS_INVALID_HANDLE, "select_machine null handle");
+    GUARD(e2, orca_presets_select_machine(presets, ""));
+    expect_code(e2, ORCA_STATUS_INVALID_ARGUMENT, "select_machine empty");
+    GUARD(e3, orca_presets_select_machine(presets, "__no_such_machine__"));
+    expect_code(e3, ORCA_STATUS_NOT_FOUND, "select_machine unknown");
+    expect_owned_diagnostic(e3, "select_machine unknown");
+    CHECK(select_machine_current(presets, 0) == "Default Printer");
+
+    // machine pick adopts the machine-declared process and resolves
+    // compatibility (upstream load_selections + update_compatible(Always))
+    GUARD(g1, orca_presets_select_machine(presets,
+                                          "Bambu Lab X1 Carbon 0.4 nozzle"));
+    expect_ok(g1, "select_machine X1C");
+    CHECK(select_machine_current(presets, 0) == "Bambu Lab X1 Carbon 0.4 nozzle");
+    CHECK(select_machine_current(presets, 2) == "0.20mm Standard @BBL X1C");
+    // desktop parity: the machine's inherited default_filament_profile
+    // is adopted while the selection is still the default filament
+    CHECK(select_machine_current(presets, 1) == "Generic PLA");
+
+    // the resolved combination slices: no default-process relative-E trap
+    orca_plater *plater = nullptr;
+    GUARD(g2, orca_plater_new(&plater));
+    expect_ok(g2, "plater_new");
+    const std::string cube = write_cube_stl(dir, "select-machine-cube.stl");
+    orca_object_id object_id = 0;
+    orca_revision revision = 0;
+    GUARD(g3, import_one(plater, cube.c_str(), 100.0, 100.0, &object_id, &revision));
+    expect_ok(g3, "add cube");
+    const std::string gcode = dir + "/select-machine.gcode";
+    orca_slice_report report;
+    GUARD(g4, orca_plater_slice_to_gcode_with_presets(
+                  plater, presets, gcode.c_str(), nullptr, nullptr, nullptr, &report));
+    expect_ok(g4, "slice after select_machine");
+    orca_slice_report_dispose(&report);
+
+    // switching vendors swaps the incompatible process/filament
+    GUARD(g5, orca_presets_select_machine(presets, "Prusa MK4 0.4 nozzle"));
+    expect_ok(g5, "select_machine MK4");
+    CHECK(select_machine_current(presets, 0) == "Prusa MK4 0.4 nozzle");
+    const std::string mk4_process = select_machine_current(presets, 2);
+    CHECK(mk4_process != "Default Setting");
+    // the engine's own update_compatible(Always) choice for the swapped,
+    // incompatible BBL filament (upstream PreferedFilamentsProfileMatch)
+    CHECK(select_machine_current(presets, 1) == "Generic PLA @System");
+    GUARD(g6, orca_plater_slice_to_gcode_with_presets(
+                  plater, presets, gcode.c_str(), nullptr, nullptr, nullptr, &report));
+    expect_ok(g6, "slice after vendor switch");
+    orca_slice_report_dispose(&report);
+
+    // a machine without default_print_profile still never keeps the default
+    // process (Ender-3 V3 declares none)
+    GUARD(g7, orca_presets_select_machine(presets,
+                                          "Creality Ender-3 V3 0.4 nozzle"));
+    expect_ok(g7, "select_machine Ender-3 V3");
+    CHECK(select_machine_current(presets, 2) != "Default Setting");
+
+    orca_plater_free(plater);
+    orca_presets_free(presets);
+}
+
 struct ProgressRecord {
     std::atomic<int> calls{0};
     std::atomic<int> max_percent{0};
@@ -3059,6 +3152,7 @@ int main() {
     test_bed_type(data_dir);
     test_slice_defaults(dir);
     test_slice_with_presets(dir, data_dir);
+    test_select_machine(dir, data_dir);
     test_standalone_slice(dir);
     test_slice_gcode_warning_levels(dir, data_dir);
     test_custom_gcode(dir, data_dir);

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (c) 2026 OrcaPad contributors
+
 import Foundation
 import Observation
 import OrcaBridge
@@ -29,6 +32,28 @@ private struct PresetLoadPayload: Sendable {
     let editedConfigs: [PresetKind: [String: String]]
     let systemConfigs: [PresetKind: [String: String]]
     let warning: AppFailure?
+    /// Non-failure, UI-visible note from the load (e.g. a stored selection
+    /// that is no longer listed was replaced by the engine defaults).
+    let notice: String?
+
+    init(engine: EnginePresets, machines: [PresetEntry], filaments: [PresetEntry],
+         processes: [PresetEntry], selection: PresetSelection,
+         printVolume: PrintVolume, bedType: BedTypeState,
+         editedConfigs: [PresetKind: [String: String]],
+         systemConfigs: [PresetKind: [String: String]],
+         warning: AppFailure?, notice: String? = nil) {
+        self.engine = engine
+        self.machines = machines
+        self.filaments = filaments
+        self.processes = processes
+        self.selection = selection
+        self.printVolume = printVolume
+        self.bedType = bedType
+        self.editedConfigs = editedConfigs
+        self.systemConfigs = systemConfigs
+        self.warning = warning
+        self.notice = notice
+    }
 }
 
 /// Desktop `app_config` per-printer `curr_bed_type` memory: the engine resets
@@ -145,7 +170,18 @@ final class PresetStore {
 
             var selected = defaults
             var warning: AppFailure?
-            if stored.isComplete {
+            var notice: String?
+            // Only a stored selection that is still listed can be restored.
+            // Anything else is the fresh-install default triple ("Default
+            // Printer" & co, which are not listed presets) or presets that no
+            // longer exist: keep the engine defaults either way.
+            func listed(_ name: String, in entries: [PresetEntry]) -> Bool {
+                entries.contains { $0.name == name }
+            }
+            if stored.isComplete,
+               listed(stored.machine, in: machines),
+               listed(stored.filament, in: filaments),
+               listed(stored.process, in: processes) {
                 do {
                     try engine.select(
                         machine: stored.machine,
@@ -156,16 +192,15 @@ final class PresetStore {
                 } catch let error as BridgeError
                     where error.status == .notFound ||
                         error.status == .invalidConfiguration {
-                    // Explicit recovery for removed/incompatible persisted
-                    // presets: retain the engine defaults and replace the
-                    // obsolete selection after reporting the typed rejection.
+                    // Explicit recovery for a rejected combination: retain
+                    // the engine defaults and report the typed rejection.
                     warning = .bridge(error)
                 }
+            } else if stored.isComplete {
+                notice = "stored preset no longer available; using engine defaults"
             }
-            // Compatibility flags change once a concrete machine is selected.
-            let refreshedProcesses = stored.isComplete && warning == nil
-                ? try engine.entries(kind: .process).get()
-                : processes
+            // Compatibility flags are correct for whatever is selected.
+            let refreshedProcesses = try engine.entries(kind: .process).get()
             let volume = try engine.printVolume().get()
             let (bedType, staleBedType) = try BedTypeMemory.apply(
                 memory[selected.machine], engine: engine
@@ -192,7 +227,8 @@ final class PresetStore {
                 bedType: bedType,
                 editedConfigs: edited,
                 systemConfigs: system,
-                warning: warning
+                warning: warning,
+                notice: notice
             )
         }
 
@@ -216,6 +252,8 @@ final class PresetStore {
                     "stored preset rejected; using engine defaults — " +
                         warning.localizedDescription
                 )
+            } else if let notice = payload.notice {
+                status.report(.presets, notice)
             } else {
                 status.report(.presets, "presets: ready")
             }
@@ -230,33 +268,41 @@ final class PresetStore {
             status.report(.presets, "preset selection blocked: presets are busy")
             return
         }
-        var candidate = selection
-        switch kind {
-        case .machine: candidate.machine = name
-        case .filament: candidate.filament = name
-        case .process: candidate.process = name
-        }
-        guard candidate.isComplete else {
-            status.report(
-                .presets,
-                failure: .invariant(
-                    operation: "select presets",
-                    diagnostic: "preset selection is incomplete"
-                )
-            )
-            return
-        }
-
-        let requested = candidate
-        let remembered = bedTypeMemory[requested.machine]
+        // Value snapshots for the nonisolated background closure.
+        let current = selection
+        let memory = bedTypeMemory
         isSelecting = true
         let result = await BackgroundWork.run(operation: "select presets") {
-            try engine.select(
-                machine: requested.machine,
-                filament: requested.filament,
-                process: requested.process
-            ).get()
-            let bedType = try BedTypeMemory.apply(remembered, engine: engine)
+            switch kind {
+            case .machine:
+                // Desktop printer change: the engine resolves a compatible
+                // process and filament (machine-declared defaults while the
+                // selection is still a default preset, then
+                // update_compatible(Always)).
+                try engine.selectMachine(name).get()
+            case .filament:
+                try engine.select(
+                    machine: current.machine,
+                    filament: name,
+                    process: current.process
+                ).get()
+            case .process:
+                try engine.select(
+                    machine: current.machine,
+                    filament: current.filament,
+                    process: name
+                ).get()
+            }
+            // The engine owns the resulting triple (a machine change may swap
+            // the filament and process); the client never guesses.
+            let selected = PresetSelection(
+                machine: try engine.current(kind: .machine).get(),
+                filament: try engine.current(kind: .filament).get(),
+                process: try engine.current(kind: .process).get()
+            )
+            let bedType = try BedTypeMemory.apply(
+                memory[selected.machine], engine: engine
+            )
             // Selection changes invalidate process compatibility, the bed,
             // and the edited/system config pair (selecting resets the edited
             // working copy). Re-read engine state; the client never guesses.
@@ -267,6 +313,7 @@ final class PresetStore {
                 system[kind] = try engine.configDump(kind: kind, edited: false).get()
             }
             return (
+                selected,
                 try engine.entries(kind: .process).get(),
                 try engine.printVolume().get(),
                 edited,
@@ -277,27 +324,28 @@ final class PresetStore {
         isSelecting = false
         switch result {
         case .success((
+            let selected,
             let refreshedProcesses,
             let volume,
             let edited,
             let system,
             let bed
         )):
-            selection = requested
+            selection = selected
             processes = refreshedProcesses
             printVolume = volume
             bedType = bed.0
             if bed.stale {
-                bedTypeMemory[requested.machine] = nil
+                bedTypeMemory[selected.machine] = nil
                 BedTypeMemory.store(bedTypeMemory)
                 status.report(.presets, failure: .invariant(
                     operation: "restore plate type",
-                    diagnostic: "remembered plate type is no longer offered by \(requested.machine)"
+                    diagnostic: "remembered plate type is no longer offered by \(selected.machine)"
                 ))
             }
             editedConfigs = edited
             systemConfigs = system
-            persist(requested)
+            persist(selected)
             status.report(.presets, "presets: selection ready")
         case .failure(let failure):
             status.report(.presets, failure: failure)
@@ -424,14 +472,17 @@ final class PresetStore {
             systemConfigs = payload.systemConfigs
             // Project/external presets are session-only: persist a selection
             // only when every preset survives a relaunch.
-            let durable = [
+            let pairs: [([PresetEntry], String)] = [
                 (payload.machines, payload.selection.machine),
                 (payload.filaments, payload.selection.filament),
                 (payload.processes, payload.selection.process),
-            ].allSatisfy { entries, name in
-                entries.first { $0.name == name }.map {
-                    $0.origin == .system || $0.origin == .user
-                } ?? false
+            ]
+            let durable: Bool = pairs.allSatisfy { entries, name in
+                let entry: PresetEntry? = entries.first { $0.name == name }
+                if let entry {
+                    return entry.origin == .system || entry.origin == .user
+                }
+                return false
             }
             if durable { persist(payload.selection) }
             return true

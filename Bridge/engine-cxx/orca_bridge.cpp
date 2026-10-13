@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (c) 2026 OrcaPad contributors
+
 #include "orca_bridge.h"
 
 #include "libslic3r/I18N.hpp"
@@ -467,6 +470,88 @@ orca_result orca_presets_select(orca_presets *presets, const char *machine,
             candidate->prints.get_selected_preset().name != process)
             return orcapad_fail(ORCA_STATUS_INVALID_CONFIGURATION, operation,
                                 "preset combination is not selectable");
+
+        if (presets->bundle->printers.get_selected_preset().name != machine)
+            orcapad_apply_default_bed_type(*candidate);
+
+        presets->bundle.swap(candidate);
+        return orcapad_ok();
+    });
+}
+
+// ABI v25: the desktop printer change. A fresh bundle has the "- default -"
+// presets selected (not listed, not passable to orca_presets_select); a
+// printer switch must instead let the engine resolve the process and
+// filament, exactly like the desktop Sidebar combo (PresetBundle.cpp
+// load_selections + update_compatible(Always)).
+orca_result orca_presets_select_machine(orca_presets *presets,
+                                         const char *machine) {
+    constexpr const char *operation = "orca_presets_select_machine";
+    if (!presets)
+        return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation,
+                            "presets handle is null");
+    if (!machine || !machine[0])
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "machine name is empty");
+
+    return orcapad_guard(operation, [&]() -> orca_result {
+        if (!orcapad_has_listed_preset(presets->bundle->printers, machine))
+            return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation,
+                                "machine preset was not found");
+        auto candidate =
+            std::make_unique<Slic3r::PresetBundle>(*presets->bundle);
+        candidate->printers.select_preset_by_name(machine, false);
+        const Slic3r::Preset &printer = candidate->printers.get_selected_preset();
+        if (printer.name != machine)
+            return orcapad_fail(ORCA_STATUS_INVALID_CONFIGURATION, operation,
+                                "machine preset is not selectable");
+
+        // While the process/filament selection is still a default preset,
+        // adopt the machine's declared defaults (upstream load_selections,
+        // the ConfigWizard "BBS: set default print/filament profiles" path).
+        if (candidate->prints.get_selected_preset().is_default &&
+            printer.config.has("default_print_profile")) {
+            const std::string preferred =
+                printer.config.opt_string("default_print_profile");
+            if (!preferred.empty() &&
+                candidate->prints.find_preset(preferred, false, true) != nullptr)
+                candidate->prints.select_preset_by_name(preferred, true);
+        }
+        if (candidate->filaments.get_selected_preset().is_default &&
+            printer.config.has("default_filament_profile")) {
+            const auto &preferred = printer.config.option<
+                Slic3r::ConfigOptionStrings>("default_filament_profile")->values;
+            if (!preferred.empty() &&
+                candidate->filaments.find_preset(preferred.front(), false, true) != nullptr)
+                candidate->filaments.select_preset_by_name(preferred.front(), true);
+        }
+
+        // Desktop printer change: swap any incompatible process/filament for
+        // a compatible one (printer-preferred when declared).
+        candidate->update_compatible(Slic3r::PresetSelectCompatibleType::Always);
+
+        // Some machines declare no default process and nothing forces a swap;
+        // never leave a "- default -" process selected (it slices with unsafe
+        // engine defaults, e.g. relative E without a per-layer reset).
+        if (candidate->prints.get_selected_preset().is_default) {
+            Slic3r::Preset &compatible = candidate->prints.first_compatible();
+            if (!compatible.is_default)
+                candidate->prints.select_preset_by_name(compatible.name, true);
+        }
+        if (candidate->filaments.get_selected_preset().is_default) {
+            Slic3r::Preset &compatible = candidate->filaments.first_compatible();
+            if (!compatible.is_default)
+                candidate->filaments.select_preset_by_name(compatible.name, true);
+        }
+
+        // Keep the per-extruder filament list valid (upstream fix-up).
+        if (candidate->filament_presets.empty())
+            candidate->set_filament_preset(
+                0, candidate->filaments.get_selected_preset_name());
+        else
+            for (std::string &name : candidate->filament_presets)
+                if (candidate->filaments.find_preset(name, false) == nullptr)
+                    name = candidate->filaments.get_selected_preset_name();
 
         if (presets->bundle->printers.get_selected_preset().name != machine)
             orcapad_apply_default_bed_type(*candidate);

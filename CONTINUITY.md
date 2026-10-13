@@ -74,6 +74,15 @@
 
 ## PROGRESS
 
+- [2026-10-13 CODE][USER] ABI v25 select_machine: the TestFlight 0.1.0
+  fresh-install bug (picking a printer kept the default process ->
+  'process preset was not found', slicing defaults -> relative-E error;
+  reproduced on host with a probe) fixed with desktop semantics
+  (machine-declared defaults + update_compatible(Always), never a
+  default process left selected). PresetStore machine path reads back
+  the engine triple; load() ignores the fresh default names. Host tests
+  51,038 PASS; integrated with the Gate E licensing pass (SPDX,
+  license gate, source archive) from the adjacent agent.
 - [2026-10-13 TOOL] First release `release-0.1.0` (run 38395092119): Xcode
   archive, App Store signing, export, altool validate + UPLOAD SUCCEEDED
   for 0.1.0 (2.1) to app "OrcaPad Slicer" (ASC id 6822246784). Only the

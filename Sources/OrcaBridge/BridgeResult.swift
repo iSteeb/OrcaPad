@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (c) 2026 OrcaPad contributors
+
 import Foundation
 import OrcaBridgeCore
 
@@ -47,7 +50,7 @@ public struct BridgeError: Error, Sendable, LocalizedError {
     }
 }
 
-private let expectedBridgeABIVersion: UInt32 = 24
+private let expectedBridgeABIVersion: UInt32 = 25
 
 func bridgeABIFailure(operation: String) -> BridgeError? {
     let actual = orca_bridge_abi_version()
