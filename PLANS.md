@@ -69,40 +69,40 @@ slices on the device; a red audit or parity check blocks the upload.
 Device, each tab a clean feature module over the same stores.
 
 - [x] C1: RootView glass TabView, `Features/{Plate,Prepare,Preview,Device}`,
-      global status overlay, Device stub (`a32dac4`)
+      global status overlay, Device stub (`66099ff`)
 - [x] C2: Prepare desktop parity v1 — Simple/Advanced/Expert (schema `mode`),
       engine-derived kind membership, category accordions, typed editors,
       modified badges + per-key/per-kind reset, Slice in the toolbar;
-      ABI v4 overrides on edited presets (`df05d73`)
+      ABI v4 overrides on edited presets (`6f021b2`)
 - [x] C3: Preview v1 — upstream GCodeProcessor → compact toolpath (ABI v5),
       feature-colored Metal lines, layer scrubber, remaining-time estimate;
-      real Thumbnails.cpp + jpeg adapter; brass interop fix (`78f9920`)
+      real Thumbnails.cpp + jpeg adapter; brass interop fix (`5fdfd2b`)
 - [x] C4: Preview parity — vertical dual layer-range slider, in-layer move
       scrubber + tool marker, color schemes (line type / speed / layer height /
       line width / fan / temperature), legend with feature toggles + per-feature
       time share, travel toggle, width-true ribbons (budgeted), range drawing
-      without rebuilds; ABI v6 (`b0960d2`, `b5dc9c0`)
+      without rebuilds; ABI v6 (`207c550`, `f38a4c1`)
 - [x] C5: Prepare parity v1 — desktop page → optgroup layout EXTRACTED from
       pinned upstream Tab.cpp (`extract_settings_layout.py`), process pages
       inline, printer/filament settings screens, tooltips, units, range
       validation, single-element vectors edited as scalars, multiline G-code
-      editor (`f09d26b`)
+      editor (`d1139d2`)
 - [x] C5b: user presets — save (desktop SavePresetDialog rules, detach) /
       delete via `PresetCollection`, persisted + reloaded; unsaved-changes
-      prompt; user/project groups in pickers (ABI v12, `343eed2`)
+      prompt; user/project groups in pickers (ABI v12, `0d46463`)
 - [x] C6: Plate v1 — left gizmo toolbar (Move/Rotate/Scale) with on-canvas
       gizmos (axes, ring + angle tick, bounding box), ring-drag rotation with
       5° snap, vertical-drag scale kept on bed, desktop Object manipulation
       panel (X/Y/RotZ/Scale/size, quick actions), copy/delete; FIXED picking
-      (points vs pixels) that broke tap-select and drag-move (`cc85933`)
+      (points vs pixels) that broke tap-select and drag-move (`63e1e1e`)
 - [x] C6b: engine Arrange — Arrange.cpp + libnest2d + NLopt 2.5.0 in the
       closure (`gen_nlopt.py` headers verified vs CMake), ArrangeJob param
-      flow; plus Orient (ABI v13, `8277409`)
+      flow; plus Orient (ABI v13, `5bd84ed`)
 - [x] C6c-1: ABI v7 full transforms — XYZ Euler + per-axis scale in the
       snapshot/set contract, engine matrix in snapshots, world-axis
       `orca_plater_instance_rotate` (wraps through 360°), engine rest-on-bed;
       mode panels (Move X/Y/center, Rotate axis picker + ±15° + reset, Scale
-      per-axis + uniform lock); Preview controls in a left dock (`8d4cdaf`)
+      per-axis + uniform lock); Preview controls in a left dock (`0e28195`)
 - [x] C6c-2: Lay flat — facet-pick tap → engine rotate-to-down + rest on bed
       (ABI v13; hull-plane highlighting still missing)
 - [x] C7: plate type (v8), cancel/validate/warnings (v9), import of all
@@ -142,7 +142,7 @@ the full resolved config inspectable.
 - [x] Config viewer: searchable, schema-generated, resolved values with
       modified-value highlighting and a selection/bed summary
 - [x] Contract tests for every new ABI (10900 checks); census + device install
-      (`80ce347` on iPoke, user acceptance pending)
+      (`f238216` on iPoke, user acceptance pending)
 
 **Accept:** import lands centered on the SELECTED machine's bed; rotate spins
 about the object center by exact degrees; drag moves; preset lists grouped and
