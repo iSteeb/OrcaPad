@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (c) 2026 OrcaPad contributors
+
 #pragma once
 // OrcaPad adapter shim: narrow-char stdio pass-through (no libnowide).
 // Env functions (setenv etc.) live in cstdlib.hpp — do not duplicate here.

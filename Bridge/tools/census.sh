@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: AGPL-3.0-only
+# Copyright (c) 2026 OrcaPad contributors
 # Census compile: attempts each candidate file INDEPENDENTLY with the engine's
 # exact flags and reports the FULL error surface in one pass. No archive, no
 # build — pure recon. Fixes then land in build-core.sh in one batch.

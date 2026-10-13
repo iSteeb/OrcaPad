@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (c) 2026 OrcaPad contributors
+
 #pragma once
 #include "blocked_range.h"
 // OrcaPad adapter shim: serial reduce (sequential tbb stand-in).

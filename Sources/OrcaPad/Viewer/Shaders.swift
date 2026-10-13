@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (c) 2026 OrcaPad contributors
+
 // MARK: - Metal Shading Language sources
 //
 // NOTE: The Linux/xtool toolchain cannot compile .metallib files (Apple's

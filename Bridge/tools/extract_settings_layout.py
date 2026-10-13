@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: AGPL-3.0-only
+# Copyright (c) 2026 OrcaPad contributors
 """Extract desktop OrcaSlicer's settings layout (page -> optgroup -> options)
 from the pinned upstream GUI source (src/slic3r/GUI/Tab.cpp) into a committed
 client resource, so the Prepare tab mirrors desktop clustering without

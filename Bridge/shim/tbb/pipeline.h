@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (c) 2026 OrcaPad contributors
+
 #pragma once
 // OrcaPad adapter shim: SEQUENTIAL tbb pipeline stand-in (legacy include path).
 // The generator (first filter, void->T) is called with a flow_control until

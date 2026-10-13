@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (c) 2026 OrcaPad contributors
+
 #pragma once
 // OrcaPad adapter shim: the Linux/iOS cross-build has no libboost_log.
 // BOOST_LOG_TRIVIAL becomes a null sink (message discarded — os_log covers

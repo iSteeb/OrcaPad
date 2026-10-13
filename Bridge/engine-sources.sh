@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: AGPL-3.0-only
+# Copyright (c) 2026 OrcaPad contributors
 # Shared engine compile list — the single source of truth consumed by BOTH
 # Bridge/build-core.sh (iOS archive) and Bridge/build-host-tests.sh (host
 # contract tests). The two builds must never drift apart: the duplicate

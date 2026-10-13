@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (c) 2026 OrcaPad contributors
+
 #pragma once
 // OrcaPad adapter shim: OpenSSL MD5 surface mapped onto Darwin CommonCrypto
 // (ships in the iOS SDK — no libcrypto build needed for the core subset).

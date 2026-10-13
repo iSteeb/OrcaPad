@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (c) 2026 OrcaPad contributors
+
 #pragma once
 // OrcaPad adapter shim: the subset of boost.beast's base64 detail API used
 // by GCode.cpp (encoded_size / encode). Standard base64 alphabet, padded.

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (c) 2026 OrcaPad contributors
+
 // OrcaPad adapter: loud-throwing libjpeg definitions backing the
 // declaration-only shim headers (Bridge/shim/jpeglib.h). The upstream
 // GCode/Thumbnails.cpp compiles against these; reaching a JPEG encode is a

@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: AGPL-3.0-only
+# Copyright (c) 2026 OrcaPad contributors
 """Makes an uploaded build available to an external TestFlight group.
 
 Runs in CI after Distribution/release-testflight.sh uploaded the build:

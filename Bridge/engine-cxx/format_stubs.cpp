@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (c) 2026 OrcaPad contributors
+
 // OrcaPad adapter: loud stubs for model formats whose engines (draco, OCCT)
 // are not yet cross-built for iOS (3MF is the real Format/3mf.cpp +
 // Format/bbs_3mf.cpp). Each throws the moment

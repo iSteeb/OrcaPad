@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: AGPL-3.0-only
+# Copyright (c) 2026 OrcaPad contributors
 """Generates NLopt 2.5.0's configure-time headers for the OrcaPad closure.
 
 Mirrors NLopt's own CMake (src/api/CMakeLists.txt: nlopt.hpp = nlopt-in.hpp

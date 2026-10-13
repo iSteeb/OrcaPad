@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: AGPL-3.0-only
+# Copyright (c) 2026 OrcaPad contributors
 # Host-side Bridge contract tests: compiles the SAME engine closure as
 # build-core.sh (via Bridge/engine-sources.sh) for the local Linux host,
 # links Bridge/tools/contract_tests.cpp, and RUNS the resulting executable.

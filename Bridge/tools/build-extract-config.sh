@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: AGPL-3.0-only
+# Copyright (c) 2026 OrcaPad contributors
 # Regenerates Sources/OrcaPad/Resources/config-schema.json from the pinned
 # engine's print_config_def via Bridge/tools/extract_config.cpp (HOST tool).
 #

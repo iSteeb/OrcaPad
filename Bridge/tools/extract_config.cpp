@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (c) 2026 OrcaPad contributors
+
 // OrcaPad config-schema extractor (HOST tool, x86 Linux).
 // Dumps Slic3r::print_config_def (all ConfigOptionDefs) to JSON so the iOS
 // settings UI can be GENERATED from the defs — never hand-written.

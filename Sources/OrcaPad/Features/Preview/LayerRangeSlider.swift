@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (c) 2026 OrcaPad contributors
+
 import SwiftUI
 
 /// Desktop-style vertical layer range slider: layer 0 at the bottom, the top

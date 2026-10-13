@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: AGPL-3.0-only
+# Copyright (c) 2026 OrcaPad contributors
 # Static architecture contract audit — run before every commit.
 # Verifies module boundaries, engine purity, ABI packaging, and the
 # no-silent-failure discipline WITHOUT building anything.

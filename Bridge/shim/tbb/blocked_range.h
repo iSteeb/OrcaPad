@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (c) 2026 OrcaPad contributors
+
 #pragma once
 // OrcaPad adapter shim: SEQUENTIAL tbb stand-ins. Correct but single-
 // threaded; swap for a real oneTBB iOS build when slicing perf matters.

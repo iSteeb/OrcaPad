@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (c) 2026 OrcaPad contributors
+
 #pragma once
 // OrcaPad host-build adapter: openssl/md5.h surface for the Linux host test
 // build. The iOS/Darwin build maps this header onto CommonCrypto
