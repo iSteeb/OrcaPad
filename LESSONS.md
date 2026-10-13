@@ -183,6 +183,39 @@ in ~/xtool-cheatsheet.md — link, don't duplicate.)
   rebuilt .a seems ignored, `rm -rf .build xtool/.xtool-tmp` before blaming
   the linker. (Suspected once; the real cause was analysis bugs, but the
   purge is cheap insurance.)
+- The xtool darwin SDK record in `~/.swiftpm/swift-sdks` can vanish after a
+  crashed concurrent build; restore it by symlinking
+  `~/.config/swiftpm/swift-sdks/darwin.artifactbundle` (xtool then skips its
+  NIO-based generator, which cannot epoll here).
+- Never add profiles to xtool's `XTL-...` App IDs: `xtool dev` deletes the
+  single existing profile and creates a new one on every run (with two or
+  more it starts accumulating them). `xtool dev build --sign` on a fresh CI
+  machine would mint a new development certificate per run. CI therefore
+  signs with its own App ID (`ie.duz.OrcaPad`) and identity.
+
+### CI / App Store distribution (2026-10-13)
+
+- A static archive needs a symbol index for Apple's linker. Host GNU
+  `ar rcs` cannot read Mach-O members and silently wrote an index-less
+  archive that only lld tolerated. Use the toolchain's
+  `llvm-ar --format=darwin` and check `llvm-nm --print-armap` starts with
+  "Archive map" (build-core.sh and the audit enforce both).
+- App Store Connect validates what xtool never produces: an asset-catalog
+  icon (CFBundleIconName + opaque 1024px), DT* toolchain keys (Linux-built
+  resource bundles carry placeholders such as DTXcodeBuild 99T999), a
+  privacy manifest, export compliance. Only macOS can compile the icon
+  (actool), so `.xcassets` live in `Distribution/`, never in `Sources/`.
+- Required-reason API references differ between debug and release builds
+  (dead-strip drops boost.filesystem's statfs/fstat): derive the privacy
+  manifest from the RELEASE executable. The packaging script fails on an
+  undeclared category instead of waiting for Apple's ITMS-91053 mail.
+- Signing material (`~/orcapad-signing`) is off-limits to the agent: the
+  user runs the commands that load it into GitHub secrets.
+- GitHub Pages serves `.plist` as application/octet-stream, reported to
+  break itms-services OTA installs (relevant if ad hoc OTA ever returns).
+- History was rewritten on 2026-10-13 (author email to the GitHub noreply
+  address): every earlier SHA changed; the commit map was applied to the
+  tracked docs, but external notes may still cite old SHAs.
 
 ### Bash discipline
 

@@ -1,7 +1,7 @@
 # OrcaPad architecture
 
 Status: **normative target design**  
-Last updated: 2026-10-06
+Last updated: 2026-10-13
 
 OrcaPad is a native iOS/iPadOS client for OrcaSlicer. It reuses OrcaSlicer's
 headless C++ behavior and implements the platform experience in SwiftUI and
@@ -335,6 +335,13 @@ The current machine-local cross-build is accepted temporarily. Reproducible
 CMake, simulator slices, CI, signed distribution, offline Metal compilation,
 and canonical resource packaging are required before upstream submission, but
 they are not the immediate architecture-cleanup priority.
+
+Since 2026-10-13, CI (GitHub Actions) runs the architecture audit and parity
+check on Linux, builds the app with Apple's toolchain on a hosted macOS
+runner, and uploads every `main` build to TestFlight (App Store signing,
+asset-catalog icon, privacy manifest). The engine archive itself is still
+cross-built on the Linux dev box and committed under `Prebuilt/`; rebuilding
+it in CI is the remaining reproducibility step.
 
 New feature work must not deepen reliance on manual source lists, hidden cache
 state, or additional fake dependency surfaces.

@@ -26,7 +26,8 @@ Engine before feature breadth makes the current coupling permanent.
   architecture audit; Swift-domain unit tests remain (need a host-runnable
   Swift module or Mac CI — tracked below)
 - [ ] Swift-domain contract tests (DocumentStore/CoordinateMapper) — blocked
-  on a Linux-runnable Swift test target or a Mac runner
+  on a Linux-runnable Swift test target or a Mac runner (CI now has a hosted
+  macOS runner, Gate D: unblocked)
 
 **Gate A close-out:** one authoritative C++ document; raw ABI confined to the
 Bridge; Swift and Metal consume revisioned derived state; all failures are
@@ -40,6 +41,28 @@ work must not deepen hidden-cache or fake-symbol dependencies.
 **Accept:** one authoritative C++ document model; raw ABI use confined to the
 Bridge; Swift and Metal consume revisioned derived state; all failures are
 typed and loud; current physical-device slice behavior remains green.
+
+## Gate D — CI + TestFlight distribution (in progress)
+**Goal:** every `main` push is verified and reaches the user's devices via
+TestFlight, with no Mac on the user's side.
+
+- [x] Public GitHub repo `iSteeb/OrcaPad`: AGPL-3.0 LICENSE, history on the
+      GitHub noreply address
+- [x] Engine archive is a valid Apple static library (Darwin format with a
+      `__.SYMDEF` index; build-core.sh and the audit enforce it)
+- [x] Workflow `.github/workflows/testflight.yml`: Linux audit + parity gate;
+      release build with xtool on the hosted `xcode-27` runner; main builds
+      signed with the App Store profile and uploaded with `altool`
+      (`Distribution/package-testflight.sh`)
+- [x] App Store requirements: asset-catalog icon (user artwork), privacy
+      manifest checked against the release binary's required-reason APIs,
+      truthful DT* toolchain keys, ITSAppUsesNonExemptEncryption=NO
+- [ ] First build processed and installed from TestFlight on iPoke
+- [ ] Host contract tests in CI (Ubuntu 26.04 container + ccache)
+- [ ] Engine cross-build in CI (reproducible archive; stop committing it)
+
+**Accept:** a push to `main` yields a TestFlight build that installs and
+slices on the device; a red audit or parity check blocks the upload.
 
 ## Gate C — Four-tab desktop-parity UX (in progress)
 **Goal:** the app reads like desktop OrcaSlicer: Plate → Prepare → Preview →
@@ -227,7 +250,8 @@ in desktop OrcaSlicer identically.
   models are `.drc`, so Draco must enter the closure first)
 - Memory hardening (jetsam budgeting, streaming), iPad keyboard/pointer,
   landscape lock review, App Store asset pipeline workaround for icons
-- TestFlight via Mac (xtool can't upload — plan the handoff)
+- [x] TestFlight without a local Mac: CI signs and uploads every main build
+  (Gate D)
 
 **Accept:** a stranger can go from STL → printed part with only the iPad.
 
