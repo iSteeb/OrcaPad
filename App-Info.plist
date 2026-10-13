@@ -49,5 +49,10 @@
 	</dict>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>OrcaPad connects to 3D printers on your network to send G-code and show their web interface.</string>
+	<!-- App Store Connect export compliance [USER 2026-10-13]: only
+	     OS-provided encryption (HTTPS via URLSession/WebKit) and hashing,
+	     which are exempt. Declaring it here skips the per-build prompt. -->
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
 </dict>
 </plist>
