@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (c) 2026 OrcaPad contributors
+
 import OrcaBridge
 import SwiftUI
 import UniformTypeIdentifiers
@@ -23,6 +26,7 @@ struct PlateTabView: View {
     @State private var countText = ""
     @State private var renameText = ""
     @State private var deleteAllConfirmation = false
+    @State private var aboutPresented = false
 
     private var document: DocumentStore { environment.document }
 
@@ -94,6 +98,7 @@ struct PlateTabView: View {
             onCompletion: handleImport
         )
         .sheet(isPresented: $objectsPresented) { objectsList }
+        .sheet(isPresented: $aboutPresented) { AboutView() }
         .confirmationDialog(
             "Open project?",
             isPresented: Binding(
@@ -304,6 +309,10 @@ struct PlateTabView: View {
                 guard let engine = environment.presets.engineForSlicing else { return }
                 Task { await document.orientAll(presets: engine) }
             }
+            PlateActionButton(
+                symbol: "info.circle", label: "About",
+                action: { aboutPresented = true }
+            )
         }
         .padding(6)
         .background(.ultraThinMaterial, in: Capsule())

@@ -1,4 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
+<!-- SPDX-License-Identifier: AGPL-3.0-only -->
+<!-- Copyright (c) 2026 OrcaPad contributors -->
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
@@ -54,5 +56,10 @@
 	     which are exempt. Declaring it here skips the per-build prompt. -->
 	<key>ITSAppUsesNonExemptEncryption</key>
 	<false/>
+	<!-- AGPL compliance (COMPLIANCE.md W2): identifies the exact source of
+	     this binary. CI overwrites this with "<release-tag>+<commit-sha>"
+	     before archiving; local builds keep the default. -->
+	<key>ORCAPAD_SOURCE_REF</key>
+	<string>development build — source: github.com/iSteeb/OrcaPad</string>
 </dict>
 </plist>
