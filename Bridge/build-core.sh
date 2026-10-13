@@ -203,11 +203,23 @@ mapfile -t OBJS < "$MANIFEST"
 if [ "${#OBJS[@]}" -eq 0 ]; then echo "FATAL: no objects compiled" >&2; exit 1; fi
 # CRITICAL: ar rcs only replaces/adds members — stale members from previous
 # builds survive exclusions. Always start from a clean archive.
+# 2026-10-13: Apple's linker refuses an archive without a symbol index
+# ("archive has no table of contents"). Host GNU ar cannot read Mach-O
+# members, so its `rcs` silently wrote an index-less GNU archive that only
+# lld tolerated. The toolchain's llvm-ar writes the Darwin (BSD) format with
+# a __.SYMDEF index, which both lld and Apple's ld accept.
+LLVM_AR="$(dirname "$CLANG")/llvm-ar"
+LLVM_NM="$(dirname "$CLANG")/llvm-nm"
+[ -x "$LLVM_AR" ] && [ -x "$LLVM_NM" ] ||
+    { echo "FATAL: llvm-ar/llvm-nm not found next to $CLANG" >&2; exit 1; }
 rm -f "$OUT/libOrcaBridgeCore.a"
-ar rcs "$OUT/libOrcaBridgeCore.a" "${OBJS[@]}"
-actual=$(ar t "$OUT/libOrcaBridgeCore.a" | wc -l)
+"$LLVM_AR" --format=darwin rcs "$OUT/libOrcaBridgeCore.a" "${OBJS[@]}"
+actual=$("$LLVM_AR" t "$OUT/libOrcaBridgeCore.a" | wc -l)
 if [ "$actual" -ne "${#OBJS[@]}" ]; then
     echo "FATAL: archive has $actual members, manifest has ${#OBJS[@]} — stale members leaked" >&2; exit 1
+fi
+if [ "$("$LLVM_NM" --print-armap "$OUT/libOrcaBridgeCore.a" | head -1)" != "Archive map" ]; then
+    echo "FATAL: archive has no symbol index (Apple's linker would reject it)" >&2; exit 1
 fi
 cp "$ROOT/Bridge/engine-cxx/orca_bridge.h" "$OUT/Headers/orca_bridge.h"
 cat > "$OUT/Headers/module.modulemap" <<'EOF'

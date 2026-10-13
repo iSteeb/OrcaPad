@@ -26,13 +26,23 @@ else
     report FAIL "packaged orca_bridge.h differs from source — rebuild the archive"
 fi
 
-# 3. Archive has no duplicate or stale members.
-total=$(ar t "$ROOT/Prebuilt/OrcaBridgeCore.xcframework/ios-arm64/libOrcaBridgeCore.a" | wc -l)
-unique=$(ar t "$ROOT/Prebuilt/OrcaBridgeCore.xcframework/ios-arm64/libOrcaBridgeCore.a" | sort -u | wc -l)
+# 3. Archive has no duplicate or stale members, and carries the Darwin symbol
+#    index (__.SYMDEF) Apple's linker requires; an index-less archive links
+#    with lld but fails with ld ("archive has no table of contents").
+archive="$ROOT/Prebuilt/OrcaBridgeCore.xcframework/ios-arm64/libOrcaBridgeCore.a"
+members=$(ar t "$archive")
+objects=$(grep -v '^__\.SYMDEF' <<<"$members")
+total=$(wc -l <<<"$objects")
+unique=$(sort -u <<<"$objects" | wc -l)
 if [ "$total" -eq "$unique" ] && [ "$total" -ge 250 ]; then
     report PASS "archive: $total members, $unique unique"
 else
     report FAIL "archive: $total members, $unique unique (duplicates or shrinkage)"
+fi
+if [[ "$(head -1 <<<"$members")" == __.SYMDEF* ]]; then
+    report PASS "archive carries a Darwin symbol index"
+else
+    report FAIL "archive has no symbol index; rebuild with Bridge/build-core.sh"
 fi
 
 # 4. Raw C ABI use is confined to Sources/OrcaBridge.
