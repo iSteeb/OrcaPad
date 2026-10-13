@@ -45,6 +45,11 @@
 
 ## PROGRESS
 
+- [2026-10-13 TOOL] First release `release-0.1.0` (run 38395092119): Xcode
+  archive, App Store signing, export, altool validate + UPLOAD SUCCEEDED
+  for 0.1.0 (2.1) to app "OrcaPad Slicer" (ASC id 6822246784). Only the
+  external submission failed: no TestFlight group `External` yet (the UI
+  showed no External Testing section before the first build existed).
 - [2026-10-13 CODE][TOOL] CI rework: the first run (workflow_dispatch) hung
   35 min in `xtool --version` on the runner and was cancelled. CI is now
   release-tag-only and Xcode-only: Distribution/project.yml (XcodeGen),
