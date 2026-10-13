@@ -273,7 +273,7 @@ static void test_md5_shim() {
 
 static void test_abi_version() {
     CHECK_EQ(orca_bridge_abi_version(), ORCA_BRIDGE_ABI_VERSION);
-    CHECK_EQ(ORCA_BRIDGE_ABI_VERSION, 23);
+    CHECK_EQ(ORCA_BRIDGE_ABI_VERSION, 24);
 }
 
 static std::string snapshot_label(const orca_owned_string &label) {
@@ -2693,6 +2693,127 @@ static void test_slice_gcode_warning_levels(const std::string &dir, const std::s
     orca_presets_free(presets);
 }
 
+// ABI v24: per-layer custom G-code (colour change / pause / custom),
+// stored where slicing consumes it (plate 0 custom gcodes).
+static void test_custom_gcode(const std::string &dir, const std::string &data_dir) {
+    orca_plater *plater = nullptr;
+    GUARD(g0, orca_plater_new(&plater));
+    expect_ok(g0, "plater_new");
+    orca_revision revision = 0;
+
+    int32_t count = -1;
+    GUARD(g1, orca_plater_custom_gcode_count(plater, &count));
+    expect_ok(g1, "count empty");
+    CHECK_EQ(count, 0);
+
+    GUARD(e1, orca_plater_custom_gcode_add(plater, 0.0, ORCA_CUSTOM_PAUSE_PRINT, 0, "", "",
+                                           &revision));
+    expect_code(e1, ORCA_STATUS_INVALID_ARGUMENT, "zero print height");
+    GUARD(e2, orca_plater_custom_gcode_add(plater, 5.0, 99, 0, "", "", &revision));
+    expect_code(e2, ORCA_STATUS_INVALID_ARGUMENT, "unknown type");
+    GUARD(e3, orca_plater_custom_gcode_add(plater, 5.0, ORCA_CUSTOM_TEMPLATE, 0, "", "",
+                                           &revision));
+    expect_code(e3, ORCA_STATUS_UNSUPPORTED_CAPABILITY, "template unsupported");
+    GUARD(e4, orca_plater_custom_gcode_add(plater, 5.0, ORCA_CUSTOM_COLOR_CHANGE, 0, "#ff0000",
+                                           "", &revision));
+    expect_code(e4, ORCA_STATUS_INVALID_ARGUMENT, "colour change without extruder");
+    GUARD(e5, orca_plater_custom_gcode_add(plater, 5.0, ORCA_CUSTOM_CUSTOM, 0, "", "  ",
+                                           &revision));
+    expect_code(e5, ORCA_STATUS_INVALID_ARGUMENT, "empty custom text");
+    GUARD(e6, orca_plater_custom_gcode_delete(plater, 5.0, &revision));
+    expect_code(e6, ORCA_STATUS_NOT_FOUND, "delete absent");
+
+    GUARD(g2, orca_plater_custom_gcode_add(plater, 1.2, ORCA_CUSTOM_COLOR_CHANGE, 1, "#ff0000",
+                                           "", &revision));
+    expect_ok(g2, "colour change at 1.2");
+    GUARD(g3, orca_plater_custom_gcode_add(plater, 4.5, ORCA_CUSTOM_CUSTOM, 0, "",
+                                           "M300 S440 P200", &revision));
+    expect_ok(g3, "custom at 4.5");
+    GUARD(g4, orca_plater_custom_gcode_add(plater, 2.4, ORCA_CUSTOM_PAUSE_PRINT, 0, "",
+                                           "Check the print", &revision));
+    expect_ok(g4, "pause at 2.4");
+
+    GUARD(g5, orca_plater_custom_gcode_count(plater, &count));
+    expect_ok(g5, "count three");
+    CHECK_EQ(count, 3);
+    orca_custom_gcode_item item;
+    GUARD(g6, orca_plater_custom_gcode_item(plater, 0, &item));
+    expect_ok(g6, "item 0");
+    CHECK_NEAR(item.print_z, 1.2, 1e-9);
+    CHECK_EQ(item.type, ORCA_CUSTOM_COLOR_CHANGE);
+    CHECK_EQ(item.extruder, 1);
+    CHECK(strcmp(item.color.data, "#ff0000") == 0);
+    orca_custom_gcode_item_dispose(&item);
+    GUARD(g7, orca_plater_custom_gcode_item(plater, 1, &item));
+    expect_ok(g7, "item 1");
+    CHECK_NEAR(item.print_z, 2.4, 1e-9);
+    CHECK_EQ(item.type, ORCA_CUSTOM_PAUSE_PRINT);
+    CHECK(strcmp(item.extra.data, "Check the print") == 0);
+    orca_custom_gcode_item_dispose(&item);
+    GUARD(e7, orca_plater_custom_gcode_item(plater, 3, &item));
+    expect_code(e7, ORCA_STATUS_NOT_FOUND, "item out of range");
+
+    // replace at the same height
+    GUARD(g8, orca_plater_custom_gcode_add(plater, 1.2, ORCA_CUSTOM_COLOR_CHANGE, 1, "#00ff00",
+                                           "", &revision));
+    expect_ok(g8, "replace at 1.2");
+    GUARD(g9, orca_plater_custom_gcode_count(plater, &count));
+    expect_ok(g9, "count still three");
+    CHECK_EQ(count, 3);
+    GUARD(g10, orca_plater_custom_gcode_item(plater, 0, &item));
+    expect_ok(g10, "item 0 after replace");
+    CHECK(strcmp(item.color.data, "#00ff00") == 0);
+    orca_custom_gcode_item_dispose(&item);
+
+    // undo removes the replacement, delete removes the pause
+    GUARD(g11, orca_plater_undo(plater, &revision));
+    expect_ok(g11, "undo replace");
+    GUARD(g12, orca_plater_custom_gcode_delete(plater, 2.4, &revision));
+    expect_ok(g12, "delete pause");
+    GUARD(g13, orca_plater_custom_gcode_count(plater, &count));
+    expect_ok(g13, "count after delete");
+    CHECK_EQ(count, 2);
+    // re-add a pause so the slice below exercises it too
+    GUARD(g13b, orca_plater_custom_gcode_add(plater, 3.3, ORCA_CUSTOM_PAUSE_PRINT, 0, "",
+                                             "Check the print", &revision));
+    expect_ok(g13b, "pause again at 3.3");
+
+    // slicing consumes the items: the gcode contains M600 and the custom text
+    orca_presets *presets = nullptr;
+    GUARD(g14, orca_presets_new(data_dir.c_str(), &presets));
+    expect_ok(g14, "presets_new");
+    GUARD(g15, orca_presets_select(presets, "Bambu Lab X1 Carbon 0.4 nozzle",
+                                   "Bambu PLA Basic @BBL X1C",
+                                   "0.20mm Standard @BBL X1C"));
+    expect_ok(g15, "select X1C triple");
+    const std::string cube = write_cube_stl(dir, "custom_gcode_cube.stl");
+    orca_object_id object_id = 0;
+    GUARD(g16, import_one(plater, cube.c_str(), 125, 125, &object_id, &revision));
+    expect_ok(g16, "import tall cube");
+    const std::string gcode = dir + "/custom_gcode.gcode";
+    orca_slice_report report;
+    GUARD(g17, orca_plater_slice_to_gcode_with_presets(
+                   plater, presets, gcode.c_str(), nullptr, nullptr, nullptr, &report));
+    expect_ok(g17, "slice with custom gcode");
+    orca_slice_report_dispose(&report);
+    FILE *file = fopen(gcode.c_str(), "rb");
+    CHECK(file != nullptr);
+    if (file) {
+        std::string text;
+        char buffer[4096];
+        size_t read = 0;
+        while ((read = fread(buffer, 1, sizeof(buffer), file)) > 0) text.append(buffer, read);
+        fclose(file);
+        CHECK(text.find("M300 S440 P200") != std::string::npos);
+        // This fork emits colour changes as processor tags only (the M600
+        // block is #if 0 upstream); pauses emit the PAUSE_PRINT tag plus
+        // machine_pause_gcode. Cover both tag dialects.
+        CHECK(text.find("PAUSE_PRINT") != std::string::npos);
+    }
+    orca_presets_free(presets);
+    orca_plater_free(plater);
+}
+
 static void test_slice_cancel(const std::string &dir) {
     GUARD(g0, orca_slice_job_new(nullptr));
     expect_code(g0, ORCA_STATUS_INVALID_ARGUMENT, "job_new(null)");
@@ -2940,6 +3061,7 @@ int main() {
     test_slice_with_presets(dir, data_dir);
     test_standalone_slice(dir);
     test_slice_gcode_warning_levels(dir, data_dir);
+    test_custom_gcode(dir, data_dir);
     test_slice_cancel(dir);
     test_project_roundtrip(dir, data_dir);
     test_user_presets(data_dir);

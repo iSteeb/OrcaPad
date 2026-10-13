@@ -2553,6 +2553,181 @@ orca_result orca_plater_convert_units(orca_plater *plater, orca_object_id object
 
 #undef ORCAPAD_BEGIN
 
+// --- per-layer custom G-code (ABI v24) --------------------------------------
+
+static bool orcapad_custom_type(int32_t type, Slic3r::CustomGCode::Type *out) {
+    switch (type) {
+    case ORCA_CUSTOM_COLOR_CHANGE: *out = Slic3r::CustomGCode::Type::ColorChange; return true;
+    case ORCA_CUSTOM_PAUSE_PRINT: *out = Slic3r::CustomGCode::Type::PausePrint; return true;
+    case ORCA_CUSTOM_TOOL_CHANGE: *out = Slic3r::CustomGCode::Type::ToolChange; return true;
+    case ORCA_CUSTOM_TEMPLATE: *out = Slic3r::CustomGCode::Type::Template; return true;
+    case ORCA_CUSTOM_CUSTOM: *out = Slic3r::CustomGCode::Type::Custom; return true;
+    default: return false;
+    }
+}
+
+static const char *orcapad_custom_label(int32_t type) {
+    switch (type) {
+    case ORCA_CUSTOM_COLOR_CHANGE: return "Color change";
+    case ORCA_CUSTOM_PAUSE_PRINT: return "Pause print";
+    case ORCA_CUSTOM_TOOL_CHANGE: return "Tool change";
+    case ORCA_CUSTOM_TEMPLATE: return "Custom template";
+    default: return "Custom G-code";
+    }
+}
+
+void orca_custom_gcode_item_dispose(orca_custom_gcode_item *item) {
+    if (!item) return;
+    orca_owned_string_dispose(&item->color);
+    orca_owned_string_dispose(&item->extra);
+    *item = orca_custom_gcode_item{};
+}
+
+static Slic3r::CustomGCode::Info &orcapad_plate_custom_gcodes(orca_plater *plater) {
+    return plater->model.plates_custom_gcodes[plater->model.curr_plate_index];
+}
+
+orca_result orca_plater_custom_gcode_count(orca_plater *plater, int32_t *out_count) {
+    constexpr const char *operation = "orca_plater_custom_gcode_count";
+    if (out_count) *out_count = 0;
+    if (!plater)
+        return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation, "plater handle is null");
+    if (!out_count)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation, "output pointer is null");
+    return orcapad_guard(operation, [&]() -> orca_result {
+        const size_t count = orcapad_plate_custom_gcodes(plater).gcodes.size();
+        if (count > static_cast<size_t>(std::numeric_limits<int32_t>::max()))
+            return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
+                                "custom G-code count exceeds ABI range");
+        *out_count = static_cast<int32_t>(count);
+        return orcapad_ok();
+    });
+}
+
+orca_result orca_plater_custom_gcode_item(orca_plater *plater, int32_t index,
+                                          orca_custom_gcode_item *out_item) {
+    constexpr const char *operation = "orca_plater_custom_gcode_item";
+    if (out_item) *out_item = orca_custom_gcode_item{};
+    if (!plater)
+        return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation, "plater handle is null");
+    if (!out_item)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation, "output pointer is null");
+    return orcapad_guard(operation, [&]() -> orca_result {
+        const auto &gcodes = orcapad_plate_custom_gcodes(plater).gcodes;
+        if (index < 0 || static_cast<size_t>(index) >= gcodes.size())
+            return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation,
+                                "custom G-code item was not found");
+        const Slic3r::CustomGCode::Item &item = gcodes[static_cast<size_t>(index)];
+        int32_t type = -1;
+        for (int candidate = ORCA_CUSTOM_COLOR_CHANGE;
+             candidate <= ORCA_CUSTOM_CUSTOM; ++candidate) {
+            Slic3r::CustomGCode::Type mapped{};
+            if (orcapad_custom_type(candidate, &mapped) && mapped == item.type) {
+                type = candidate;
+                break;
+            }
+        }
+        if (type < 0)
+            return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
+                                "engine stored an unknown custom G-code type");
+        if (!orcapad_copy_string(item.color.c_str(), &out_item->color) ||
+            !orcapad_copy_string(item.extra.c_str(), &out_item->extra)) {
+            orca_custom_gcode_item_dispose(out_item);
+            return orcapad_fail(ORCA_STATUS_OUT_OF_MEMORY, operation,
+                                "could not allocate the custom G-code item");
+        }
+        out_item->print_z = item.print_z;
+        out_item->type = type;
+        out_item->extruder = item.extruder;
+        return orcapad_ok();
+    });
+}
+
+orca_result orca_plater_custom_gcode_add(orca_plater *plater, double print_z,
+                                         int32_t type, int32_t extruder,
+                                         const char *color, const char *extra,
+                                         orca_revision *out_revision) {
+    constexpr const char *operation = "orca_plater_custom_gcode_add";
+    if (out_revision) *out_revision = 0;
+    if (!plater)
+        return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation, "plater handle is null");
+    if (!color || !extra || !out_revision)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "color, extra or output pointer is null");
+    if (!std::isfinite(print_z) || print_z <= 0.0)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "print height must be positive");
+    Slic3r::CustomGCode::Type mapped{};
+    if (!orcapad_custom_type(type, &mapped))
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation, "unknown custom G-code type");
+    if (type == ORCA_CUSTOM_TEMPLATE)
+        return orcapad_fail(ORCA_STATUS_UNSUPPORTED_CAPABILITY, operation,
+                            "custom templates need the preset template G-code and are not supported yet");
+    if ((type == ORCA_CUSTOM_COLOR_CHANGE || type == ORCA_CUSTOM_TOOL_CHANGE) && extruder < 1)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "colour and tool changes need a 1-based extruder");
+    if (type == ORCA_CUSTOM_CUSTOM &&
+        std::string(extra).find_first_not_of(" \t\r\n") == std::string::npos)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "custom G-code text is empty");
+    return orcapad_guard(operation, [&]() -> orca_result {
+        if (!orcapad_revision_available(*plater))
+            return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
+                                "document revision is exhausted");
+        OrcapadMutation mutation(*plater, orcapad_custom_label(type));
+        Slic3r::CustomGCode::Info &info = orcapad_plate_custom_gcodes(plater);
+        auto &gcodes = info.gcodes;
+        Slic3r::CustomGCode::Item item;
+        item.print_z = print_z;
+        item.type = mapped;
+        item.extruder = extruder;
+        item.color = color;
+        item.extra = extra;
+        // replace an item at the same height, else sorted insert
+        auto at = std::lower_bound(gcodes.begin(), gcodes.end(), item);
+        if (at != gcodes.end() && std::abs(at->print_z - print_z) < 1e-6)
+            *at = item;
+        else
+            gcodes.insert(at, item);
+        info.mode = Slic3r::CustomGCode::Undef; // re-derive on next use
+        Slic3r::CustomGCode::check_mode_for_custom_gcode_per_print_z(info);
+        *out_revision = mutation.commit();
+        return orcapad_ok();
+    });
+}
+
+orca_result orca_plater_custom_gcode_delete(orca_plater *plater, double print_z,
+                                            orca_revision *out_revision) {
+    constexpr const char *operation = "orca_plater_custom_gcode_delete";
+    if (out_revision) *out_revision = 0;
+    if (!plater)
+        return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation, "plater handle is null");
+    if (!out_revision)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation, "output pointer is null");
+    if (!std::isfinite(print_z))
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "print height is not finite");
+    return orcapad_guard(operation, [&]() -> orca_result {
+        if (!orcapad_revision_available(*plater))
+            return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
+                                "document revision is exhausted");
+        Slic3r::CustomGCode::Info &info = orcapad_plate_custom_gcodes(plater);
+        auto &gcodes = info.gcodes;
+        Slic3r::CustomGCode::Item probe;
+        probe.print_z = print_z;
+        auto at = std::lower_bound(gcodes.begin(), gcodes.end(), probe);
+        if (at == gcodes.end() || std::abs(at->print_z - print_z) >= 1e-6)
+            return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation,
+                                "no custom G-code at that print height");
+        OrcapadMutation mutation(*plater, "Delete custom G-code");
+        gcodes.erase(at);
+        info.mode = Slic3r::CustomGCode::Undef;
+        Slic3r::CustomGCode::check_mode_for_custom_gcode_per_print_z(info);
+        *out_revision = mutation.commit();
+        return orcapad_ok();
+    });
+}
+
 orca_result orca_plater_object_copy(orca_plater *plater, orca_object_id object_id) {
     constexpr const char *operation = "orca_plater_object_copy";
     if (!plater)

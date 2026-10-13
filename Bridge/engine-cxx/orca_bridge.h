@@ -7,7 +7,7 @@ extern "C" {
 #endif
 
 /// Version of the C ABI contract in this header. Callers verify it at runtime.
-#define ORCA_BRIDGE_ABI_VERSION ((uint32_t)23)
+#define ORCA_BRIDGE_ABI_VERSION ((uint32_t)24)
 
 typedef int32_t orca_status_code;
 #define ORCA_STATUS_OK                     ((orca_status_code)0)
@@ -352,6 +352,36 @@ orca_result orca_plater_merge_objects(orca_plater *plater, const orca_object_id 
 orca_result orca_plater_convert_units(orca_plater *plater, orca_object_id object_id,
                                       int32_t conversion, orca_object_id *out_object_id,
                                       orca_revision *out_revision);
+/// Per-layer custom G-code (desktop layer-slider ticks, plate 0):
+/// Model::plates_custom_gcodes — colour changes, pauses, tool changes and
+/// raw custom G-code, consumed by slicing (tool ordering / M600 / pauses).
+#define ORCA_CUSTOM_COLOR_CHANGE ((int32_t)0)
+#define ORCA_CUSTOM_PAUSE_PRINT  ((int32_t)1)
+#define ORCA_CUSTOM_TOOL_CHANGE  ((int32_t)2)
+#define ORCA_CUSTOM_TEMPLATE     ((int32_t)3)
+#define ORCA_CUSTOM_CUSTOM       ((int32_t)4)
+typedef struct {
+    double             print_z;   // first layer printed with it applied
+    int32_t            type;      // ORCA_CUSTOM_*
+    int32_t            extruder;  // 1-based (colour / tool changes)
+    orca_owned_string  color;     // #rrggbb (colour changes; pause message)
+    orca_owned_string  extra;     // G-code text (custom), message (pause)
+} orca_custom_gcode_item;
+void orca_custom_gcode_item_dispose(orca_custom_gcode_item *item);
+orca_result orca_plater_custom_gcode_count(orca_plater *plater, int32_t *out_count);
+/// Item at `index`, in ascending print_z order.
+orca_result orca_plater_custom_gcode_item(orca_plater *plater, int32_t index,
+                                          orca_custom_gcode_item *out_item);
+/// Adds (or replaces the item at the same print_z within 1e-6). Colour and
+/// tool changes need extruder >= 1; TEMPLATE needs the preset template
+/// G-code and is a typed unsupported capability. One undo step.
+orca_result orca_plater_custom_gcode_add(orca_plater *plater, double print_z,
+                                         int32_t type, int32_t extruder,
+                                         const char *color, const char *extra,
+                                         orca_revision *out_revision);
+/// Removes the item at `print_z` (within 1e-6; NOT_FOUND when absent).
+orca_result orca_plater_custom_gcode_delete(orca_plater *plater, double print_z,
+                                            orca_revision *out_revision);
 /// Desktop clipboard: copies one object (volumes + instances). No document
 /// change, no undo step.
 orca_result orca_plater_object_copy(orca_plater *plater, orca_object_id object_id);
