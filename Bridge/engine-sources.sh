@@ -211,19 +211,44 @@ engine_sources() {
         "$DEPS/nlohmann"
 }
 
-# Fetches build-only third-party sources listed above (idempotent). Both
-# builds call this before engine_sources so neither can drift.
+# Fetches ALL build-only third-party sources listed above (idempotent;
+# single source of truth — the build scripts and the CI license gate both
+# call this, so neither can drift). Pins:
+#   cereal v1.3.0, boost.filesystem boost-1.90.0, boost.thread boost-1.90.0,
+#   NLopt v2.5.0 (OrcaSlicer's deps/NLopt/NLopt.cmake),
+#   libnoise 1.0 (SoftFever/Orca-deps-libnoise)
 engine_fetch_deps() {
     local ROOT
     ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+    mkdir -p "$ROOT/Bridge/cache"
+    if [ ! -f "$ROOT/Bridge/cache/cereal/include/cereal/access.hpp" ]; then
+        echo "==> fetching cereal v1.3.0 (OrcaSlicer's pin) into Bridge/cache/" >&2
+        git clone -q --depth 1 -b v1.3.0 https://github.com/USCiLab/cereal \
+            "$ROOT/Bridge/cache/cereal"
+    fi
+    [ -f "$ROOT/Bridge/cache/cereal/include/cereal/access.hpp" ] ||
+        { echo "FATAL: cereal fetch failed" >&2; return 1; }
+    if [ ! -f "$ROOT/Bridge/cache/boost-filesystem-1.90/src/path.cpp" ]; then
+        echo "==> fetching boost.filesystem 1.90 sources into Bridge/cache/" >&2
+        git clone -q --depth 1 -b boost-1.90.0 https://github.com/boostorg/filesystem \
+            "$ROOT/Bridge/cache/boost-filesystem-1.90"
+    fi
+    [ -f "$ROOT/Bridge/cache/boost-filesystem-1.90/src/path.cpp" ] ||
+        { echo "FATAL: boost.filesystem fetch failed" >&2; return 1; }
     if [ ! -f "$ROOT/Bridge/cache/boost-thread-1.90/src/pthread/thread.cpp" ]; then
         echo "==> fetching boost.thread 1.90 sources into Bridge/cache/" >&2
-        mkdir -p "$ROOT/Bridge/cache"
         git clone -q --depth 1 -b boost-1.90.0 https://github.com/boostorg/thread \
             "$ROOT/Bridge/cache/boost-thread-1.90"
     fi
     [ -f "$ROOT/Bridge/cache/boost-thread-1.90/src/pthread/thread.cpp" ] ||
         { echo "FATAL: boost.thread fetch failed" >&2; return 1; }
+    if [ ! -f "$ROOT/Bridge/cache/Orca-deps-libnoise/src/noisegen.cpp" ]; then
+        echo "==> fetching libnoise 1.0 (SoftFever's Orca-deps pin) into Bridge/cache/" >&2
+        git clone -q --depth 1 -b 1.0 https://github.com/SoftFever/Orca-deps-libnoise \
+            "$ROOT/Bridge/cache/Orca-deps-libnoise"
+    fi
+    [ -f "$ROOT/Bridge/cache/Orca-deps-libnoise/src/noisegen.cpp" ] ||
+        { echo "FATAL: libnoise fetch failed" >&2; return 1; }
     if [ ! -f "$ROOT/Bridge/cache/nlopt/src/api/nlopt-in.hpp" ]; then
         echo "==> fetching NLopt v2.5.0 (OrcaSlicer's pin) into Bridge/cache/" >&2
         git clone -q --depth 1 -b v2.5.0 https://github.com/stevengj/nlopt \
