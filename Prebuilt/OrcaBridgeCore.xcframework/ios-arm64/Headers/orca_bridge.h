@@ -7,7 +7,7 @@ extern "C" {
 #endif
 
 /// Version of the C ABI contract in this header. Callers verify it at runtime.
-#define ORCA_BRIDGE_ABI_VERSION ((uint32_t)27)
+#define ORCA_BRIDGE_ABI_VERSION ((uint32_t)28)
 
 typedef int32_t orca_status_code;
 #define ORCA_STATUS_OK                     ((orca_status_code)0)
@@ -875,6 +875,25 @@ orca_result orca_slice_to_gcode(const char *stl_path, const char *gcode_path,
                                 orca_progress_fn progress, void *ctx,
                                 orca_slice_job *job,
                                 orca_slice_report *out_report);
+
+/// Desktop "Slice all" (ABI v27): slices every non-empty plate in order and
+/// concatenates them into ONE G-code, each plate wrapped in
+/// `; ORCA_PLATE ... begin` / `end` marker lines (unknown comments for every
+/// loader, including desktop OrcaSlicer and OrcaPad's own preview). The
+/// per-plate `plate_name` config placeholder carries the plate's name;
+/// machine start/end G-code run per plate, exactly like desktop's plate-by-
+/// plate background slicing. Empty plates are skipped; every plate empty is
+/// ORCA_STATUS_INVALID_MODEL. Progress is scaled across all plates; the
+/// report aggregates warnings, time and bytes.
+orca_result orca_plater_slice_all_to_gcode(orca_plater *plater,
+                                           const char *gcode_path,
+                                           orca_progress_fn progress, void *ctx,
+                                           orca_slice_job *job,
+                                           orca_slice_report *out_report);
+orca_result orca_plater_slice_all_to_gcode_with_presets(
+    orca_plater *plater, orca_presets *presets, const char *gcode_path,
+    orca_progress_fn progress, void *ctx, orca_slice_job *job,
+    orca_slice_report *out_report);
 
 orca_result orca_plater_slice_to_gcode(orca_plater *plater,
                                        const char *gcode_path,

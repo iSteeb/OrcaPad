@@ -162,12 +162,12 @@ final class GcodePreviewStore {
         return remaining
     }
 
-    func load(url: URL, identity: String) async {
+    func load(url: URL, identity: String, origin: SIMD3<Float> = .zero) async {
         guard !isLoading, loadedIdentity != identity else { return }
         isLoading = true
         phase = .loading
         let result = await BackgroundWork.run(operation: "load gcode preview") {
-            try EngineGcode.loadToolpath(path: url.path)
+            try EngineGcode.loadToolpath(path: url.path, origin: origin)
         }
         isLoading = false
         switch result {

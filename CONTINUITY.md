@@ -76,6 +76,15 @@
 
 ## PROGRESS
 
+- [2026-10-14 CODE] ABI v28 + C9b (slice-all, parity 44 done): engine
+  plate context fixed on EVERY slice — upstream `Print::m_origin` is
+  UNINITIALIZED (desktop always calls PartPlate::set_print; our Bridge
+  now sets origin/index/name; per-plate G-code is plate-relative),
+  `orca_plater_slice_all_to_gcode[_with_presets]` → one G-code with
+  `; ORCA_PLATE index/name begin/end` markers, aggregated report,
+  cross-plate progress; Prepare Slice menu "Slice All Plates"; preview
+  shifts single-plate results by the plate origin. plate.multi-plate ✅.
+  UNCONFIRMED on device.
 - [2026-10-14 CODE] ABI v27 + C9 (plates + open-in, 51,326 host checks
   PASS, archive 312 TUs, build/audit/parity green, 36% parity, 43 done):
   Bridge plate grid (ceil-sqrt cols, 1.2x stride, max 36) with derived

@@ -18,6 +18,10 @@ struct CompletedSlice: Sendable {
     let presetSelection: PresetSelection?
     let outputURL: URL
     let result: SliceResult
+    /// World origin of the plate this G-code belongs to (nil for a combined
+    /// slice-all file): the engine emits plate-RELATIVE G-code (desktop
+    /// PartPlate::set_print parity), so the preview shifts it back.
+    let plateOrigin: SIMD3<Float>?
 }
 
 @MainActor
@@ -126,6 +130,134 @@ final class SliceService {
             )
         }
 
+        finish(
+            result: result,
+            input: input,
+            jobID: jobID,
+            outputURL: outputURL,
+            presetSelection: presetSelection,
+            instanceCount: instanceCount,
+            plateOrigin: currentPlateOrigin(input)
+        )
+    }
+
+    /// Desktop "Slice all": every non-empty plate in order into ONE G-code
+    /// file with `; ORCA_PLATE` markers between the plate sections.
+    func runAll(document: DocumentStore, presets: PresetStore) async {
+        guard let input = document.beginSlicing() else {
+            status.report(.slice, "slice blocked: document is not ready or is busy")
+            return
+        }
+        defer { document.finishSlicing() }
+
+        let plateCount = input.snapshot.plates.count
+        let sceneName = input.snapshot.objects.first?.name.isEmpty == false
+            ? input.snapshot.objects[0].name
+            : "plater"
+        let outputURL: URL
+        do {
+            outputURL = try EnginePaths.gcodeOutputURL(sceneName: sceneName)
+        } catch {
+            let failure = AppFailure.wrap(
+                error,
+                operation: "prepare G-code output"
+            )
+            lastFailure = failure
+            status.report(.slice, failure: failure)
+            return
+        }
+        let job: SliceJob
+        do {
+            job = try SliceJob()
+        } catch {
+            let failure = AppFailure.wrap(error, operation: "create slice job")
+            lastFailure = failure
+            status.report(.slice, failure: failure)
+            return
+        }
+        do {
+            let bed = presets.printVolume.map(EngineBed.init) ?? EngineBed.fallback
+            let rgba = try ThumbnailService.render(scene: input.snapshot, bed: bed)
+            try job.setThumbnail(size: ThumbnailService.size, rgba: rgba)
+        } catch {
+            status.report(.slice, failure: AppFailure.wrap(error, operation: "render G-code thumbnail"))
+        }
+        nextJobID += 1
+        let jobID = nextJobID
+        activeJobID = jobID
+        activeJob = job
+        progress = SliceProgress(percent: 0, message: "starting")
+        lastFailure = nil
+        let instanceCount = input.snapshot.objects.reduce(0) {
+            $0 + $1.instances.count
+        }
+        let presetEngine = presets.engineForSlicing
+        let presetSelection = presetEngine == nil ? nil : presets.selection
+        let presetNote = presetEngine == nil
+            ? " (defaults — presets unavailable)"
+            : ""
+        status.report(
+            .slice,
+            "\(plateCount) plate(s), \(instanceCount) instance(s): slicing all…\(presetNote)"
+        )
+        let progressCallback: @Sendable (Int, String) -> Void = {
+            [weak self] percent, message in
+            Task { @MainActor in
+                guard let self, self.activeJobID == jobID else { return }
+                self.progress = SliceProgress(
+                    percent: percent,
+                    message: message
+                )
+                self.status.update(
+                    .slice,
+                    "\(plateCount) plate(s): \(percent)% \(message)"
+                )
+            }
+        }
+        let result = await BackgroundWork.run(operation: "slice all plates") {
+            if let presetEngine {
+                return try input.plater.sliceAll(
+                    to: outputURL.path,
+                    presets: presetEngine,
+                    job: job,
+                    progress: progressCallback
+                )
+            }
+            return try input.plater.sliceAll(
+                to: outputURL.path,
+                job: job,
+                progress: progressCallback
+            )
+        }
+
+        finish(
+            result: result,
+            input: input,
+            jobID: jobID,
+            outputURL: outputURL,
+            presetSelection: presetSelection,
+            instanceCount: instanceCount,
+            plateOrigin: nil  // combined file: marker-separated plate sections
+        )
+    }
+
+    private func currentPlateOrigin(_ input: SliceInput) -> SIMD3<Float>? {
+        let scene = input.snapshot
+        guard scene.currentPlate >= 0, scene.currentPlate < scene.plates.count else {
+            return nil
+        }
+        return scene.plates[scene.currentPlate].origin
+    }
+
+    private func finish(
+        result: Result<SliceResult, AppFailure>,
+        input: SliceInput,
+        jobID: UInt64,
+        outputURL: URL,
+        presetSelection: PresetSelection?,
+        instanceCount: Int,
+        plateOrigin: SIMD3<Float>?
+    ) {
         activeJobID = nil
         activeJob = nil
         progress = nil
@@ -136,7 +268,8 @@ final class SliceService {
                 sourceRevision: input.snapshot.revision,
                 presetSelection: presetSelection,
                 outputURL: outputURL,
-                result: sliceResult
+                result: sliceResult,
+                plateOrigin: plateOrigin
             )
             lastOutcome = outcome
             let minutes = Int(sliceResult.timeEstimateSeconds / 60)

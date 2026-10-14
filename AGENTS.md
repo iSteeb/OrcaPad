@@ -111,6 +111,17 @@ contract test literal in the same commit)**
   slicing filters to the selected plate, and 3MF projects round-trip plate
   names/locks/membership. The selected plate is session state (like the
   camera), not undoable.
+- Every slice sets the engine plate context BEFORE running (ABI v28,
+  desktop `PartPlate::set_print` parity): `Print::set_plate_origin`
+  (the plate's world origin — upstream leaves `m_origin` UNINITIALIZED;
+  garbage coordinates otherwise), `set_plate_index`, and per-plate
+  `set_plate_name` ({plate_name} G-code placeholder). Per-plate G-code is
+  therefore PLATE-RELATIVE (plate N's section starts near bed origin);
+  `orca_plater_slice_all_to_gcode[_with_presets]` slices every non-empty
+  plate in order into ONE file wrapped in `; ORCA_PLATE index=… name=…
+  begin/end` markers (unknown comments to every loader) with an aggregated
+  report and cross-plate-scaled progress; the client shifts the preview
+  back by the plate origin when loading a single-plate result.
 - Presets: entries expose engine vendor + `is_compatible`; overrides are
   written to the edited preset of a kind (`full_config()` merges edited
   presets, so slices consume them); edited vs system dumps detect changes.

@@ -4507,12 +4507,29 @@ static bool orcapad_fill_report(const std::vector<OrcapadWarning> &warnings,
     return true;
 }
 
+/// Aggregates a multi-plate slice-all run (desktop slices plate by plate
+/// into per-plate files; OrcaPad concatenates with markers).
+struct OrcapadSliceAccumulator {
+    std::vector<OrcapadWarning> warnings;
+    double time_estimate_s = 0.0;
+    int64_t gcode_bytes = 0;
+};
+
 static orca_result orcapad_run_print(const char *operation,
                                      Slic3r::Print &print,
                                      const char *gcode_path,
                                      orca_progress_fn progress, void *ctx,
                                      orca_slice_job *job,
-                                     orca_slice_report *out_report) {
+                                     orca_slice_report *out_report,
+                                     OrcapadSliceAccumulator *accumulate = nullptr);
+
+static orca_result orcapad_run_print(const char *operation,
+                                     Slic3r::Print &print,
+                                     const char *gcode_path,
+                                     orca_progress_fn progress, void *ctx,
+                                     orca_slice_job *job,
+                                     orca_slice_report *out_report,
+                                     OrcapadSliceAccumulator *accumulate) {
     return orcapad_guard(operation, [&]() -> orca_result {
         OrcapadJobRegistration registration(job, print);
         if (print.canceled())
@@ -4603,12 +4620,23 @@ static orca_result orcapad_run_print(const char *operation,
                                         std::to_string(conflict->layer)});
             }
 
-            if (!orcapad_fill_report(
+            if (accumulate) {
+                // slice-all: fold this plate into the aggregate; the final
+                // report is built once, after every plate ran.
+                accumulate->warnings.insert(
+                    accumulate->warnings.end(),
+                    std::make_move_iterator(warnings.begin()),
+                    std::make_move_iterator(warnings.end()));
+                accumulate->time_estimate_s +=
+                    processor_result.print_statistics.modes.front().time;
+                accumulate->gcode_bytes += static_cast<int64_t>(file_status.st_size);
+            } else if (!orcapad_fill_report(
                     warnings, processor_result.print_statistics.modes.front().time,
-                    static_cast<int64_t>(file_status.st_size), out_report))
+                    static_cast<int64_t>(file_status.st_size), out_report)) {
                 return orcapad_fail(ORCA_STATUS_OUT_OF_MEMORY, operation,
                                     "could not allocate slice report");
-            if (progress) progress(100, "done", ctx);
+            }
+            if (progress && !accumulate) progress(100, "done", ctx);
             return orcapad_ok();
         } catch (const Slic3r::CanceledException &) {
             return orcapad_fail(ORCA_STATUS_CANCELLED, operation,
@@ -4652,16 +4680,20 @@ orca_result orca_slice_to_gcode(const char *stl_path, const char *gcode_path,
     });
 }
 
-/// Slicing sees only the SELECTED plate (desktop per-plate slicing): this
-/// builds a filtered model copy keeping exactly the current plate's
-/// instances (meshes are shared; ids are preserved). Typed INVALID_MODEL
-/// when the selected plate is empty.
+/// Slicing sees only ONE plate (desktop per-plate slicing): this builds a
+/// filtered model copy keeping exactly that plate's instances (meshes are
+/// shared; ids are preserved). Typed INVALID_MODEL when the plate is empty.
 static orca_result orcapad_build_plate_model(orca_plater &plater,
                                              const char *operation,
+                                             int32_t plate_index,
                                              Slic3r::Model &out) {
     if (plater.plates.empty())
         return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
                             "document has no plates");
+    if (plate_index < 0 ||
+        plate_index >= static_cast<int32_t>(plater.plates.size()))
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "plate index is out of range");
     out = plater.model;
     std::vector<Slic3r::ObjectID> empty;
     size_t kept_instances = 0;
@@ -4674,7 +4706,7 @@ static orca_result orcapad_build_plate_model(orca_plater &plater,
                 plater, object_id,
                 static_cast<orca_instance_id>(instance->id().id),
                 orcapad_instance_box(*instance));
-            if (plate != plater.current_plate)
+            if (plate != plate_index)
                 object->delete_instance(index);
             else
                 ++kept_instances;
@@ -4712,11 +4744,15 @@ orca_result orca_plater_slice_to_gcode(orca_plater *plater,
         if (progress) progress(1, "applying plater", ctx);
         Slic3r::Model plate_model;
         const orca_result filtered =
-            orcapad_build_plate_model(*plater, operation, plate_model);
+            orcapad_build_plate_model(*plater, operation, plater->current_plate, plate_model);
         if (filtered.code != ORCA_STATUS_OK) return filtered;
         Slic3r::Print print;
         print.apply(plate_model, std::move(config));
         print.is_BBL_printer() = false;
+        // Desktop PartPlate::set_print parity: plate origin + index.
+        print.set_plate_origin(
+            orcapad_plate_origin(*plater, plater->current_plate));
+        print.set_plate_index(plater->current_plate);
         return orcapad_run_print(operation, print, gcode_path, progress, ctx,
                                  job, out_report);
     });
@@ -4747,14 +4783,210 @@ orca_result orca_plater_slice_to_gcode_with_presets(
         if (progress) progress(1, "applying presets", ctx);
         Slic3r::Model plate_model;
         const orca_result filtered =
-            orcapad_build_plate_model(*plater, operation, plate_model);
+            orcapad_build_plate_model(*plater, operation, plater->current_plate, plate_model);
         if (filtered.code != ORCA_STATUS_OK) return filtered;
         Slic3r::Print print;
         print.apply(plate_model, std::move(config));
         print.is_BBL_printer() = presets->bundle->is_bbl_vendor();
+        // Desktop PartPlate::set_print parity: plate origin + index.
+        print.set_plate_origin(
+            orcapad_plate_origin(*plater, plater->current_plate));
+        print.set_plate_index(plater->current_plate);
         return orcapad_run_print(operation, print, gcode_path, progress, ctx,
                                  job, out_report);
     });
+}
+
+// --- slice all plates (ABI v27) ---------------------------------------------
+
+/// Scales one plate's 0..100 progress into the slice-all range.
+struct OrcapadPlateProgressState {
+    orca_progress_fn progress;
+    void *ctx;
+    int32_t plate_position;
+    int32_t plate_count;
+};
+
+static void orcapad_plate_progress_trampoline(int32_t percent, const char *message,
+                                               void *context) {
+    auto *state = static_cast<OrcapadPlateProgressState *>(context);
+    if (!state || !state->progress) return;
+    const double span = 100.0 / static_cast<double>(state->plate_count);
+    const double local = percent < 0 ? 0.0 : static_cast<double>(percent);
+    const int32_t global = static_cast<int32_t>(
+        std::lround(state->plate_position * span + local * span / 100.0));
+    state->progress(std::clamp(global, 0, 99), message, state->ctx);
+}
+
+/// Shared slice-all core: presets null = the preset-free overlay config.
+static orca_result orcapad_slice_all(orca_plater *plater,
+                                     orca_presets *presets,
+                                     const char *gcode_path,
+                                     orca_progress_fn progress, void *ctx,
+                                     orca_slice_job *job,
+                                     orca_slice_report *out_report) {
+    constexpr const char *operation = "orca_plater_slice_all_to_gcode";
+    if (!plater)
+        return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation,
+                            "plater handle is null");
+    if (!gcode_path || !gcode_path[0] || !out_report)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "path is empty or output pointer is null");
+    if (plater->model.objects.empty())
+        return orcapad_fail(ORCA_STATUS_INVALID_MODEL, operation,
+                            "document contains no model object");
+    return orcapad_guard(operation, [&]() -> orca_result {
+        // 1) the plates that carry objects, in order
+        std::vector<int32_t> targets;
+        for (int32_t plate_index = 0;
+             plate_index < static_cast<int32_t>(plater->plates.size());
+             ++plate_index) {
+            bool any = false;
+            for (const Slic3r::ModelObject *object : plater->model.objects)
+                for (const Slic3r::ModelInstance *instance : object->instances)
+                    if (orcapad_instance_plate(
+                            *plater,
+                            static_cast<orca_object_id>(object->id().id),
+                            static_cast<orca_instance_id>(instance->id().id),
+                            orcapad_instance_box(*instance)) == plate_index)
+                        any = true;
+            if (any) targets.push_back(plate_index);
+        }
+        if (targets.empty())
+            return orcapad_fail(ORCA_STATUS_INVALID_MODEL, operation,
+                                "every plate is empty");
+
+        // 2) truncate the destination once; plates append in order
+        FILE *output = fopen(gcode_path, "wb");
+        if (!output)
+            return orcapad_fail(ORCA_STATUS_IO_FAILURE, operation,
+                                "could not create the output G-code");
+        fclose(output);
+
+        OrcapadSliceAccumulator aggregate;
+        const std::string base(gcode_path);
+        for (size_t position = 0; position < targets.size(); ++position) {
+            const int32_t plate_index = targets[position];
+            const OrcapadPlate &plate =
+                plater->plates[static_cast<size_t>(plate_index)];
+            if (progress) {
+                char label[128];
+                std::snprintf(label, sizeof label, "slicing plate %d/%d: %s",
+                              static_cast<int>(position + 1),
+                              static_cast<int>(targets.size()), plate.name.c_str());
+                progress(static_cast<int32_t>(position * 100 / targets.size()),
+                         label, ctx);
+            }
+
+            Slic3r::Model plate_model;
+            const orca_result filtered = orcapad_build_plate_model(
+                *plater, operation, plate_index, plate_model);
+            if (filtered.code != ORCA_STATUS_OK) return filtered;
+
+            Slic3r::DynamicPrintConfig config = presets
+                ? presets->bundle->full_config()
+                : Slic3r::DynamicPrintConfig::full_print_config();
+            if (!presets) orcapad_config_overlays(config);
+
+            Slic3r::Print print;
+            print.apply(plate_model, std::move(config));
+            print.is_BBL_printer() = presets ? presets->bundle->is_bbl_vendor() : false;
+            // Desktop PartPlate::set_print: every plate's Print carries the
+            // plate's world origin (its m_origin is UNINITIALIZED otherwise)
+            // and index; the G-code comes out plate-relative.
+            print.set_plate_origin(orcapad_plate_origin(*plater, plate_index));
+            print.set_plate_index(plate_index);
+            // Desktop "Name of the plate sliced" (PrintBase::m_plate_name —
+            // it flows into the {plate_name} G-code placeholder).
+            print.set_plate_name(plate.name);
+
+            const std::string temp =
+                base + ".plate" + std::to_string(plate_index) + ".tmp";
+            OrcapadPlateProgressState state{
+                progress, ctx,
+                static_cast<int32_t>(position),
+                static_cast<int32_t>(targets.size())};
+            const orca_result sliced = orcapad_run_print(
+                operation, print, temp.c_str(),
+                progress ? orcapad_plate_progress_trampoline : nullptr,
+                progress ? &state : nullptr, job, out_report, &aggregate);
+            if (sliced.code != ORCA_STATUS_OK) {
+                std::remove(temp.c_str());
+                return sliced;
+            }
+
+            // marker + plate G-code + marker
+            std::string error;
+            [&] {
+                FILE *out = fopen(gcode_path, "ab");
+                if (!out) {
+                    error = "could not reopen the output G-code";
+                    return;
+                }
+                fprintf(out, "; ORCA_PLATE index=%d total=%d name=\"%s\" begin\n",
+                        plate_index + 1, static_cast<int>(targets.size()),
+                        plate.name.c_str());
+                FILE *in = fopen(temp.c_str(), "rb");
+                if (!in) {
+                    fclose(out);
+                    error = "a plate's temporary G-code disappeared";
+                    return;
+                }
+                std::vector<char> buffer(1 << 16);
+                size_t read = 0;
+                while ((read = fread(buffer.data(), 1, buffer.size(), in)) > 0)
+                    if (fwrite(buffer.data(), 1, read, out) != read) {
+                        error = "could not append a plate's G-code";
+                        break;
+                    }
+                const bool read_failed = ferror(in) != 0;
+                fclose(in);
+                fprintf(out, "; ORCA_PLATE index=%d end\n", plate_index + 1);
+                if (fclose(out) != 0 && error.empty())
+                    error = "could not finalize the output G-code";
+                if (error.empty() && read_failed)
+                    error = "could not read a plate's temporary G-code";
+            }();
+            std::remove(temp.c_str());
+            if (!error.empty())
+                return orcapad_fail(ORCA_STATUS_IO_FAILURE, operation,
+                                    error.c_str());
+        }
+
+        struct stat status;
+        if (stat(gcode_path, &status) != 0)
+            return orcapad_fail(ORCA_STATUS_IO_FAILURE, operation,
+                                "combined G-code could not be inspected");
+        if (!orcapad_fill_report(aggregate.warnings, aggregate.time_estimate_s,
+                                 static_cast<int64_t>(status.st_size), out_report))
+            return orcapad_fail(ORCA_STATUS_OUT_OF_MEMORY, operation,
+                                "could not allocate slice report");
+        if (progress) progress(100, "done", ctx);
+        return orcapad_ok();
+    });
+}
+
+orca_result orca_plater_slice_all_to_gcode(orca_plater *plater,
+                                           const char *gcode_path,
+                                           orca_progress_fn progress, void *ctx,
+                                           orca_slice_job *job,
+                                           orca_slice_report *out_report) {
+    if (out_report) *out_report = orca_slice_report{};
+    return orcapad_slice_all(plater, nullptr, gcode_path, progress, ctx, job,
+                             out_report);
+}
+
+orca_result orca_plater_slice_all_to_gcode_with_presets(
+    orca_plater *plater, orca_presets *presets, const char *gcode_path,
+    orca_progress_fn progress, void *ctx, orca_slice_job *job,
+    orca_slice_report *out_report) {
+    if (out_report) *out_report = orca_slice_report{};
+    if (!presets)
+        return orcapad_fail(ORCA_STATUS_INVALID_HANDLE,
+                            "orca_plater_slice_all_to_gcode",
+                            "presets handle is null");
+    return orcapad_slice_all(plater, presets, gcode_path, progress, ctx, job,
+                             out_report);
 }
 
 // --- physical printers -----------------------------------------------------

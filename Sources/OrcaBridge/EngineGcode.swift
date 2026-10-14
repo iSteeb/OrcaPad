@@ -106,7 +106,12 @@ public enum EngineGcode {
     /// Loads and parses a G-code file through the upstream processor and
     /// returns the compact toolpath. Blocking and CPU-heavy: run off the main
     /// thread (the engine mutex serializes it against other engine work).
-    public static func loadToolpath(path: String) throws -> GcodeToolpath {
+    /// `origin` shifts X/Y/Z of every segment (plate-relative slice output
+    /// is placed back at its world position for the viewer).
+    public static func loadToolpath(
+        path: String,
+        origin: SIMD3<Float> = .zero
+    ) throws -> GcodeToolpath {
         try BridgeResult.validateABI(operation: "load gcode")
         var handle: OpaquePointer?
         try BridgeResult.consume(
@@ -146,14 +151,14 @@ public enum EngineGcode {
             let rawSegment = raw.segments[index]
             segments.append(ToolpathSegment(
                 start: SIMD3(
-                    rawSegment.start.0,
-                    rawSegment.start.1,
-                    rawSegment.start.2
+                    rawSegment.start.0 + origin.x,
+                    rawSegment.start.1 + origin.y,
+                    rawSegment.start.2 + origin.z
                 ),
                 end: SIMD3(
-                    rawSegment.end.0,
-                    rawSegment.end.1,
-                    rawSegment.end.2
+                    rawSegment.end.0 + origin.x,
+                    rawSegment.end.1 + origin.y,
+                    rawSegment.end.2 + origin.z
                 ),
                 feedrate: rawSegment.feedrate,
                 width: rawSegment.width,

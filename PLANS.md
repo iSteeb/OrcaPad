@@ -137,7 +137,15 @@ Device, each tab a clean feature module over the same stores.
       overflow fills new plates, slicing targets the selected plate,
       3MF projects round-trip plates, inactive plates drawn dimmed beside
       the bed; Open-in from Files/Mail (document types, models import /
-      3MF opens as project). Remaining: "Select All Plates"/slice-all.
+      3MF opens as project).
+- [x] C9b: slice-all + engine plate context (ABI v28) — every slice sets
+      the upstream plate origin/index/name before running (fixes latent
+      uninitialized-`m_origin` corruption; G-code is plate-relative like
+      desktop), `orca_plater_slice_all_to_gcode[_with_presets]` emits one
+      marker-wrapped file across non-empty plates with aggregated report
+      + scaled progress, Prepare Slice menu gains "Slice All Plates",
+      preview shifts single-plate results back by the plate origin.
+      `plate.multi-plate` ✅.
 - [x] Programmatic parity checker (`Bridge/tools/parity-check.py`): desktop
       surface extracted from upstream (551 items, 14 surfaces), manifest
       evidence verified, PARITY.md generated + commit-gated

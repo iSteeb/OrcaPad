@@ -47,7 +47,11 @@ struct PreviewTabView: View {
             guard let outcome = environment.slicing.lastOutcome,
                   consumedSliceJob != outcome.jobID else { return }
             consumedSliceJob = outcome.jobID
-            await store.load(url: outcome.outputURL, identity: "slice:\(outcome.jobID)")
+            await store.load(
+                url: outcome.outputURL,
+                identity: "slice:\(outcome.jobID)",
+                origin: outcome.plateOrigin ?? .zero
+            )
             frameRequest += 1
         }
         .fileImporter(

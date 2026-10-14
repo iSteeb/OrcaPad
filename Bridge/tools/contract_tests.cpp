@@ -276,7 +276,7 @@ static void test_md5_shim() {
 
 static void test_abi_version() {
     CHECK_EQ(orca_bridge_abi_version(), ORCA_BRIDGE_ABI_VERSION);
-    CHECK_EQ(ORCA_BRIDGE_ABI_VERSION, 27);
+    CHECK_EQ(ORCA_BRIDGE_ABI_VERSION, 28);
 }
 
 struct ProgressRecord {
@@ -1701,8 +1701,9 @@ static void test_plates(const std::string &dir, const std::string &data_dir) {
         expect_ok(g16, "slice plate 2");
         orca_slice_report_dispose(&report);
         const auto range = gcode_x_range(gcode_p2.c_str());
-        // only b (x 330..350): inside plate 1's 240..440 box
-        CHECK(range.first >= 240.0 && range.second <= 440.0);
+        // only b — plate-RELATIVE (desktop PartPlate::set_print parity: the
+        // engine shifts by the plate origin; world 330..350 - 240 = 90..110)
+        CHECK(range.first >= 0.0 && range.second <= 200.0);
     }
     GUARD(g17, orca_plater_plate_select(plater, plate1, &snap));
     expect_ok(g17, "select plate 1 for slicing");
@@ -1720,9 +1721,41 @@ static void test_plates(const std::string &dir, const std::string &data_dir) {
         // only a (x 90..110) — and NEVER b
         CHECK(range.first >= 0.0 && range.second <= 200.0);
     }
+    // --- slice all: one G-code, both plates, markers in order -------------
+    {
+        const std::string all = dir + "/plates-all.gcode";
+        ProgressRecord progress;
+        orca_slice_report report;
+        GUARD(sa0, orca_plater_slice_all_to_gcode(
+                      plater, all.c_str(), progress_trampoline, &progress,
+                      nullptr, &report));
+        expect_ok(sa0, "slice all plates");
+        const auto range = gcode_x_range(all.c_str());
+        // plate-RELATIVE G-code: BOTH plates carry the same relative cube
+        // (world 90..110 on plate 0; world 330..350 - 240 on plate 1)
+        CHECK(range.first >= 50.0 && range.second <= 200.0);
+        CHECK(report.time_estimate_s > 0.0);
+        CHECK(report.gcode_bytes > 0);
+        // markers: begin 1, end 1, begin 2, end 2 — in order, empty plate 3
+        // (deleted earlier) contributes nothing
+        FILE *file = fopen(all.c_str(), "r");
+        CHECK(file != nullptr);
+        std::string contents;
+        char line[512];
+        while (file && fgets(line, sizeof line, file)) contents += line;
+        if (file) fclose(file);
+        const size_t b1 = contents.find("; ORCA_PLATE index=1 total=2 name=\"Plate 1\" begin");
+        const size_t e1 = contents.find("; ORCA_PLATE index=1 end");
+        const size_t b2 = contents.find("; ORCA_PLATE index=2 total=2 name=\"Benchy plate\" begin");
+        const size_t e2 = contents.find("; ORCA_PLATE index=2 end");
+        CHECK(b1 != std::string::npos && e1 != std::string::npos &&
+              b2 != std::string::npos && e2 != std::string::npos);
+        CHECK(b1 < e1 && e1 < b2 && b2 < e2);
+        CHECK(contents.find("index=3") == std::string::npos);
+        CHECK(progress.max_percent.load() >= 99);
+        orca_slice_report_dispose(&report);
+    }
     orca_plater_free(plater);
-
-    // --- empty plate slicing is a typed failure ----------------------------
     {
         orca_plater *empty = nullptr;
         GUARD(n0, orca_plater_new(&empty));

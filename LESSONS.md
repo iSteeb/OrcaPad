@@ -293,6 +293,23 @@ in ~/xtool-cheatsheet.md — link, don't duplicate.)
   the revision, and undo/redo must NOT restore it (only clamp its index).
   Documents with zero plates are an internal-invariant failure — every
   plater is born with one.
+- **Set the upstream plate context before every slice** (ABI v28 lesson):
+  `Print::m_origin` (plate origin) has NO default initializer upstream — a
+  fresh Print carries stack garbage, and desktop always calls
+  `PartPlate::set_print → set_plate_origin` first. We saw NaN → `int64_min`
+  G-code coordinates (`X-9223372036854775.808`, NaN→int32 in M73 times)
+  that appeared/disappeared with innocent-looking frame changes (an extra
+  never-dereferenced function argument!). `set_plate_origin(index)`+
+  `set_plate_name` are now mandatory in every Bridge slice path; per-plate
+  G-code is plate-relative and the client preview shifts it back.
+- Diagnose engine corruption with a FAST standalone probe (link against
+  `Bridge/build-host/libengine-host.a`, ~20 s iterations), never by rerunning
+  the full host suite per hypothesis — a 6-minute gate per guess cost 45 min
+  once (and a corrupted run can hang later arrange tests in nlopt).
+- UBSan on the closure is a one-off `build-host-tests.sh` clone with
+  `-fsanitize=undefined,float-cast-overflow`: it flagged our NaN→int64
+  conversions AND upstream's own `WallToolPaths.cpp:693` invalid bool load
+  (upstream issue material, not patchable here).
 - All-or-nothing edit scripts lose EVERY edit when one anchor no longer
   matches (e.g. an edit that already landed on a previous run). Make each
   scripted edit idempotent (skip when the new text is present) or apply one

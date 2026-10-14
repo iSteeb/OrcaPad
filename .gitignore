@@ -20,6 +20,7 @@ DerivedData/
 # engine/Bridge cross-build outputs (incremental cache)
 /Bridge/build-ios/
 /Bridge/build-host/
+/Bridge/build-host-ubsan/
 
 # Python bytecode (Distribution/*.py, Bridge/tools/*.py)
 __pycache__/

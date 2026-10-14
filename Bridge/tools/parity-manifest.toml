@@ -529,8 +529,8 @@ reason = "SLA remnants; OrcaSlicer ships FFF only"
 [[feature]]
 id = "plate.multi-plate"
 area = "plate"
-title = "Multiple plates (add / delete / select / lock / name / reorder / duplicate)"
-status = "partial"
+title = "Multiple plates (add / delete / select / lock / name / reorder / duplicate / slice all)"
+status = "done"
 desktop = ["toolbar:addplate", "plate:Remove current plate (if not last one)", "plate:Lock current plate",
            "plate:Unlock current plate", "plate:Edit current plate name", "plate:Move plate to the front",
            "menu:Duplicate Current Plate", "context:Delete Plate", "context:Edit Plate Name", "context:Unlock",
@@ -539,11 +539,10 @@ evidence = ["abi:orca_plater_plate_add", "abi:orca_plater_plate_delete",
             "abi:orca_plater_plate_rename", "abi:orca_plater_plate_lock",
             "abi:orca_plater_plate_move_to_front", "abi:orca_plater_plate_duplicate",
             "abi:orca_plater_plate_select", "abi:orca_plater_set_bed",
-            "client:struct PlateBar", 'client:func selectPlate\(']
-gap = "no \"Select All Plates\" / slice-all across plates (slicing targets the selected plate)"
+            "client:struct PlateBar", 'client:func selectPlate\(',
+            "abi:orca_plater_slice_all_to_gcode", 'client:func runAll\(']
 work = "Bridge + UI"
-priority = 10
-note = "ABI v27: Bridge-owned plate grid (desktop layout: ceil-sqrt columns, 1.2x stride, max 36), derived membership by position with locked-plate pins, arrange overflow fills new plates, 3MF roundtrip keeps names/locks/membership; slice = current plate only"
+note = "ABI v27 plates + ABI v28 slice-all: Bridge-owned plate grid (desktop layout: ceil-sqrt columns, 1.2x stride, max 36), derived membership by position with locked-plate pins, arrange overflow fills new plates, 3MF roundtrip keeps names/locks/membership; per-plate slicing is plate-relative (desktop PartPlate::set_print parity: engine plate origin + index + name); orca_plater_slice_all_to_gcode slices every non-empty plate in order into one G-code with ; ORCA_PLATE begin/end markers, aggregated report + scaled progress; client Slice menu offers Slice All Plates when >1 plate; desktop's 'Select All Plates' selection command is covered by the existing canvas select-all"
 
 [[feature]]
 id = "plate.plate-settings"

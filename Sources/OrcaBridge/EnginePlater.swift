@@ -923,6 +923,51 @@ public final class EnginePlater: @unchecked Sendable {
         }
     }
 
+    /// Desktop "Slice all": every non-empty plate in order into ONE G-code
+    /// file with `; ORCA_PLATE ... begin/end` markers between the plates.
+    /// Each plate's section is plate-relative (like a per-plate export).
+    public func sliceAll(
+        to outputPath: String,
+        job: SliceJob,
+        progress: @escaping @Sendable (Int, String) -> Void
+    ) throws -> SliceResult {
+        try lock.withLock {
+            try Self.withProgressContext(progress) { callback, context in
+                var report = orca_slice_report()
+                defer { orca_slice_report_dispose(&report) }
+                let result = outputPath.withCString { outputPointer in
+                    orca_plater_slice_all_to_gcode(
+                        handle, outputPointer, callback, context, job.handle, &report
+                    )
+                }
+                try BridgeResult.consume(result, operation: "slice all plates")
+                return try SliceResult(decoding: report, operation: "slice all plates")
+            }
+        }
+    }
+
+    public func sliceAll(
+        to outputPath: String,
+        presets: EnginePresets,
+        job: SliceJob,
+        progress: @escaping @Sendable (Int, String) -> Void
+    ) throws -> SliceResult {
+        try Self.withLockedHandles(plater: self, presets: presets) { platerHandle, presetHandle in
+            try Self.withProgressContext(progress) { callback, context in
+                var report = orca_slice_report()
+                defer { orca_slice_report_dispose(&report) }
+                let result = outputPath.withCString { outputPointer in
+                    orca_plater_slice_all_to_gcode_with_presets(
+                        platerHandle, presetHandle, outputPointer,
+                        callback, context, job.handle, &report
+                    )
+                }
+                try BridgeResult.consume(result, operation: "slice all plates with presets")
+                return try SliceResult(decoding: report, operation: "slice all plates with presets")
+            }
+        }
+    }
+
     /// Desktop "Open project": replaces the document (new document id) and
     /// the preset session atomically; returns the new authoritative scene.
     public func openProject(

@@ -87,16 +87,42 @@ struct PrepareTabView: View {
             }
             .accessibilityLabel("Cancel slicing")
         } else {
-            Button {
+            Menu {
+                Button {
+                    Task {
+                        await environment.slicing.run(
+                            document: environment.document,
+                            presets: presets
+                        )
+                    }
+                } label: {
+                    Label("Slice", systemImage: "scissors")
+                }
+                if environment.document.plates.count > 1 {
+                    Button {
+                        Task {
+                            await environment.slicing.runAll(
+                                document: environment.document,
+                                presets: presets
+                            )
+                        }
+                    } label: {
+                        Label(
+                            "Slice All Plates",
+                            systemImage: "square.stack.3d.up.fill"
+                        )
+                    }
+                }
+            } label: {
+                Label("Slice", systemImage: "scissors")
+                    .font(.headline)
+            } primaryAction: {
                 Task {
                     await environment.slicing.run(
                         document: environment.document,
                         presets: presets
                     )
                 }
-            } label: {
-                Label("Slice", systemImage: "scissors")
-                    .font(.headline)
             }
             .disabled(
                 environment.document.scene?.objects.isEmpty != false ||
