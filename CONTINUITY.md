@@ -111,9 +111,12 @@
 
 ## OUTCOMES
 
-- [2026-10-14] C8 milestone complete (5 parity rows ✅, ABI v25→v26): tagged
-  release-0.2.0 — external TestFlight (Beta App Review + on-device check
-  pending).
+- [2026-10-14] C8 milestone complete (5 parity rows ✅, ABI v25→v26):
+  release-0.2.0 run 38526110136 green end to end — build 0.2.0 (5.1)
+  uploaded, What to Test set, external group 'External', Beta App Review
+  submitted, complete-source archive published. Awaiting: review approval
+  + on-device check (marquee drag, part tap, parameter table, preset fix
+  from 0.1.1).
 - [2026-10-06 USER] Gate B on device: builds and slices; rotate UX redone (C6).
 - [2026-10-03 USER] Phase 1 accepted: 483,772-triangle STL sliced on device.
 - [2026-10-02 USER] Phase 0/2 accepted: native Metal viewer, engine slicing.
