@@ -16,19 +16,19 @@ Status: ✅ done · 🟡 partial · ❌ missing · ⏸️ deferred · ➖ na. Pa
 
 | Area | Features | ✅ | 🟡 | ❌ | ⏸️ | ➖ | Parity |
 |---|---|---|---|---|---|---|---|
-| Plate / 3D editor | 64 | 27 | 7 | 22 | 7 | 1 | 48% |
+| Plate / 3D editor | 64 | 29 | 5 | 22 | 7 | 1 | 50% |
 | Prepare / presets / settings | 25 | 6 | 6 | 13 | 0 | 0 | 36% |
 | Preview / G-code | 17 | 6 | 0 | 11 | 0 | 0 | 35% |
 | Device / printing | 19 | 2 | 0 | 15 | 1 | 1 | 11% |
 | Files / projects / app integration | 12 | 3 | 0 | 8 | 1 | 0 | 25% |
 | App / preferences / help | 15 | 0 | 1 | 6 | 0 | 8 | 7% |
-| **Total** | **152** | **44** | **14** | **75** | **9** | **10** | **36%** |
+| **Total** | **152** | **46** | **12** | **75** | **9** | **10** | **37%** |
 
 ### Desktop surface coverage (items)
 
 | Surface | Upstream source | Items | ✅ | 🟡 | ❌ | ⏸️ | ➖ | Parity |
 |---|---|---|---|---|---|---|---|---|
-| 3D editor gizmos (`gizmo`) | Gizmos/GLGizmosManager.hpp EType | 16 | 0 | 4 | 7 | 5 | 0 | 12% |
+| 3D editor gizmos (`gizmo`) | Gizmos/GLGizmosManager.hpp EType | 16 | 2 | 2 | 7 | 5 | 0 | 19% |
 | Canvas toolbars (`toolbar`) | GLCanvas3D.cpp _init_*toolbar | 10 | 8 | 0 | 2 | 0 | 0 | 80% |
 | Menu bar (`menu`) | MainFrame.cpp | 75 | 25 | 2 | 26 | 13 | 9 | 39% |
 | Right-click menus (`context`) | GUI_Factories.cpp | 81 | 46 | 2 | 29 | 4 | 0 | 58% |
@@ -45,95 +45,93 @@ Status: ✅ done · 🟡 partial · ❌ missing · ⏸️ deferred · ➖ na. Pa
 
 ## Remaining work (priority order)
 
-1. 🟡 **Rotate gizmo + panel** · Plate / 3D editor · UI — one ring at a time, fixed 5° snap (no fine 1° zone), no free-angle relative entry
-2. 🟡 **Scale gizmo + panel** · Plate / 3D editor · UI — on-canvas handles are uniform only (the panel has per-axis scale and size)
-3. 🟡 **Lay on face (Flatten)** · Plate / 3D editor · Bridge + UI — taps any facet; no convex-hull plane grouping/highlighting
-4. ❌ **Height range modifiers (layer config ranges)** · Plate / 3D editor · Bridge + UI
-5. ❌ **Fill bed with copies / instances** · Plate / 3D editor · Bridge + UI
-6. ❌ **Cut tool** · Plate / 3D editor · Closure + UI — CutUtils.cpp has no exotic dependencies
-7. ❌ **Assign filament to object / part** · Plate / 3D editor · Bridge + UI — needs prepare.multi-filament
-8. ❌ **Flush into infill / support / object** · Plate / 3D editor · Bridge + UI — multi-material; per-object flush_into_* options
-9. ❌ **Simplify mesh** · Plate / 3D editor · Closure + UI
-10. ❌ **Measure tool** · Plate / 3D editor · Closure + UI
-11. ❌ **Variable layer height** · Plate / 3D editor · Bridge + UI — SlicingAdaptive.cpp is compiled
-12. 🟡 **Move gizmo + panel** · Plate / 3D editor · UI — X/Y only: Z and the world/object coordinate switch are omitted (the engine rests objects on the bed; user decision)
-13. 🟡 **Drop to bed / auto drop** · Plate / 3D editor · Bridge + UI — objects always rest on the bed; no toggle to keep an object floating
-14. ❌ **Handy models (bundled test models)** · Plate / 3D editor · UI
-15. ❌ **Hide / show parts** · Plate / 3D editor · UI
-16. ❌ **Reload from disk / replace model** · Plate / 3D editor · Bridge + UI — needs security-scoped bookmarks to the original files
-17. ❌ **Subdivide (smooth) mesh** · Plate / 3D editor · Closure + UI
-18. ❌ **Assembly view / assemble gizmo** · Plate / 3D editor · Closure + UI
-19. ❌ **Brim ears** · Plate / 3D editor · Bridge + UI
-20. ❌ **Text emboss / engrave** · Plate / 3D editor · Bridge + UI — Emboss.cpp is compiled; needs iOS font access
-21. ❌ **SVG emboss part** · Plate / 3D editor · Bridge + UI — NSVGUtils + Emboss are compiled (no OCCT needed for SVG parts)
-22. ❌ **Per-plate settings (bed type, print sequence, spiral, first-layer order)** · Plate / 3D editor · Client-reimpl + Bridge
-23. ❌ **Perspective / orthographic camera, camera style** · Plate / 3D editor · UI
-24. ❌ **3D navigator cube** · Plate / 3D editor · UI
-25. 🟡 **Bed gridlines** · Plate / 3D editor · UI — grid is always shown; no toggle
-26. ❌ **Object labels in the 3D view** · Plate / 3D editor · UI
-27. ❌ **Overhang highlighting** · Plate / 3D editor · UI
-28. ❌ **Selected-object outline** · Plate / 3D editor · UI
-29. 🟡 **Hardware-keyboard shortcuts: 3D editor** · Plate / 3D editor · UI — undo / redo (⌘Z, ⇧⌘Z) and copy / paste (⌘C, ⌘V) so far
-30. ❌ **Multiple filaments / extruders (sidebar list, edit, merge)** · Prepare / presets / settings · Bridge + UI
-31. ❌ **Color picker for color options** · Prepare / presets / settings · UI
-32. 🟡 **Per-extruder vector values** · Prepare / presets / settings · UI — only one-element vectors are editable (as scalars)
-33. ❌ **Option dependency enable/disable and sanity prompts** · Prepare / presets / settings · Client-reimpl
-34. ❌ **Compare presets** · Prepare / presets / settings · UI
-35. 🟡 **Settings search** · Prepare / presets / settings · UI — per-screen search only; desktop searches every tab
-36. 🟡 **Unsaved-changes prompt on preset switch** · Prepare / presets / settings · Bridge + UI — discard / keep editing only: no transfer of changes onto the new preset
-37. ❌ **Flushing volumes** · Prepare / presets / settings · Bridge + UI
-38. ❌ **Import / export configs and preset bundles** · Prepare / presets / settings · Bridge + UI
-39. ❌ **Create printer / filament preset wizards** · Prepare / presets / settings · Bridge + UI
-40. 🟡 **Setup wizard (vendor / printer / filament picking)** · Prepare / presets / settings · UI — all system printers are listed; no vendor/model selection that limits the lists
-41. ❌ **Bed shape, custom bed texture / model** · Prepare / presets / settings · UI
-42. 🟡 **Nozzle diameter selector** · Prepare / presets / settings · UI — nozzle variants are separate printer presets; no nozzle combo
-43. ❌ **Filament ramming parameters editor** · Prepare / presets / settings · UI
-44. ❌ **Filament grouping (multi-nozzle printers)** · Prepare / presets / settings · Bridge + UI
-45. 🟡 **Custom G-code editor with placeholder browser** · Prepare / presets / settings · UI — multiline editor without the placeholder browser
-46. ❌ **Auto slice after changes** · Prepare / presets / settings · UI
-47. ❌ **OrcaCloud preset sync** · Prepare / presets / settings · Client-reimpl
-48. ❌ **Online system-profile updates** · Prepare / presets / settings · Bridge + UI
-49. ❌ **Export objects as STL** · Files / projects / app integration · Bridge + UI
-50. ❌ **New project** · Files / projects / app integration · UI
-51. ❌ **Export sliced 3MF (.gcode.3mf)** · Files / projects / app integration · Bridge + UI
-52. ❌ **Export generic 3MF** · Files / projects / app integration · Bridge + UI
-53. ❌ **Import zip archive** · Files / projects / app integration · UI
-54. ❌ **Recent projects / files** · Files / projects / app integration · UI
-55. ❌ **Project auto-backup / crash restore** · Files / projects / app integration · Bridge + UI
-56. ❌ **Model download links (Printables / MakerWorld / Thingiverse) and downloads folder** · Files / projects / app integration · UI
-57. ❌ **Per-layer filament (color) change + ColorPrint scheme** · Preview / G-code · Bridge + UI — Model::custom_gcode_per_print_z / CustomGCode.cpp are compiled
-58. ❌ **Pause / custom G-code / template at layer** · Preview / G-code · Bridge + UI
-59. ❌ **One-layer mode** · Preview / G-code · UI
-60. ❌ **Jump to layer** · Preview / G-code · UI
-61. ❌ **Wipe and tool-change markers** · Preview / G-code · UI
-62. ❌ **Object shells and center of gravity** · Preview / G-code · UI
-63. ❌ **Actual volumetric flow scheme** · Preview / G-code · Bridge + UI
-64. ❌ **Summary view** · Preview / G-code · UI
-65. ❌ **G-code line window** · Preview / G-code · Bridge + UI
-66. ❌ **Export toolpaths as OBJ** · Preview / G-code · Client-reimpl
-67. ❌ **Hardware-keyboard shortcuts: preview sliders** · Preview / G-code · UI
-68. ❌ **PrusaLink / Prusa Connect hosts** · Device / printing · Client-reimpl
-69. ❌ **Duet host** · Device / printing · Client-reimpl
-70. ❌ **Repetier host** · Device / printing · Client-reimpl
-71. ❌ **FlashAir host** · Device / printing · Client-reimpl
-72. ❌ **AstroBox host** · Device / printing · Client-reimpl
-73. ❌ **MKS host** · Device / printing · Client-reimpl
-74. ❌ **ESP3D host** · Device / printing · Client-reimpl
-75. ❌ **Creality Print host + LAN discovery** · Device / printing · Client-reimpl
-76. ❌ **Obico host** · Device / printing · Client-reimpl
-77. ❌ **Flashforge host** · Device / printing · Client-reimpl
-78. ❌ **Upload queue** · Device / printing · UI
-79. ❌ **Printer discovery (Bonjour)** · Device / printing · UI
-80. ❌ **SimplyPrint host (cloud auth)** · Device / printing · Client-reimpl
-81. ❌ **ElegooLink host** · Device / printing · Client-reimpl
-82. ❌ **3DPrinterOS host** · Device / printing · Client-reimpl
-83. ❌ **Preferences screen** · App / preferences / help · UI
-84. ❌ **Hardware-keyboard shortcuts: global** · App / preferences / help · UI
-85. ❌ **About and third-party licenses** · App / preferences / help · UI
-86. 🟡 **Light / dark appearance** · App / preferences / help · UI — dark only
-87. ❌ **Localization** · App / preferences / help · UI — iOS picks the language per app in Settings; OrcaPad strings are English only
-88. ❌ **Viewer quality options (MSAA, FXAA, shadows, SSAO, smooth normals, FPS)** · App / preferences / help · UI
-89. ❌ **Tip of the day** · App / preferences / help · UI
+1. 🟡 **Lay on face (Flatten)** · Plate / 3D editor · Bridge + UI — taps any facet; no convex-hull plane grouping/highlighting
+2. ❌ **Height range modifiers (layer config ranges)** · Plate / 3D editor · Bridge + UI
+3. ❌ **Fill bed with copies / instances** · Plate / 3D editor · Bridge + UI
+4. ❌ **Cut tool** · Plate / 3D editor · Closure + UI — CutUtils.cpp has no exotic dependencies
+5. ❌ **Assign filament to object / part** · Plate / 3D editor · Bridge + UI — needs prepare.multi-filament
+6. ❌ **Flush into infill / support / object** · Plate / 3D editor · Bridge + UI — multi-material; per-object flush_into_* options
+7. ❌ **Simplify mesh** · Plate / 3D editor · Closure + UI
+8. ❌ **Measure tool** · Plate / 3D editor · Closure + UI
+9. ❌ **Variable layer height** · Plate / 3D editor · Bridge + UI — SlicingAdaptive.cpp is compiled
+10. 🟡 **Move gizmo + panel** · Plate / 3D editor · UI — X/Y only: Z and the world/object coordinate switch are omitted (the engine rests objects on the bed; user decision)
+11. 🟡 **Drop to bed / auto drop** · Plate / 3D editor · Bridge + UI — objects always rest on the bed; no toggle to keep an object floating
+12. ❌ **Handy models (bundled test models)** · Plate / 3D editor · UI
+13. ❌ **Hide / show parts** · Plate / 3D editor · UI
+14. ❌ **Reload from disk / replace model** · Plate / 3D editor · Bridge + UI — needs security-scoped bookmarks to the original files
+15. ❌ **Subdivide (smooth) mesh** · Plate / 3D editor · Closure + UI
+16. ❌ **Assembly view / assemble gizmo** · Plate / 3D editor · Closure + UI
+17. ❌ **Brim ears** · Plate / 3D editor · Bridge + UI
+18. ❌ **Text emboss / engrave** · Plate / 3D editor · Bridge + UI — Emboss.cpp is compiled; needs iOS font access
+19. ❌ **SVG emboss part** · Plate / 3D editor · Bridge + UI — NSVGUtils + Emboss are compiled (no OCCT needed for SVG parts)
+20. ❌ **Per-plate settings (bed type, print sequence, spiral, first-layer order)** · Plate / 3D editor · Client-reimpl + Bridge
+21. ❌ **Perspective / orthographic camera, camera style** · Plate / 3D editor · UI
+22. ❌ **3D navigator cube** · Plate / 3D editor · UI
+23. 🟡 **Bed gridlines** · Plate / 3D editor · UI — grid is always shown; no toggle
+24. ❌ **Object labels in the 3D view** · Plate / 3D editor · UI
+25. ❌ **Overhang highlighting** · Plate / 3D editor · UI
+26. ❌ **Selected-object outline** · Plate / 3D editor · UI
+27. 🟡 **Hardware-keyboard shortcuts: 3D editor** · Plate / 3D editor · UI — undo / redo (⌘Z, ⇧⌘Z) and copy / paste (⌘C, ⌘V) so far
+28. ❌ **Multiple filaments / extruders (sidebar list, edit, merge)** · Prepare / presets / settings · Bridge + UI
+29. ❌ **Color picker for color options** · Prepare / presets / settings · UI
+30. 🟡 **Per-extruder vector values** · Prepare / presets / settings · UI — only one-element vectors are editable (as scalars)
+31. ❌ **Option dependency enable/disable and sanity prompts** · Prepare / presets / settings · Client-reimpl
+32. ❌ **Compare presets** · Prepare / presets / settings · UI
+33. 🟡 **Settings search** · Prepare / presets / settings · UI — per-screen search only; desktop searches every tab
+34. 🟡 **Unsaved-changes prompt on preset switch** · Prepare / presets / settings · Bridge + UI — discard / keep editing only: no transfer of changes onto the new preset
+35. ❌ **Flushing volumes** · Prepare / presets / settings · Bridge + UI
+36. ❌ **Import / export configs and preset bundles** · Prepare / presets / settings · Bridge + UI
+37. ❌ **Create printer / filament preset wizards** · Prepare / presets / settings · Bridge + UI
+38. 🟡 **Setup wizard (vendor / printer / filament picking)** · Prepare / presets / settings · UI — all system printers are listed; no vendor/model selection that limits the lists
+39. ❌ **Bed shape, custom bed texture / model** · Prepare / presets / settings · UI
+40. 🟡 **Nozzle diameter selector** · Prepare / presets / settings · UI — nozzle variants are separate printer presets; no nozzle combo
+41. ❌ **Filament ramming parameters editor** · Prepare / presets / settings · UI
+42. ❌ **Filament grouping (multi-nozzle printers)** · Prepare / presets / settings · Bridge + UI
+43. 🟡 **Custom G-code editor with placeholder browser** · Prepare / presets / settings · UI — multiline editor without the placeholder browser
+44. ❌ **Auto slice after changes** · Prepare / presets / settings · UI
+45. ❌ **OrcaCloud preset sync** · Prepare / presets / settings · Client-reimpl
+46. ❌ **Online system-profile updates** · Prepare / presets / settings · Bridge + UI
+47. ❌ **Export objects as STL** · Files / projects / app integration · Bridge + UI
+48. ❌ **New project** · Files / projects / app integration · UI
+49. ❌ **Export sliced 3MF (.gcode.3mf)** · Files / projects / app integration · Bridge + UI
+50. ❌ **Export generic 3MF** · Files / projects / app integration · Bridge + UI
+51. ❌ **Import zip archive** · Files / projects / app integration · UI
+52. ❌ **Recent projects / files** · Files / projects / app integration · UI
+53. ❌ **Project auto-backup / crash restore** · Files / projects / app integration · Bridge + UI
+54. ❌ **Model download links (Printables / MakerWorld / Thingiverse) and downloads folder** · Files / projects / app integration · UI
+55. ❌ **Per-layer filament (color) change + ColorPrint scheme** · Preview / G-code · Bridge + UI — Model::custom_gcode_per_print_z / CustomGCode.cpp are compiled
+56. ❌ **Pause / custom G-code / template at layer** · Preview / G-code · Bridge + UI
+57. ❌ **One-layer mode** · Preview / G-code · UI
+58. ❌ **Jump to layer** · Preview / G-code · UI
+59. ❌ **Wipe and tool-change markers** · Preview / G-code · UI
+60. ❌ **Object shells and center of gravity** · Preview / G-code · UI
+61. ❌ **Actual volumetric flow scheme** · Preview / G-code · Bridge + UI
+62. ❌ **Summary view** · Preview / G-code · UI
+63. ❌ **G-code line window** · Preview / G-code · Bridge + UI
+64. ❌ **Export toolpaths as OBJ** · Preview / G-code · Client-reimpl
+65. ❌ **Hardware-keyboard shortcuts: preview sliders** · Preview / G-code · UI
+66. ❌ **PrusaLink / Prusa Connect hosts** · Device / printing · Client-reimpl
+67. ❌ **Duet host** · Device / printing · Client-reimpl
+68. ❌ **Repetier host** · Device / printing · Client-reimpl
+69. ❌ **FlashAir host** · Device / printing · Client-reimpl
+70. ❌ **AstroBox host** · Device / printing · Client-reimpl
+71. ❌ **MKS host** · Device / printing · Client-reimpl
+72. ❌ **ESP3D host** · Device / printing · Client-reimpl
+73. ❌ **Creality Print host + LAN discovery** · Device / printing · Client-reimpl
+74. ❌ **Obico host** · Device / printing · Client-reimpl
+75. ❌ **Flashforge host** · Device / printing · Client-reimpl
+76. ❌ **Upload queue** · Device / printing · UI
+77. ❌ **Printer discovery (Bonjour)** · Device / printing · UI
+78. ❌ **SimplyPrint host (cloud auth)** · Device / printing · Client-reimpl
+79. ❌ **ElegooLink host** · Device / printing · Client-reimpl
+80. ❌ **3DPrinterOS host** · Device / printing · Client-reimpl
+81. ❌ **Preferences screen** · App / preferences / help · UI
+82. ❌ **Hardware-keyboard shortcuts: global** · App / preferences / help · UI
+83. ❌ **About and third-party licenses** · App / preferences / help · UI
+84. 🟡 **Light / dark appearance** · App / preferences / help · UI — dark only
+85. ❌ **Localization** · App / preferences / help · UI — iOS picks the language per app in Settings; OrcaPad strings are English only
+86. ❌ **Viewer quality options (MSAA, FXAA, shadows, SSAO, smooth normals, FPS)** · App / preferences / help · UI
+87. ❌ **Tip of the day** · App / preferences / help · UI
 
 **Deferred:** STEP / SVG / Draco import (deferred by user 2026-10-07: STEP/SVG need OpenCASCADE, DRC needs draco in the closure); Mesh boolean (deferred by user 2026-10-07 (CGAL PMP / mcut closure)); Fix model (mesh repair) (uses the CGAL repair closure deferred with mesh boolean (user, 2026-10-07)); Support painting (AGENTS.md: painting tools wait until the core loop ships (TriangleSelector.cpp is compiled)); Seam painting (AGENTS.md: painting tools wait until the core loop ships); Fuzzy-skin painting (AGENTS.md: painting tools wait until the core loop ships); Multi-material (color) painting (AGENTS.md: MMU segmentation waits until the core loop ships); Calibration menu (temperature, flow, PA, retraction, max flow, VFA, cornering, input shaping) (deferred by user 2026-10-07: calibration models are .drc, so draco must enter the closure first); Export objects as Draco (deferred by user 2026-10-07 (draco))
 
@@ -162,6 +160,8 @@ Status: ✅ done · 🟡 partial · ❌ missing · ⏸️ deferred · ➖ na. Pa
 | Per-object / per-part process settings | ✅ | **context**: Edit Process Settings, Copy Process Settings, Paste Process Settings, Edit in Parameter Table, {_(cat.first)}@create_settings_popupmenu, {_(category.first)}@create_freq_settings_popupmenu; **dialog**: ObjectTableDialog | `abi:orca_plater_settings_set`, `abi:orca_plater_settings_erase`, `abi:orca_plater_settings_dump`, `abi:orca_plater_settings_keys`, `abi:orca_plater_settings_apply`, `client:struct ObjectSettingsSheet`, `client:func copySettings\(`, `client:func pasteSettings\(`, `client:struct ParameterTableView`, `client:FrequentSettings` | paste REPLACES the target's overrides in one undo step (desktop paste_settings_into_list semantics); the parameter table edits the selected objects' overrides side by side; the frequent-settings quick menu is the upstream OBJECT/PART_CATEGORY_SETTINGS tables |
 | Printable toggle | ✅ | **context**: Printable | `abi:orca_plater_set_printable`, `client:func setPrintable\(`, `client:unprintableColor` | — |
 | Rename object | ✅ | **context**: Rename; **kb**: Select the object/part and mouse click to change the name | `abi:orca_plater_object_rename`, `client:func rename\(` | — |
+| Rotate gizmo + panel | ✅ | **gizmo**: Rotate | `abi:orca_plater_instance_rotate`, `client:struct RotatePanel`, `client:func rotationSnapDegrees`, `client:func previewRotation` | Desktop GLGizmoRotate zones by drag distance (1/3..2/3 ring = coarse 45°, 1.0..1.1 ring = fine 5°, elsewhere free continuous), world-axis ring per axis with wrap-through-360 engine steps, ±15° buttons, free-angle relative entry (desktop rotate input window), reset, Euler readout |
+| Scale gizmo + panel | ✅ | **gizmo**: Scale | `client:struct ScalePanel`, `abi:orca_plater_instance_set`, `client:func scaleAxisHit`, `client:func previewScale` | On-canvas per-axis handles (projected local-axis segments of the scale gizmo, one local axis each) beside the uniform vertical drag; panel has per-axis scale, size and reset like desktop |
 | Scale to build volume | ✅ | **context**: Scale to build volume | `abi:orca_plater_scale_to_fit`, `client:func scaleToFit\(` | — |
 | Set instance as an individual object | ✅ | **context**: Set as an individual object | `abi:orca_plater_instance_to_object`, `client:func separateInstance\(` | — |
 | Set number of instances | ✅ | **context**: Set number of instances | `abi:orca_plater_set_instance_count`, `client:func setInstanceCount\(` | — |
@@ -173,8 +173,6 @@ Status: ✅ done · 🟡 partial · ❌ missing · ⏸️ deferred · ➖ na. Pa
 | Hardware-keyboard shortcuts: 3D editor | 🟡 | **kb**: Arrange all objects, Arrange objects on selected plates, Auto orients all objects on the active plate., Auto orients selected objects or all objects. If there are selected objects, it just orients the selected ones. Otherwise, it will orient all objects in the current project., Camera Angle - Left side, Camera Angle - Right side, Camera view - Behind, Camera view - Bottom +35 | `client:keyboardShortcut\("z"`, `client:keyboardShortcut\("c"` | Gap: undo / redo (⌘Z, ⇧⌘Z) and copy / paste (⌘C, ⌘V) so far · Work: UI |
 | Lay on face (Flatten) | 🟡 | **gizmo**: Flatten | `abi:orca_plater_instance_lay_flat`, `client:func layFlatSelected\(` | Gap: taps any facet; no convex-hull plane grouping/highlighting · Work: Bridge + UI |
 | Move gizmo + panel | 🟡 | **gizmo**: Move | `abi:orca_plater_instance_set`, `client:private var movePanel` | Gap: X/Y only: Z and the world/object coordinate switch are omitted (the engine rests objects on the bed; user decision) · Work: UI |
-| Rotate gizmo + panel | 🟡 | **gizmo**: Rotate | `abi:orca_plater_instance_rotate`, `client:struct RotatePanel` | Gap: one ring at a time, fixed 5° snap (no fine 1° zone), no free-angle relative entry · Work: UI |
-| Scale gizmo + panel | 🟡 | **gizmo**: Scale | `client:struct ScalePanel`, `abi:orca_plater_instance_set` | Gap: on-canvas handles are uniform only (the panel has per-axis scale and size) · Work: UI |
 | 3D navigator cube | ❌ | **menu**: Show 3D Navigator | — | Work: UI |
 | Assembly view / assemble gizmo | ❌ | **gizmo**: Assembly; **toolbar**: assembly_view | — | Work: Closure + UI |
 | Assign filament to object / part | ❌ | **context**: Change filament, Change Filament, {item_name}@append_menu_item_change_extruder, {item_name}@append_menu_item_change_filament | — | Work: Bridge + UI · needs prepare.multi-filament |
@@ -336,8 +334,8 @@ Status: ✅ done · 🟡 partial · ❌ missing · ⏸️ deferred · ➖ na. Pa
 | `gizmo:MeshBoolean` | src/slic3r/GUI/Gizmos/GLGizmosManager.hpp:82 | plate.mesh-boolean | ⏸️ |
 | `gizmo:MmSegmentation` | src/slic3r/GUI/Gizmos/GLGizmosManager.hpp:86 | plate.paint-mmu | ⏸️ |
 | `gizmo:Move` | src/slic3r/GUI/Gizmos/GLGizmosManager.hpp:77 | plate.move | 🟡 |
-| `gizmo:Rotate` | src/slic3r/GUI/Gizmos/GLGizmosManager.hpp:78 | plate.rotate | 🟡 |
-| `gizmo:Scale` | src/slic3r/GUI/Gizmos/GLGizmosManager.hpp:79 | plate.scale | 🟡 |
+| `gizmo:Rotate` | src/slic3r/GUI/Gizmos/GLGizmosManager.hpp:78 | plate.rotate | ✅ |
+| `gizmo:Scale` | src/slic3r/GUI/Gizmos/GLGizmosManager.hpp:79 | plate.scale | ✅ |
 | `gizmo:Seam` | src/slic3r/GUI/Gizmos/GLGizmosManager.hpp:84 | plate.paint-seam | ⏸️ |
 | `gizmo:Simplify` | src/slic3r/GUI/Gizmos/GLGizmosManager.hpp:91 | plate.simplify | ❌ |
 | `gizmo:Svg` | src/slic3r/GUI/Gizmos/GLGizmosManager.hpp:88 | plate.svg-part | ❌ |

@@ -241,7 +241,8 @@ struct PlateTabView: View {
                     },
                     onMove: { document.moveSelected(by: $0) },
                     onBegin: { document.beginManipulation() },
-                    onRotate: { document.previewRotation(axis: rotationAxis, deltaRadians: $0) },
+                    onRotate: { document.previewRotation(axis: rotationAxis, deltaRadians: $0, snapDegrees: $1) },
+                    onScaleAxis: { document.previewScale(axis: $0, factor: $1) },
                 onScale: { document.previewScale(factor: $0) },
                 onLayFlat: { normal in
                     guard let engine = environment.presets.engineForSlicing else {
@@ -1468,13 +1469,17 @@ private struct ManipulationPanel: View {
 }
 
 /// Rotate: world-axis selector with an orientation glyph, ±15° engine steps
-/// (wrapping through 360°), reset, and the engine's Euler readout.
+/// (wrapping through 360°), a free-angle relative entry (desktop rotate
+/// input window), reset, and the engine's Euler readout.
 private struct RotatePanel: View {
     let transform: InstanceTransform
     @Binding var axis: EngineAxis
     let actions: ManipulationActions
 
     static let step = 15.0
+
+    @State private var relativeDegrees = ""
+    @FocusState private var relativeFocused: Bool
 
     var body: some View {
         HStack(alignment: .center, spacing: 16) {
@@ -1518,11 +1523,33 @@ private struct RotatePanel: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(axis.color)
+                // Desktop rotate input window: type ANY relative angle.
+                HStack(spacing: 4) {
+                    TextField("angle", text: $relativeDegrees)
+                        .keyboardType(.numbersAndPunctuation)
+                        .focused($relativeFocused)
+                        .frame(width: 68)
+                        .textFieldStyle(.roundedBorder)
+                        .onSubmit(applyRelative)
+                    Text("°")
+                        .foregroundStyle(Color.secondary)
+                    Button("Rotate", action: applyRelative)
+                        .buttonStyle(.bordered)
+                        .font(.caption)
+                }
                 Button("Reset rotation", action: actions.resetRotation)
                     .buttonStyle(.bordered)
                     .font(.caption)
             }
         }
+    }
+
+    private func applyRelative() {
+        guard let degrees = Double(relativeDegrees.trimmingCharacters(in: .whitespaces)),
+              degrees != 0 else { return }
+        actions.rotate(axis, degrees)
+        relativeDegrees = ""
+        relativeFocused = false
     }
 
     /// Engine Euler angle as a 0–359.9 display value.

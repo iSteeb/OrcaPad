@@ -122,23 +122,23 @@ priority = 30
 id = "plate.rotate"
 area = "plate"
 title = "Rotate gizmo + panel"
-status = "partial"
+status = "done"
 desktop = ["gizmo:Rotate"]
-evidence = ["abi:orca_plater_instance_rotate", "client:struct RotatePanel"]
-gap = "one ring at a time, fixed 5\u00b0 snap (no fine 1\u00b0 zone), no free-angle relative entry"
+evidence = ["abi:orca_plater_instance_rotate", "client:struct RotatePanel",
+            "client:func rotationSnapDegrees", "client:func previewRotation"]
 work = "UI"
-priority = 11
+note = "Desktop GLGizmoRotate zones by drag distance (1/3..2/3 ring = coarse 45\u00b0, 1.0..1.1 ring = fine 5\u00b0, elsewhere free continuous), world-axis ring per axis with wrap-through-360 engine steps, \u00b115\u00b0 buttons, free-angle relative entry (desktop rotate input window), reset, Euler readout"
 
 [[feature]]
 id = "plate.scale"
 area = "plate"
 title = "Scale gizmo + panel"
-status = "partial"
+status = "done"
 desktop = ["gizmo:Scale"]
-evidence = ["client:struct ScalePanel", "abi:orca_plater_instance_set"]
-gap = "on-canvas handles are uniform only (the panel has per-axis scale and size)"
+evidence = ["client:struct ScalePanel", "abi:orca_plater_instance_set",
+            "client:func scaleAxisHit", "client:func previewScale"]
 work = "UI"
-priority = 12
+note = "On-canvas per-axis handles (projected local-axis segments of the scale gizmo, one local axis each) beside the uniform vertical drag; panel has per-axis scale, size and reset like desktop"
 
 [[feature]]
 id = "plate.scale-to-fit"

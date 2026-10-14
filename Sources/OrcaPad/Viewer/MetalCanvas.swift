@@ -43,7 +43,9 @@ struct CanvasManipulation {
     let onBegin: () -> Void
     /// Total rotation since gesture start about the selected world axis,
     /// radians (right-handed).
-    let onRotate: (Double) -> Void
+    let onRotate: (Double, Double) -> Void
+    /// Per-axis on-canvas scale: (axis, positive factor).
+    let onScaleAxis: (EngineAxis, Double) -> Void
     /// Total uniform scale factor since gesture start.
     let onScale: (Double) -> Void
     /// Lay flat: engine-frame normal of the tapped facet.
@@ -157,8 +159,9 @@ struct MetalCanvas: UIViewRepresentable {
         private enum DragState {
             case orbit
             case move(bedOrigin: SIMD3<Float>)
-            case rotate(center: CGPoint, startAngle: Double)
+            case rotate(center: CGPoint, startAngle: Double, ringRadius: CGFloat)
             case scale(startY: CGFloat)
+            case scaleAxis(axis: EngineAxis, center: CGPoint, direction: SIMD2<Float>, startLength: CGFloat)
             /// Rectangle selection: one-finger drag draws the marquee.
             case marquee(start: CGPoint)
         }
@@ -243,8 +246,10 @@ struct MetalCanvas: UIViewRepresentable {
 
         /// Screen-space hit on the selection's gizmo ring (rotate/scale): a
         /// generous band around the projected ring so fingers needn't cover
-        /// the object itself.
-        private func gizmoRingHit(at location: CGPoint, in view: MTKView) -> CGPoint? {
+        /// the object itself. Also returns the projected ring radius — the
+        /// rotate gesture picks its snap zone from the drag distance.
+        private func gizmoRingHit(at location: CGPoint, in view: MTKView)
+            -> (center: CGPoint, radius: CGFloat)? {
             guard let renderer, let gizmo = renderer.selectedGizmo(),
                   let center = renderer.projectToScreen(gizmo.center, in: view) else { return nil }
             // Projected extent from several rim directions (robust for rings
@@ -256,7 +261,17 @@ struct MetalCanvas: UIViewRepresentable {
                 }
             }
             let distance = hypot(location.x - center.x, location.y - center.y)
-            return distance <= radius * 1.35 + 24 ? center : nil
+            return distance <= radius * 1.35 + 24 ? (center, max(radius, 1)) : nil
+        }
+
+        /// Desktop GLGizmoRotate zones, by drag distance from the center as
+        /// a fraction of the ring radius: 1/3..2/3 = coarse 45° steps,
+        /// 1.0..1.1 (the scale teeth) = fine 5° steps, everywhere else free.
+        static func rotationSnapDegrees(dragDistance: CGFloat, ringRadius: CGFloat) -> Double {
+            let fraction = Double(dragDistance / max(ringRadius, 1))
+            if fraction >= 1.0 / 3.0 && fraction <= 2.0 / 3.0 { return 45 }
+            if fraction >= 1.0 && fraction <= 1.1 { return 5 }
+            return 0
         }
 
         @objc private func onDrag(_ gesture: UIPanGestureRecognizer) {
@@ -273,7 +288,7 @@ struct MetalCanvas: UIViewRepresentable {
                         manipulation?.onMove(SIMD2(delta.x, delta.y))
                         dragState = .move(bedOrigin: bed)
                     }
-                case .rotate(let center, let startAngle):
+                case .rotate(let center, let startAngle, let ringRadius):
                     let angle = Double(atan2(location.y - center.y, location.x - center.x))
                     // Screen y points down, so visually CCW motion decreases
                     // the angle. A right-handed rotation looks CCW when the
@@ -281,7 +296,17 @@ struct MetalCanvas: UIViewRepresentable {
                     let axis = CoordinateMapper.viewerAxis(renderer.rotationAxis)
                     let facing: Double = simd_dot(renderer.camera.forward, axis) < 0 ? 1 : -1
                     let delta = atan2(sin(startAngle - angle), cos(startAngle - angle)) * facing
-                    manipulation?.onRotate(delta)
+                    manipulation?.onRotate(delta, Self.rotationSnapDegrees(
+                        dragDistance: hypot(location.x - center.x, location.y - center.y),
+                        ringRadius: ringRadius
+                    ))
+                case .scaleAxis(let axis, let center, let direction, let startLength):
+                    let vector = SIMD2<Float>(
+                        Float(location.x - center.x),
+                        Float(location.y - center.y)
+                    )
+                    let projection = CGFloat(max(simd_dot(vector, direction), 8))
+                    manipulation?.onScaleAxis(axis, Double(projection / max(startLength, 8)))
                 case .scale(let startY):
                     manipulation?.onScale(exp(Double(startY - location.y) / 220))
                 case .marquee(let start):
@@ -293,7 +318,7 @@ struct MetalCanvas: UIViewRepresentable {
                 }
             case .ended, .cancelled, .failed:
                 switch dragState {
-                case .move, .rotate, .scale:
+                case .move, .rotate, .scale, .scaleAxis:
                     manipulation?.onEnd()
                 case .marquee(let start):
                     renderer.setMarquee(nil)
@@ -324,6 +349,48 @@ struct MetalCanvas: UIViewRepresentable {
             )
         }
 
+        /// Hit test against the projected LOCAL axis handles of the scale
+        /// gizmo (the instance matrix's scaled columns): a grab within ~26 pt
+        /// of an axis segment starts a per-axis scale drag.
+        private func scaleAxisHit(
+            at location: CGPoint, in view: MTKView, renderer: Renderer
+        ) -> (axis: EngineAxis, center: CGPoint, direction: SIMD2<Float>, startLength: CGFloat)? {
+            guard let gizmo = renderer.selectedGizmo(),
+                  let projectedCenter = renderer.projectToScreen(gizmo.center, in: view) else {
+                return nil
+            }
+            let center2 = SIMD2<Float>(Float(projectedCenter.x), Float(projectedCenter.y))
+            let localExtent = (gizmo.localMax - gizmo.localMin) * 0.5
+            let localCenter = (gizmo.localMin + gizmo.localMax) * 0.5
+            let axes: [(EngineAxis, Int)] = [(.x, 0), (.y, 1), (.z, 2)]
+            for (axis, column) in axes {
+                var localEnd = localCenter
+                localEnd[column] += localExtent[column]
+                let worldEnd = gizmo.model * SIMD4<Float>(localEnd.x, localEnd.y, localEnd.z, 1)
+                guard let projectedEnd = renderer.projectToScreen(
+                    SIMD3(worldEnd.x, worldEnd.y, worldEnd.z), in: view
+                ) else { continue }
+                let end2 = SIMD2<Float>(Float(projectedEnd.x), Float(projectedEnd.y))
+                let delta = end2 - center2
+                let length = simd_length(delta)
+                guard length > 12 else { continue }
+                let direction = delta / length
+                let point = SIMD2<Float>(Float(location.x), Float(location.y))
+                // Distance from the touch to the axis segment (center→end).
+                let projection = simd_dot(point - center2, direction)
+                let clamped = min(max(projection, 0), length)
+                let onSegment = center2 + direction * clamped
+                guard simd_distance(point, onSegment) < 26 else { continue }
+                return (
+                    axis: axis,
+                    center: projectedCenter,
+                    direction: direction,
+                    startLength: max(CGFloat(projection), 8)
+                )
+            }
+            return nil
+        }
+
         private func beginDrag(
             at location: CGPoint,
             in view: MTKView,
@@ -335,11 +402,26 @@ struct MetalCanvas: UIViewRepresentable {
             if mode == .select {
                 return .marquee(start: location)
             }
+            // Per-axis scale handles come first (desktop scale gizmo: axis
+            // handles scale one local axis; everything else stays uniform).
+            if mode == .scale, let handle = scaleAxisHit(at: location, in: view, renderer: renderer) {
+                manipulation?.onBegin()
+                return .scaleAxis(
+                    axis: handle.axis,
+                    center: handle.center,
+                    direction: handle.direction,
+                    startLength: handle.startLength
+                )
+            }
             let hit = renderer.pickInstance(at: location, in: view)
-            if mode != .move, hit == nil, let center = gizmoRingHit(at: location, in: view) {
+            if mode != .move, hit == nil, let ring = gizmoRingHit(at: location, in: view) {
                 manipulation?.onBegin()
                 return mode == .rotate
-                    ? .rotate(center: center, startAngle: Double(atan2(location.y - center.y, location.x - center.x)))
+                    ? .rotate(
+                        center: ring.center,
+                        startAngle: Double(atan2(location.y - ring.center.y, location.x - ring.center.x)),
+                        ringRadius: ring.radius
+                    )
                     : .scale(startY: location.y)
             }
             guard let hit else { return .orbit }
@@ -356,14 +438,21 @@ struct MetalCanvas: UIViewRepresentable {
             case .rotate:
                 // Center from the hit instance itself (selection may not be
                 // re-applied to the renderer yet).
-                guard let center = renderer.gizmo(objectID: hit.objectID, instanceID: hit.instanceID)
-                    .flatMap({ renderer.projectToScreen($0.center, in: view) }) else {
+                guard let gizmo = renderer.gizmo(objectID: hit.objectID, instanceID: hit.instanceID),
+                      let center = renderer.projectToScreen(gizmo.center, in: view) else {
                     return .orbit
+                }
+                var ringRadius: CGFloat = 1
+                for direction in [SIMD3<Float>(1, 0, 0), SIMD3<Float>(0, 1, 0), SIMD3<Float>(0, 0, 1)] {
+                    if let rim = renderer.projectToScreen(gizmo.center + direction * gizmo.radius, in: view) {
+                        ringRadius = max(ringRadius, hypot(rim.x - center.x, rim.y - center.y))
+                    }
                 }
                 manipulation?.onBegin()
                 return .rotate(
                     center: center,
-                    startAngle: Double(atan2(location.y - center.y, location.x - center.x))
+                    startAngle: Double(atan2(location.y - center.y, location.x - center.x)),
+                    ringRadius: ringRadius
                 )
             case .scale:
                 manipulation?.onBegin()

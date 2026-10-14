@@ -786,13 +786,14 @@ final class DocumentStore {
     // MARK: Manipulation (gesture previews on the engine matrix → one
     // engine mutation on commit; the engine rests the instance on the bed)
 
-    /// Snap step for gesture rotation (desktop rotate gizmo snaps too).
+    /// Snap step for panel-driven rotation (desktop rotate-gizmo fine zone).
     static let rotationSnapDegrees = 5.0
 
     private enum PendingManipulation {
         case move
         case rotate(EngineAxis, Double)
         case scale(Double)
+        case scaleAxis(EngineAxis, Double)
     }
 
     private var pending: PendingManipulation?
@@ -850,12 +851,18 @@ final class DocumentStore {
 
     private var groupBases: [InstanceID: simd_float4x4] = [:]
 
-    /// Live rotation preview about a world axis through the object center,
-    /// snapped to `rotationSnapDegrees`.
-    func previewRotation(axis: EngineAxis, deltaRadians: Double) {
+    /// Live rotation preview about a world axis through the object center.
+    /// Snap follows the desktop gizmo's drag-distance zones: `snapDegrees`
+    /// 45 = coarse, 5 = fine, 0 = free continuous rotation.
+    func previewRotation(axis: EngineAxis, deltaRadians: Double, snapDegrees: Double) {
         guard !isBusy, let selection, let base = manipulationBase else { return }
-        let step = Self.rotationSnapDegrees * .pi / 180
-        let snapped = (deltaRadians / step).rounded() * step
+        let snapped: Double
+        if snapDegrees > 0 {
+            let step = snapDegrees * .pi / 180
+            snapped = (deltaRadians / step).rounded() * step
+        } else {
+            snapped = deltaRadians
+        }
         let origin = EngineMatrix.origin(base)
         previewMatrices[selection.instanceID] = EngineMatrix.translation(origin)
             * EngineMatrix.rotation(axis, radians: Float(snapped))
@@ -873,6 +880,19 @@ final class DocumentStore {
         previewMatrices[selection.instanceID] =
             base * EngineMatrix.scale(SIMD3(repeating: Float(clamped)))
         pending = .scale(clamped)
+        presentationRevision += 1
+    }
+
+    /// Live per-axis scale preview (desktop scale gizmo axis handles): one
+    /// local axis scales, the object stays anchored at its center.
+    func previewScale(axis: EngineAxis, factor: Double) {
+        guard !isBusy, let selection, let base = manipulationBase,
+              factor.isFinite, factor > 0 else { return }
+        let clamped = min(max(factor, 0.01), 100)
+        var scale = SIMD3<Float>(repeating: 1)
+        scale[Int(axis.rawValue)] = Float(clamped)
+        previewMatrices[selection.instanceID] = base * EngineMatrix.scale(scale)
+        pending = .scaleAxis(axis, clamped)
         presentationRevision += 1
     }
 
@@ -936,6 +956,14 @@ final class DocumentStore {
             scaled.scaleY *= factor
             scaled.scaleZ *= factor
             await setSelectedTransform(scaled, label: "Scale")
+        case .scaleAxis(let axis, let factor):
+            var scaled = authoritative
+            switch axis {
+            case .x: scaled.scaleX *= factor
+            case .y: scaled.scaleY *= factor
+            case .z: scaled.scaleZ *= factor
+            }
+            await setSelectedTransform(scaled, label: "Scale \(axis == .x ? "X" : axis == .y ? "Y" : "Z")")
         }
     }
 
