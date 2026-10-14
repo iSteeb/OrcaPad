@@ -28,6 +28,8 @@ struct PlateTabView: View {
     @State private var deleteAllConfirmation = false
     @State private var aboutPresented = false
     @State private var parameterTablePresented = false
+    @State private var plateRenameTarget: PlateID?
+    @State private var plateRenameText = ""
 
     private var document: DocumentStore { environment.document }
 
@@ -59,6 +61,30 @@ struct PlateTabView: View {
                 .padding(.trailing, 12)
                 .padding(.top, 8)
                 Spacer()
+                PlateBar(
+                    plates: document.plates,
+                    currentID: document.currentPlate?.id,
+                    isBusy: document.isBusy || document.isMutating,
+                    onSelect: { id in Task { await document.selectPlate(id) } },
+                    onAdd: { Task { await document.addPlate() } },
+                    onRename: { plate in
+                        plateRenameText = plate.name
+                        plateRenameTarget = plate.id
+                    },
+                    onToggleLock: { plate in
+                        Task { await document.lockPlate(plate.id, locked: !plate.locked) }
+                    },
+                    onDuplicate: { plate in
+                        Task { await document.duplicatePlate(plate.id) }
+                    },
+                    onMoveFront: { plate in
+                        Task { await document.movePlateToFront(plate.id) }
+                    },
+                    onDelete: { plate in
+                        Task { await document.deletePlate(plate.id) }
+                    }
+                )
+                .frame(maxWidth: .infinity, alignment: .leading)
                 if let selection = document.selection,
                    let object = document.scene?.object(id: selection.objectID),
                    let transform = document.selectedDisplayTransform {
@@ -442,9 +468,11 @@ struct PlateTabView: View {
                     await environment.bootstrap()
                 }
                 guard document.isReady else { return }
-                let bedCenter = environment.presets.printVolume.map {
-                    SIMD2<Double>($0.centerX, $0.centerY)
-                } ?? .zero
+                let bedCenter = document.currentPlateCenter
+                    ?? environment.presets.printVolume.map {
+                        SIMD2<Double>($0.centerX, $0.centerY)
+                    }
+                    ?? .zero
                 await document.importModel(from: url, bedCenter: bedCenter)
             }
         case .failure(let error):
@@ -556,6 +584,20 @@ struct PlateTabView: View {
             }
             .sheet(isPresented: $parameterTablePresented) {
                 ParameterTableView()
+            }
+            .alert("Plate name", isPresented: Binding(
+                get: { plateRenameTarget != nil },
+                set: { if !$0 { plateRenameTarget = nil } }
+            )) {
+                TextField("Name", text: $plateRenameText)
+                Button("Rename") {
+                    if let id = plateRenameTarget {
+                        let name = plateRenameText
+                        Task { await document.renamePlate(id, to: name) }
+                    }
+                    plateRenameTarget = nil
+                }
+                Button("Cancel", role: .cancel) { plateRenameTarget = nil }
             }
             .confirmationDialog(
                 "Delete all objects?",
@@ -1075,6 +1117,116 @@ private extension VolumeRole {
         return Color(
             red: Double(c.x), green: Double(c.y), blue: Double(c.z), opacity: 1
         )
+    }
+}
+
+// MARK: - Plate bar (desktop PartPlate selector)
+
+/// Desktop plate selector: chips for the plates in order, tap to select
+/// (import target + slice source), long-press for the plate menu (rename,
+/// lock, duplicate, move to front, delete). Presentation only.
+private struct PlateBar: View {
+    let plates: [ScenePlate]
+    let currentID: PlateID?
+    let isBusy: Bool
+    let onSelect: (PlateID) -> Void
+    let onAdd: () -> Void
+    let onRename: (ScenePlate) -> Void
+    let onToggleLock: (ScenePlate) -> Void
+    let onDuplicate: (ScenePlate) -> Void
+    let onMoveFront: (ScenePlate) -> Void
+    let onDelete: (ScenePlate) -> Void
+
+    var body: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 6) {
+                ForEach(plates) { plate in
+                    chip(plate)
+                }
+                Button(action: onAdd) {
+                    Image(systemName: "plus.rectangle.on.rectangle")
+                        .font(.system(size: 15, weight: .medium))
+                        .frame(width: 34, height: 32)
+                }
+                .buttonStyle(.plain)
+                .disabled(isBusy)
+                .opacity(isBusy ? 0.4 : 1)
+                .accessibilityLabel("Add plate")
+            }
+            .padding(6)
+            .background(.ultraThinMaterial, in: Capsule())
+        }
+        .frame(height: 44)
+    }
+
+    private func chip(_ plate: ScenePlate) -> some View {
+        let current = plate.id == currentID
+        return Button {
+            onSelect(plate.id)
+        } label: {
+            HStack(spacing: 4) {
+                if plate.locked {
+                    Image(systemName: "lock.fill")
+                        .font(.caption2)
+                }
+                Text("\(plate.index + 1)")
+                    .font(.callout.weight(current ? .bold : .regular).monospacedDigit())
+                if plate.objectCount > 0 {
+                    Text("· \(plate.objectCount)")
+                        .font(.caption2.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .frame(minWidth: 34, minHeight: 32)
+            .padding(.horizontal, 6)
+            .background(
+                current ? Color.accentColor.opacity(0.25) : Color.clear,
+                in: RoundedRectangle(cornerRadius: 8)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 8)
+                    .strokeBorder(
+                        current ? Color.accentColor : Color.secondary.opacity(0.4),
+                        lineWidth: current ? 1.5 : 1
+                    )
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(isBusy)
+        .contextMenu {
+            Button {
+                onRename(plate)
+            } label: {
+                Label("Rename…", systemImage: "pencil")
+            }
+            Button {
+                onToggleLock(plate)
+            } label: {
+                Label(
+                    plate.locked ? "Unlock" : "Lock",
+                    systemImage: plate.locked ? "lock.open" : "lock"
+                )
+            }
+            Button {
+                onDuplicate(plate)
+            } label: {
+                Label("Duplicate", systemImage: "plus.square.on.square")
+            }
+            Button {
+                onMoveFront(plate)
+            } label: {
+                Label("Move to front", systemImage: "arrow.left.to.line")
+            }
+            Divider()
+            Button(role: .destructive) {
+                onDelete(plate)
+            } label: {
+                Label("Delete", systemImage: "trash")
+            }
+        }
+        .accessibilityLabel(plate.name)
+        .accessibilityHint(current ? "Current plate" : "\(plate.objectCount) object(s)")
     }
 }
 

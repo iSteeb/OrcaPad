@@ -28,6 +28,8 @@ private struct InstanceDraw {
     let selected: Bool
     let mirrored: Bool
     let printable: Bool
+    /// Plate assignment (index; -1 = off every plate).
+    let plate: Int
 }
 
 /// A part volume's triangle range inside the object's merged mesh (ABI v26):
@@ -82,6 +84,11 @@ final class Renderer: NSObject, MTKViewDelegate {
     // Bed grid
     private var gridVB: MTLBuffer!
     private var gridVertexCount: Int = 0
+    /// Outlines of the non-current plates (ABI v27): dimmed rectangles in
+    /// viewer space, rebuilt on every scene apply (cheap: <= 36 rects).
+    private var plateOutlineVertices: [VertexPC] = []
+    /// Index of the selected plate (for framing + outline dimming).
+    private var currentPlateIndex = 0
 
     // Scene objects (GPU buffers + CPU picking copies + instance matrices)
     private struct RenderObject {
@@ -339,7 +346,8 @@ final class Renderer: NSObject, MTKViewDelegate {
                         instance.id == selectedInstanceID) ||
                         highlightedInstanceIDs.contains(instance.id),
                     mirrored: instance.mirrored,
-                    printable: instance.printable
+                    printable: instance.printable,
+                    plate: instance.plate
                 )
             }
 
@@ -455,6 +463,36 @@ final class Renderer: NSObject, MTKViewDelegate {
         appliedRevision = scene.revision
         primaryObjectID = selectedObjectID
         primaryInstanceID = selectedInstanceID
+        // Inactive plates: dimmed outlines in viewer space (the current
+        // plate IS the rendered bed grid).
+        currentPlateIndex = scene.currentPlate
+        plateOutlineVertices = []
+        let dim = SIMD4<Float>(0.35, 0.38, 0.45, 1)
+        for plate in scene.plates where plate.index != scene.currentPlate {
+            let a = CoordinateMapper.viewerPoint(
+                fromEngine: SIMD3(
+                    plate.origin.x, plate.origin.y, 0
+                ),
+                bedCenter: bed.center
+            )
+            let b = CoordinateMapper.viewerPoint(
+                fromEngine: SIMD3(
+                    plate.origin.x + plate.size.x,
+                    plate.origin.y + plate.size.y, 0
+                ),
+                bedCenter: bed.center
+            )
+            let lo = SIMD3(min(a.x, b.x), 0.2, min(a.z, b.z))
+            let hi = SIMD3(max(a.x, b.x), 0.2, max(a.z, b.z))
+            let p00 = SIMD3(lo.x, lo.y, lo.z)
+            let p10 = SIMD3(hi.x, lo.y, lo.z)
+            let p11 = SIMD3(hi.x, lo.y, hi.z)
+            let p01 = SIMD3(lo.x, lo.y, hi.z)
+            for edge in [(p00, p10), (p10, p11), (p11, p01), (p01, p00)] {
+                plateOutlineVertices.append(VertexPC(position: edge.0, color: dim))
+                plateOutlineVertices.append(VertexPC(position: edge.1, color: dim))
+            }
+        }
         selectedInstanceIDs = rebuilt.flatMap { object in
             object.instances.filter(\.selected).map {
                 (objectID: object.objectID, instanceID: $0.instanceID)
@@ -475,8 +513,9 @@ final class Renderer: NSObject, MTKViewDelegate {
         var bbMin = SIMD3<Float>(repeating: .infinity)
         var bbMax = SIMD3<Float>(repeating: -.infinity)
         var any = false
+        // Desktop frames the CURRENT plate's content, never other plates'.
         for obj in objects {
-            for inst in obj.instances {
+            for inst in obj.instances where inst.plate == currentPlateIndex {
                 let m = inst.model
                 for c in [obj.bboxMin,
                           SIMD3(obj.bboxMax.x, obj.bboxMin.y, obj.bboxMin.z),
@@ -1073,6 +1112,30 @@ final class Renderer: NSObject, MTKViewDelegate {
         encoder.setVertexBytes(&lu, length: MemoryLayout<LineUniforms>.stride, index: 1)
         encoder.drawPrimitives(type: .line, vertexStart: 0, vertexCount: gridVertexCount)
         encoder.popDebugGroup()
+
+        // Inactive plate outlines (ABI v27): dimmed rectangles beside the
+        // rendered bed, drawn on top of the grid but under the objects.
+        if !plateOutlineVertices.isEmpty {
+            encoder.pushDebugGroup("plates")
+            encoder.setRenderPipelineState(linePipeline)
+            encoder.setDepthStencilState(overlayDepthState)
+            var plateUniforms = LineUniforms(mvp: viewProj)
+            encoder.setVertexBytes(
+                &plateUniforms,
+                length: MemoryLayout<LineUniforms>.stride, index: 1
+            )
+            var outlines = plateOutlineVertices
+            encoder.setVertexBytes(
+                &outlines,
+                length: MemoryLayout<VertexPC>.stride * outlines.count,
+                index: 0
+            )
+            encoder.drawPrimitives(
+                type: .line, vertexStart: 0,
+                vertexCount: outlines.count
+            )
+            encoder.popDebugGroup()
+        }
 
         // Objects × instances — uploaded vertices are viewer-space, recentred
         // (identity model base); each instance applies its own transform.

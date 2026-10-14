@@ -72,6 +72,14 @@ public final class EnginePlater: @unchecked Sendable {
         /// Desktop "Paste Process Settings": replaces every override of the
         /// target with `overrides` in one undo step (ABI v26).
         case applySettings(objectID: ObjectID, volumeID: VolumeID?, overrides: [String: String])
+        /// Plates (ABI v27): document-level plate mutations, one undo step
+        /// each. `addPlate` and `duplicatePlate` report the new plate's id.
+        case addPlate
+        case deletePlate(PlateID)
+        case renamePlate(PlateID, name: String)
+        case lockPlate(PlateID, locked: Bool)
+        case movePlateToFront(PlateID)
+        case duplicatePlate(PlateID)
         /// Group (multi-selection) absolute transforms; one undo step.
         case groupSetTransforms([GroupTransform], label: String)
         /// Group rotation about each instance's own origin; one undo step.
@@ -123,6 +131,9 @@ public final class EnginePlater: @unchecked Sendable {
         public let createdVolumeID: VolumeID?
         public let createdPartCount: Int
 
+        /// Plate created by `addPlate` / `duplicatePlate`.
+        public let createdPlateID: PlateID?
+
         /// Instances that did not fit the bed after `arrange` (0 otherwise).
         public let unprintableCount: Int
 
@@ -133,7 +144,8 @@ public final class EnginePlater: @unchecked Sendable {
             createdObjectCount: Int = 0,
             unprintableCount: Int = 0,
             createdVolumeID: VolumeID? = nil,
-            createdPartCount: Int = 0
+            createdPartCount: Int = 0,
+            createdPlateID: PlateID? = nil
         ) {
             self.snapshot = snapshot
             self.createdObjectID = createdObjectID
@@ -142,6 +154,7 @@ public final class EnginePlater: @unchecked Sendable {
             self.unprintableCount = unprintableCount
             self.createdVolumeID = createdVolumeID
             self.createdPartCount = createdPartCount
+            self.createdPlateID = createdPlateID
         }
     }
 
@@ -169,6 +182,41 @@ public final class EnginePlater: @unchecked Sendable {
     public func snapshot() throws -> SceneSnapshot {
         try lock.withLock {
             try snapshotLocked()
+        }
+    }
+
+    // MARK: Plates (ABI v27)
+
+    /// Bed geometry from the selected printer (client-driven; plate boxes
+    /// derive from it). Not undoable; returns the re-read snapshot.
+    public func setBed(
+        originX: Double, originY: Double,
+        width: Double, depth: Double, height: Double
+    ) throws -> SceneSnapshot {
+        try lock.withLock {
+            var raw = orca_scene_snapshot()
+            try BridgeResult.consume(
+                orca_plater_set_bed(
+                    handle, originX, originY, width, depth, height, &raw
+                ),
+                operation: "set bed geometry"
+            )
+            defer { orca_scene_snapshot_dispose(&raw) }
+            return try Self.decodeSnapshot(raw)
+        }
+    }
+
+    /// Selects the working plate (import target, slice source). Session
+    /// state; returns the re-read snapshot without a revision change.
+    public func selectPlate(_ id: PlateID) throws -> SceneSnapshot {
+        try lock.withLock {
+            var raw = orca_scene_snapshot()
+            try BridgeResult.consume(
+                orca_plater_plate_select(handle, id.rawValue, &raw),
+                operation: "select plate \(id)"
+            )
+            defer { orca_scene_snapshot_dispose(&raw) }
+            return try Self.decodeSnapshot(raw)
         }
     }
 
@@ -218,6 +266,7 @@ public final class EnginePlater: @unchecked Sendable {
             var arrangeUnprintableCount = 0
             var createdVolumeID: VolumeID?
             var createdPartCount = 0
+            var createdPlateID: PlateID?
             let presetHandle: OpaquePointer? = presets?.withUnsafeHandle { $0 }
 
             switch mutation {
@@ -757,6 +806,58 @@ public final class EnginePlater: @unchecked Sendable {
                     },
                     operation: "paste settings onto object \(objectID)"
                 )
+
+            case .addPlate:
+                var rawPlateID: UInt64 = 0
+                try BridgeResult.consume(
+                    orca_plater_plate_add(handle, &rawPlateID, &mutationRevision),
+                    operation: "add plate"
+                )
+                createdPlateID = try Self.plateID(rawPlateID, operation: "add plate")
+
+            case .deletePlate(let plateID):
+                try BridgeResult.consume(
+                    orca_plater_plate_delete(
+                        handle, plateID.rawValue, &mutationRevision
+                    ),
+                    operation: "delete plate \(plateID)"
+                )
+
+            case .renamePlate(let plateID, let name):
+                try BridgeResult.consume(
+                    name.withCString { namePointer in
+                        orca_plater_plate_rename(
+                            handle, plateID.rawValue, namePointer, &mutationRevision
+                        )
+                    },
+                    operation: "rename plate \(plateID)"
+                )
+
+            case .lockPlate(let plateID, let locked):
+                try BridgeResult.consume(
+                    orca_plater_plate_lock(
+                        handle, plateID.rawValue, locked ? 1 : 0, &mutationRevision
+                    ),
+                    operation: "\(locked ? "lock" : "unlock") plate \(plateID)"
+                )
+
+            case .movePlateToFront(let plateID):
+                try BridgeResult.consume(
+                    orca_plater_plate_move_to_front(
+                        handle, plateID.rawValue, &mutationRevision
+                    ),
+                    operation: "move plate \(plateID) to front"
+                )
+
+            case .duplicatePlate(let plateID):
+                var rawPlateID: UInt64 = 0
+                try BridgeResult.consume(
+                    orca_plater_plate_duplicate(
+                        handle, plateID.rawValue, &rawPlateID, &mutationRevision
+                    ),
+                    operation: "duplicate plate \(plateID)"
+                )
+                createdPlateID = try Self.plateID(rawPlateID, operation: "duplicate plate")
             }
 
             let scene = try snapshotLocked()
@@ -774,7 +875,8 @@ public final class EnginePlater: @unchecked Sendable {
                 createdObjectCount: createdObjectCount,
                 unprintableCount: arrangeUnprintableCount,
                 createdVolumeID: createdVolumeID,
-                createdPartCount: createdPartCount
+                createdPartCount: createdPartCount,
+                createdPlateID: createdPlateID
             )
         }
     }
@@ -893,7 +995,12 @@ public final class EnginePlater: @unchecked Sendable {
             operation: "read scene snapshot"
         )
         defer { orca_scene_snapshot_dispose(&rawSnapshot) }
+        return try Self.decodeSnapshot(rawSnapshot)
+    }
 
+    /// Decodes one raw ABI snapshot (owned by the caller, disposed by the
+    /// caller). Validates every value BEFORE constructing Swift types.
+    private static func decodeSnapshot(_ rawSnapshot: orca_scene_snapshot) throws -> SceneSnapshot {
         guard rawSnapshot.document_id != 0 else {
             throw Self.invariant(
                 operation: "read scene snapshot",
@@ -1010,7 +1117,8 @@ public final class EnginePlater: @unchecked Sendable {
                             transform: transform,
                             matrix: matrix,
                             mirrored: rawInstance.mirrored != 0,
-                            printable: rawInstance.printable != 0
+                            printable: rawInstance.printable != 0,
+                            plate: Int(rawInstance.plate)
                         ))
                     }
                 }
@@ -1075,12 +1183,69 @@ public final class EnginePlater: @unchecked Sendable {
             undoLabel: try Self.borrowedString(rawSnapshot.undo_label, operation: "read undo label"),
             redoLabel: try Self.borrowedString(rawSnapshot.redo_label, operation: "read redo label")
         )
+        var plates: [ScenePlate] = []
+        let plateCount = Int(rawSnapshot.plate_count)
+        if plateCount > 0 {
+            guard let platePointer = rawSnapshot.plates else {
+                throw Self.invariant(
+                    operation: "read scene snapshot",
+                    "Bridge returned plates without storage"
+                )
+            }
+            plates.reserveCapacity(plateCount)
+            for plateIndex in 0..<plateCount {
+                let rawPlate = platePointer[plateIndex]
+                let plateID = try Self.plateID(
+                    rawPlate.id,
+                    operation: "read scene snapshot"
+                )
+                guard rawPlate.index == Int32(plateIndex) else {
+                    throw Self.invariant(
+                        operation: "read scene snapshot",
+                        "Plate \(plateID) has a mismatched index \(rawPlate.index)"
+                    )
+                }
+                plates.append(ScenePlate(
+                    id: plateID,
+                    index: plateIndex,
+                    name: try Self.borrowedString(
+                        rawPlate.name,
+                        operation: "read name for plate \(plateID)"
+                    ),
+                    locked: rawPlate.locked != 0,
+                    origin: SIMD3(
+                        rawPlate.origin.0, rawPlate.origin.1, rawPlate.origin.2
+                    ),
+                    size: SIMD3(
+                        rawPlate.size.0, rawPlate.size.1, rawPlate.size.2
+                    ),
+                    objectCount: Int(rawPlate.object_count)
+                ))
+            }
+        }
+        guard plates.isEmpty == false else {
+            throw Self.invariant(
+                operation: "read scene snapshot",
+                "Bridge returned a document without plates"
+            )
+        }
         return SceneSnapshot(
             documentID: DocumentID(rawValue: rawSnapshot.document_id),
             revision: DocumentRevision(rawValue: rawSnapshot.revision),
             objects: objects,
+            plates: plates,
+            currentPlate: Int(rawSnapshot.current_plate),
             history: history
         )
+    }
+
+    private static func plateID(
+        _ raw: UInt64, operation: String
+    ) throws -> PlateID {
+        guard raw != 0 else {
+            throw invariant(operation: operation, "Bridge returned plate id 0")
+        }
+        return PlateID(rawValue: raw)
     }
 
     private static func borrowedString(

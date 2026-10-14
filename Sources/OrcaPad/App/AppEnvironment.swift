@@ -59,5 +59,9 @@ final class AppEnvironment {
         defer { isBootstrapping = false }
         await document.bootstrap()
         await presets.load()
+        // The plate grid derives from the selected machine's bed (ABI v27).
+        if let volume = presets.printVolume {
+            await document.syncBed(volume)
+        }
     }
 }

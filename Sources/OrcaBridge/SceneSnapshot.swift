@@ -37,6 +37,17 @@ public struct InstanceID: RawRepresentable, Hashable, Sendable, CustomStringConv
     public var description: String { String(rawValue) }
 }
 
+public struct PlateID: RawRepresentable, Hashable, Sendable, CustomStringConvertible {
+    public let rawValue: UInt64
+
+    public init(rawValue: UInt64) {
+        precondition(rawValue != 0, "PlateID must be nonzero")
+        self.rawValue = rawValue
+    }
+
+    public var description: String { String(rawValue) }
+}
+
 public struct VolumeID: RawRepresentable, Hashable, Sendable, CustomStringConvertible {
     public let rawValue: UInt64
 
@@ -205,16 +216,50 @@ public struct SceneInstance: Identifiable, Sendable {
     public let mirrored: Bool
     /// False when excluded from slicing (desktop printable toggle).
     public let printable: Bool
+    /// Index into the snapshot's plates (-1 = on no plate, not sliced).
+    public let plate: Int
 
     public init(
         id: InstanceID, transform: InstanceTransform, matrix: simd_double4x4,
-        mirrored: Bool, printable: Bool
+        mirrored: Bool, printable: Bool, plate: Int = 0
     ) {
         self.id = id
         self.transform = transform
         self.matrix = matrix
         self.mirrored = mirrored
         self.printable = printable
+        self.plate = plate
+    }
+}
+
+/// One plate of the document (desktop PartPlate): grid box, name, lock and
+/// how many objects sit on it.
+public struct ScenePlate: Identifiable, Sendable {
+    public let id: PlateID
+    public let index: Int
+    public let name: String
+    public let locked: Bool
+    /// Engine coords: min corner + width/depth/height of the plate box.
+    public let origin: SIMD3<Float>
+    public let size: SIMD3<Float>
+    public let objectCount: Int
+
+    public init(
+        id: PlateID, index: Int, name: String, locked: Bool,
+        origin: SIMD3<Float>, size: SIMD3<Float>, objectCount: Int
+    ) {
+        self.id = id
+        self.index = index
+        self.name = name
+        self.locked = locked
+        self.origin = origin
+        self.size = size
+        self.objectCount = objectCount
+    }
+
+    /// Center of the plate bed in engine X/Y (import target).
+    public var center: SIMD2<Float> {
+        SIMD2(origin.x + size.x / 2, origin.y + size.y / 2)
     }
 }
 
@@ -331,17 +376,25 @@ public struct SceneSnapshot: Sendable {
     public let documentID: DocumentID
     public let revision: DocumentRevision
     public let objects: [SceneObject]
+    /// Document plates, index order (>= 1).
+    public let plates: [ScenePlate]
+    /// Index of the selected plate (session state).
+    public let currentPlate: Int
     public let history: DocumentHistory
 
     public init(
         documentID: DocumentID,
         revision: DocumentRevision,
         objects: [SceneObject],
+        plates: [ScenePlate] = [],
+        currentPlate: Int = 0,
         history: DocumentHistory
     ) {
         self.documentID = documentID
         self.revision = revision
         self.objects = objects
+        self.plates = plates
+        self.currentPlate = currentPlate
         self.history = history
     }
 
@@ -351,5 +404,9 @@ public struct SceneSnapshot: Sendable {
 
     public func instance(objectID: ObjectID, instanceID: InstanceID) -> SceneInstance? {
         object(id: objectID)?.instances.first { $0.id == instanceID }
+    }
+
+    public func plate(id: PlateID) -> ScenePlate? {
+        plates.first { $0.id == id }
     }
 }

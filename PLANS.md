@@ -131,6 +131,13 @@ Device, each tab a clean feature module over the same stores.
       Copy/Paste Process Settings (one-step replace via settings_apply),
       parameter table, frequent-settings quick menu, object-list Settings
       child rows
+- [x] C9: multiple plates + Open-in (ABI v27) — Bridge-owned plate grid
+      (desktop layout, derived membership, locked-plate pins), plate bar UI
+      (select/add/rename/lock/duplicate/move-to-front/delete), arrange
+      overflow fills new plates, slicing targets the selected plate,
+      3MF projects round-trip plates, inactive plates drawn dimmed beside
+      the bed; Open-in from Files/Mail (document types, models import /
+      3MF opens as project). Remaining: "Select All Plates"/slice-all.
 - [x] Programmatic parity checker (`Bridge/tools/parity-check.py`): desktop
       surface extracted from upstream (551 items, 14 surfaces), manifest
       evidence verified, PARITY.md generated + commit-gated

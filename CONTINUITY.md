@@ -37,8 +37,8 @@
   (my comment TUs + its v25 objects) — NOT committed; next agent must
   rebuild/commit the archive for v25.
 - Parity source of truth: `Bridge/tools/parity-manifest.toml` → generated
-  PARITY.md "Remaining work" (551 desktop items, 152 features, 35% at v26;
-  next: plate.multi-plate (10), rotate/scale/lay-flat polish, then prepare
+  PARITY.md "Remaining work" (551 desktop items, 152 features, 36% at v27;
+  next: slice-all plates, then rotate/scale/lay-flat polish, prepare
   multi-filament and preview per-layer color).
 - [2026-10-07 USER] Order: Device printer web UI, then plate/object editing →
   prepare/presets → Files integration → preview. Deferred by user: STEP/SVG,
@@ -76,16 +76,22 @@
 
 ## PROGRESS
 
-- [2026-10-14 CODE] ABI v26 + C8 (selection/clipboard/part parity, 51,140
-  host checks PASS, archive rebuilt 312 TUs, build/audit/parity green,
-  parity 33%→35%, 42 done): marquee select + one-step group delete
-  (instances_delete promotes fully-selected objects), multi-object clipboard
-  + cut (objects_copy/paste keeps relative placement), canvas part selection
-  via snapshot merged-triangle ranges (raw_mesh() order, snapshot-invariant
-  guarded), Copy/Paste Process Settings (settings_apply = one-step replace),
-  parameter table, frequent-settings menu, object-list Settings rows.
-  UNCONFIRMED: on-device behavior (marquee drag, part tap, parameter table)
-  — user verification pending.
+- [2026-10-14 CODE] ABI v27 + C9 (plates + open-in, 51,326 host checks
+  PASS, archive 312 TUs, build/audit/parity green, 36% parity, 43 done):
+  Bridge plate grid (ceil-sqrt cols, 1.2x stride, max 36) with derived
+  membership (locked pins), plate_add/delete/rename/lock/move-to-front/
+  duplicate/select + set_bed; arrange overflow → new plates (locked = fixed
+  obstacles via arrange's excluded set); slice filters to the selected
+  plate (typed failure when empty); 3MF roundtrip adopts names/locks/
+  membership from the engine's PlateData; client: PlateBar chips, current
+  plate = rendered bed (viewer anchors to it), inactive plates dimmed,
+  frameScene = current plate; Open-in via CFBundleDocumentTypes +
+  onOpenURL (models import, 3MF = project flow). UNCONFIRMED on device.
+- [2026-10-14 CODE] ABI v26 + C8 (selection/clipboard/part parity, parity
+  33%→36% cumulative): marquee select + one-step group delete, multi-object
+  clipboard + cut, canvas part selection via merged-triangle ranges,
+  Copy/Paste Process Settings (one-step replace), parameter table,
+  frequent-settings menu, object-list Settings rows.
 - [2026-10-13/14, compressed] Gate E compliance landed (SPDX, license gate,
   source archive, About view); release-0.1.1 shipped end to end (run
   38413247330: external group + Beta App Review submitted; approval +

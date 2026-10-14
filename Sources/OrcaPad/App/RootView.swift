@@ -55,6 +55,71 @@ struct RootView: View {
         }
         .animation(.snappy, value: environment.status.alert)
         .preferredColorScheme(.dark)
+        .onChange(of: environment.presets.printVolume) { _, volume in
+            // Machine selection changed the bed: re-derive the plate grid.
+            guard let volume else { return }
+            Task { await environment.document.syncBed(volume) }
+        }
+        .onOpenURL { url in
+            handleOpenURL(url)
+        }
+        .confirmationDialog(
+            "Open project?",
+            isPresented: Binding(
+                get: { openInProjectURL != nil },
+                set: { if !$0 { openInProjectURL = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            Button("Replace current plate", role: .destructive) {
+                if let url = openInProjectURL {
+                    Task { await openProject(url) }
+                }
+                openInProjectURL = nil
+            }
+        } message: {
+            Text("Opening a project replaces the objects on the plate and loads the project's printer, filament and process settings. Unsaved changes are lost.")
+        }
+    }
+
+    // MARK: Open-in from Files / Mail (document types)
+
+    @State private var openInProjectURL: URL?
+
+    /// Models import into the document; 3MF opens as a project (with the
+    /// same replace-confirmation the File menu uses).
+    private func handleOpenURL(_ url: URL) {
+        let secured = url.startAccessingSecurityScopedResource()
+        defer { if secured { url.stopAccessingSecurityScopedResource() } }
+        guard url.pathExtension.lowercased() == "3mf" else {
+            Task {
+                selectedTab = .plate
+                if !environment.document.isReady {
+                    await environment.bootstrap()
+                }
+                guard environment.document.isReady else { return }
+                let center = environment.document.currentPlateCenter
+                    ?? environment.presets.printVolume.map {
+                        SIMD2($0.centerX, $0.centerY)
+                    }
+                    ?? .zero
+                await environment.document.importModel(from: url, bedCenter: center)
+            }
+            return
+        }
+        if environment.document.scene?.objects.isEmpty == false {
+            openInProjectURL = url
+        } else {
+            Task { await openProject(url) }
+        }
+    }
+
+    private func openProject(_ url: URL) async {
+        selectedTab = .plate
+        await environment.openProject(url)
+        if let volume = environment.presets.printVolume {
+            await environment.document.syncBed(volume)
+        }
     }
 
     /// SwiftUI calls the setter on every tab-button press, including

@@ -165,7 +165,7 @@ title = "Arrange"
 status = "done"
 desktop = ["toolbar:arrange", "context:Arrange", "plate:Arrange objects on current plate"]
 evidence = ["abi:orca_plater_arrange", 'client:func arrangeAll\(']
-note = "single plate: overflow is parked beside the bed until plate.multi-plate"
+note = "overflow fills additional plates (locked plates are fixed obstacles); beyond the 36-plate cap objects park beside the grid and count as unprintable"
 
 [[feature]]
 id = "plate.orient"
@@ -530,14 +530,20 @@ reason = "SLA remnants; OrcaSlicer ships FFF only"
 id = "plate.multi-plate"
 area = "plate"
 title = "Multiple plates (add / delete / select / lock / name / reorder / duplicate)"
-status = "missing"
+status = "partial"
 desktop = ["toolbar:addplate", "plate:Remove current plate (if not last one)", "plate:Lock current plate",
            "plate:Unlock current plate", "plate:Edit current plate name", "plate:Move plate to the front",
            "menu:Duplicate Current Plate", "context:Delete Plate", "context:Edit Plate Name", "context:Unlock",
            "context:Select All Plates", "dialog:PlateNameEditDialog"]
-work = "Client-reimpl + Bridge"
+evidence = ["abi:orca_plater_plate_add", "abi:orca_plater_plate_delete",
+            "abi:orca_plater_plate_rename", "abi:orca_plater_plate_lock",
+            "abi:orca_plater_plate_move_to_front", "abi:orca_plater_plate_duplicate",
+            "abi:orca_plater_plate_select", "abi:orca_plater_set_bed",
+            "client:struct PlateBar", 'client:func selectPlate\(']
+gap = "no \"Select All Plates\" / slice-all across plates (slicing targets the selected plate)"
+work = "Bridge + UI"
 priority = 10
-note = "PartPlate is GUI code; also completes arrange overflow and multi-plate 3MF"
+note = "ABI v27: Bridge-owned plate grid (desktop layout: ceil-sqrt columns, 1.2x stride, max 36), derived membership by position with locked-plate pins, arrange overflow fills new plates, 3MF roundtrip keeps names/locks/membership; slice = current plate only"
 
 [[feature]]
 id = "plate.plate-settings"
@@ -1265,10 +1271,10 @@ id = "files.project"
 area = "files"
 title = "3MF project open / save (presets, plate type, thumbnail)"
 status = "done"
-desktop = ["menu:Open Project", "menu:Save Project", "menu:Save Project as", "format:FT_PROJECT",
+desktop = ["menu:Open Project", "menu:Save Project as", "menu:Save Project", "format:FT_PROJECT",
            "dialog:Newer3mfVersionDialog"]
 evidence = ["abi:orca_project_open", "abi:orca_project_save", 'client:func saveProject\(']
-note = "single plate (multi-plate projects are rejected loudly)"
+note = "multi-plate projects round-trip (ABI v27): plate names, locks and membership persist; per-plate print settings remain single-plate (plate.plate-settings)"
 
 [[feature]]
 id = "files.new-project"
@@ -1356,11 +1362,12 @@ priority = 157
 id = "files.open-in"
 area = "files"
 title = "Open-in from Files / Mail (document types)"
-status = "missing"
+status = "done"
 desktop = ["pref:Associate 3MF files to OrcaSlicer", "pref:Associate STL files to OrcaSlicer",
            "pref:Associate STEP files to OrcaSlicer", "pref:Associate DRC files to OrcaSlicer"]
-work = "UI"
-priority = 150
+evidence = ["plist:CFBundleDocumentTypes", "plist:UTImportedTypeDeclarations",
+            "client:onOpenURL", "client:func handleOpenURL"]
+note = "document types for STL/OBJ/AMF/3MF; models import onto the current plate, 3MF opens as a project (replace confirmation); STEP/DRC remain deferred with the CAD closure"
 
 [[feature]]
 id = "files.model-links"

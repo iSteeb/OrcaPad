@@ -7,7 +7,7 @@ extern "C" {
 #endif
 
 /// Version of the C ABI contract in this header. Callers verify it at runtime.
-#define ORCA_BRIDGE_ABI_VERSION ((uint32_t)26)
+#define ORCA_BRIDGE_ABI_VERSION ((uint32_t)27)
 
 typedef int32_t orca_status_code;
 #define ORCA_STATUS_OK                     ((orca_status_code)0)
@@ -27,7 +27,12 @@ typedef uint64_t orca_document_id;
 typedef uint64_t orca_object_id;
 typedef uint64_t orca_instance_id;
 typedef uint64_t orca_volume_id;
+typedef uint64_t orca_plate_id;
 typedef uint64_t orca_revision;
+
+/// Desktop PartPlateList::MAX_PLATE_COUNT — the arranger never needs more;
+/// adding beyond this is a typed INVALID_ARGUMENT.
+#define ORCA_PLATE_MAX_COUNT ((int32_t)36)
 
 /// Bridge-allocated UTF-8. The caller owns `data` and must call
 /// orca_owned_string_dispose(), including for an empty string.
@@ -74,7 +79,25 @@ typedef struct {
     /// column-major. Clients render and preview from this matrix and never
     /// re-derive it from the Euler angles.
     double matrix[16];
+    /// Plate assignment (index into the snapshot's plate list, derived by
+    /// the Bridge: locked-plate pins first, then the first plate whose box
+    /// intersects the instance). -1 = on no plate (not sliced).
+    int32_t plate;
 } orca_scene_instance;
+
+/// One plate of the document (desktop PartPlate, minus GUI state). Plates
+/// live in a grid beside the bed: ceil-sqrt columns, 1.2x stride, rows
+/// growing in -Y (desktop compute_shape_position).
+typedef struct {
+    orca_plate_id id;            // stable across reorder
+    int32_t index;               // display / slice order
+    orca_owned_string name;
+    uint8_t locked;              // members pinned, arrange skips them
+    uint8_t reserved[3];
+    float origin[3];             // engine coords, min corner of the plate box
+    float size[3];               // width / depth / height (mm)
+    int32_t object_count;        // objects with >= 1 instance on this plate
+} orca_scene_plate;
 
 /// Volume roles: desktop ModelVolumeType (object list parts / modifiers).
 #define ORCA_VOLUME_PART             ((uint8_t)0)
@@ -134,6 +157,11 @@ typedef struct {
     orca_revision revision;
     orca_scene_object *objects;
     int32_t object_count;
+    /// The document's plates (index order); always >= 1.
+    orca_scene_plate *plates;
+    int32_t plate_count;
+    /// Index of the selected plate (session state, not undoable).
+    int32_t current_plate;
     /// Undo/redo history at this revision (desktop Plater::undo/redo):
     /// step counts and the label of the step each command would apply
     /// (empty when the stack is empty).
@@ -215,6 +243,48 @@ orca_result orca_plater_object_rename(orca_plater *plater, orca_object_id object
 /// Desktop "Delete all": removes every object (one undo step).
 /// ORCA_STATUS_INVALID_MODEL when the document is already empty.
 orca_result orca_plater_clear(orca_plater *plater, orca_revision *out_revision);
+
+// --- plates (ABI v27) ------------------------------------------------------
+
+/// Bed geometry from the selected printer's print volume (client-driven;
+/// desktop resets plate size when the machine changes). Derives every
+/// plate's box; assignment is recomputed on the next snapshot. Not undoable,
+/// does not advance the revision.
+orca_result orca_plater_set_bed(orca_plater *plater,
+                               double origin_x, double origin_y,
+                               double width, double depth, double height,
+                               orca_scene_snapshot *out_snapshot);
+/// Adds an empty plate (max ORCA_PLATE_MAX_COUNT). One undo step.
+orca_result orca_plater_plate_add(orca_plater *plater,
+                                  orca_plate_id *out_plate_id,
+                                  orca_revision *out_revision);
+/// Deletes a plate: typed INVALID_ARGUMENT for the last remaining plate or
+/// one that still carries objects (desktop refuses non-empty plates).
+orca_result orca_plater_plate_delete(orca_plater *plater, orca_plate_id plate_id,
+                                    orca_revision *out_revision);
+/// Renames a plate. One undo step.
+orca_result orca_plater_plate_rename(orca_plater *plater, orca_plate_id plate_id,
+                                     const char *name,
+                                     orca_revision *out_revision);
+/// Locks/unlocks: locking PINS every instance currently on the plate (they
+/// keep their assignment and are skipped by arrange); unlocking clears the
+/// pins. One undo step.
+orca_result orca_plater_plate_lock(orca_plater *plater, orca_plate_id plate_id,
+                                   uint8_t lock, orca_revision *out_revision);
+/// Desktop "Move plate to the front": reorders the plate to index 0 (the
+/// layout of the other plates follows). One undo step.
+orca_result orca_plater_plate_move_to_front(orca_plater *plater,
+                                            orca_plate_id plate_id,
+                                            orca_revision *out_revision);
+/// Duplicates a plate: copies every object with an instance on it (new
+/// stable IDs) onto a new trailing plate. One undo step.
+orca_result orca_plater_plate_duplicate(orca_plater *plater, orca_plate_id plate_id,
+                                         orca_plate_id *out_new_plate_id,
+                                         orca_revision *out_revision);
+/// Selects the plate the client works on (import target, slice source).
+/// Session state: not undoable, no revision change.
+orca_result orca_plater_plate_select(orca_plater *plater, orca_plate_id plate_id,
+                                     orca_scene_snapshot *out_snapshot);
 
 /// Built-in shapes (desktop GUI_ObjectList create_mesh). `size_mm` is the
 /// desktop side length (10% of the largest bed dimension). SLAB is only

@@ -104,6 +104,13 @@ contract test literal in the same commit)**
   object's merged mesh (ABI v26): client-side part picking and highlight
   without duplicating part geometry; the snapshot fails loudly if the
   ranges stop covering the merged mesh.
+- Plates are Bridge document state (ABI v27): a grid beside the bed
+  (ceil-sqrt columns, 1.2x stride, max 36) derived from the client-driven
+  bed geometry (`orca_plater_set_bed`), membership derived from instance
+  positions (locked plates pin theirs), arrange overflow fills new plates,
+  slicing filters to the selected plate, and 3MF projects round-trip plate
+  names/locks/membership. The selected plate is session state (like the
+  camera), not undoable.
 - Presets: entries expose engine vendor + `is_compatible`; overrides are
   written to the edited preset of a kind (`full_config()` merges edited
   presets, so slices consume them); edited vs system dumps detect changes.

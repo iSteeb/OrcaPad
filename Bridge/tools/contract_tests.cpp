@@ -276,7 +276,26 @@ static void test_md5_shim() {
 
 static void test_abi_version() {
     CHECK_EQ(orca_bridge_abi_version(), ORCA_BRIDGE_ABI_VERSION);
-    CHECK_EQ(ORCA_BRIDGE_ABI_VERSION, 26);
+    CHECK_EQ(ORCA_BRIDGE_ABI_VERSION, 27);
+}
+
+struct ProgressRecord {
+    std::atomic<int> calls{0};
+    std::atomic<int> max_percent{0};
+    std::atomic<int> min_percent{1000};
+};
+
+static void progress_trampoline(int32_t percent, const char *message,
+                                void *context) {
+    // Callbacks arrive serialized on the slicing thread.
+    ProgressRecord *record = static_cast<ProgressRecord *>(context);
+    record->calls += 1;
+    const int current = percent;
+    if (current > record->max_percent.load())
+        record->max_percent.store(current);
+    if (current < record->min_percent.load())
+        record->min_percent.store(current);
+    (void)message;
 }
 
 static std::string snapshot_label(const orca_owned_string &label) {
@@ -1477,6 +1496,407 @@ static void test_batch_operations(const std::string &dir) {
     }
     orca_plater_free(ranger);
 }
+// Extrusion X range of a gcode file (G1 moves with X and E), for the
+// per-plate slice filter checks.
+static std::pair<double, double> gcode_x_range(const char *path) {
+    FILE *file = fopen(path, "r");
+    CHECK(file != nullptr);
+    char line[512];
+    double min_x = 1e9, max_x = -1e9;
+    bool any = false;
+    while (file && fgets(line, sizeof line, file)) {
+        if (strncmp(line, "G1", 2) != 0) continue;
+        const char *x = strstr(line, " X");
+        const char *e = strstr(line, " E");
+        if (!x || !e) continue;
+        const double value = atof(x + 2);
+        min_x = std::min(min_x, value);
+        max_x = std::max(max_x, value);
+        any = true;
+    }
+    if (file) fclose(file);
+    CHECK(any);
+    return {min_x, max_x};
+}
+
+// ABI v27: plates — layout grid, derived assignment, mutations, lock pins,
+// per-plate slicing, arrange overflow and the 3MF roundtrip.
+static void test_plates(const std::string &dir, const std::string &data_dir) {
+    orca_plater *plater = nullptr;
+    GUARD(g0, orca_plater_new(&plater));
+    expect_ok(g0, "plater_new");
+    orca_revision revision = 0;
+    orca_scene_snapshot snap;
+
+    // --- bed validation + single-plate layout ------------------------------
+    GUARD(e0, orca_plater_set_bed(plater, 0, 0, -1, 100, 100, nullptr));
+    expect_code(e0, ORCA_STATUS_INVALID_ARGUMENT, "negative bed rejected");
+    GUARD(g1, orca_plater_set_bed(plater, 0, 0, 200, 200, 200, &snap));
+    expect_ok(g1, "set bed");
+    CHECK_EQ(snap.plate_count, 1);
+    CHECK_EQ(snap.current_plate, 0);
+    CHECK_EQ(snap.plates[0].index, 0);
+    CHECK_EQ(snap.plates[0].locked, 0);
+    CHECK(std::fabs(snap.plates[0].origin[0]) < 1e-6);
+    CHECK(std::fabs(snap.plates[0].origin[1]) < 1e-6);
+    CHECK(std::fabs(snap.plates[0].size[0] - 200.0) < 1e-6);
+    CHECK(std::fabs(snap.plates[0].size[2] - 200.0) < 1e-6);
+    orca_scene_snapshot_dispose(&snap);
+
+    // --- grid layout: 3 plates, ceil(sqrt(3)) = 2 columns, 1.2x stride ----
+    orca_plate_id plate2 = 0, plate3 = 0;
+    GUARD(g2, orca_plater_plate_add(plater, &plate2, &revision));
+    expect_ok(g2, "add plate 2");
+    GUARD(g3, orca_plater_plate_add(plater, &plate3, &revision));
+    expect_ok(g3, "add plate 3");
+    snap = take_snapshot(plater);
+    CHECK_EQ(snap.plate_count, 3);
+    CHECK_EQ(snap.undo_count, 2); // set_bed is not undoable; the adds are
+    CHECK(snapshot_label(snap.undo_label) == "Add plate");
+    CHECK(std::fabs(snap.plates[1].origin[0] - 240.0) < 1e-6);
+    CHECK(std::fabs(snap.plates[1].origin[1]) < 1e-6);
+    CHECK(std::fabs(snap.plates[2].origin[0]) < 1e-6);
+    CHECK(std::fabs(snap.plates[2].origin[1] + 240.0) < 1e-6);
+    CHECK_EQ(snap.plates[1].id, plate2);
+    CHECK_EQ(snap.plates[2].id, plate3);
+    orca_scene_snapshot_dispose(&snap);
+
+    // --- assignment by position --------------------------------------------
+    const std::string cube = write_cube_stl(dir, "plates_cube.stl");
+    orca_object_id a = 0, b = 0;
+    GUARD(g4, import_one(plater, cube.c_str(), 100, 100, &a, &revision));
+    GUARD(g5, import_one(plater, cube.c_str(), 340, 100, &b, &revision));
+    expect_ok(g4, "import a");
+    expect_ok(g5, "import b");
+    orca_instance_id b_instance = 0;
+    orca_instance_transform b_transform{};
+    snap = take_snapshot(plater);
+    CHECK_EQ(find_object(snap, a)->instances[0].plate, 0);
+    CHECK_EQ(find_object(snap, b)->instances[0].plate, 1);
+    CHECK_EQ(snap.plates[0].object_count, 1);
+    CHECK_EQ(snap.plates[1].object_count, 1);
+    CHECK_EQ(snap.plates[2].object_count, 0);
+    b_instance = find_object(snap, b)->instances[0].id;
+    b_transform = find_object(snap, b)->instances[0].transform;
+    orca_scene_snapshot_dispose(&snap);
+
+    // --- delete: empty ok (one undo step), non-empty/last rejected --------
+    GUARD(e1, orca_plater_plate_delete(plater, plate2, &revision));
+    expect_code(e1, ORCA_STATUS_INVALID_ARGUMENT, "delete a non-empty plate");
+    GUARD(g6, orca_plater_plate_delete(plater, plate3, &revision));
+    expect_ok(g6, "delete an empty plate");
+    snap = take_snapshot(plater);
+    CHECK_EQ(snap.plate_count, 2);
+    orca_scene_snapshot_dispose(&snap);
+    GUARD(g7, orca_plater_undo(plater, &revision));
+    expect_ok(g7, "undo plate delete");
+    snap = take_snapshot(plater);
+    CHECK_EQ(snap.plate_count, 3);
+    CHECK_EQ(snap.plates[2].id, plate3); // stable ids across undo
+    orca_scene_snapshot_dispose(&snap);
+    GUARD(g8, orca_plater_plate_delete(plater, plate3, &revision));
+    expect_ok(g8, "delete plate 3 again");
+    const orca_plate_id plate1 = [&] {
+        orca_scene_snapshot s = take_snapshot(plater);
+        const orca_plate_id id = s.plates[0].id;
+        orca_scene_snapshot_dispose(&s);
+        return id;
+    }();
+    GUARD(e2, orca_plater_plate_delete(plater, plate1, &revision));
+    expect_code(e2, ORCA_STATUS_INVALID_ARGUMENT, "delete the last plate");
+    GUARD(e3, orca_plater_plate_delete(plater, 999999, &revision));
+    expect_code(e3, ORCA_STATUS_NOT_FOUND, "delete a missing plate");
+
+    // --- rename + select (session state, no revision advance) -------------
+    GUARD(g9, orca_plater_plate_rename(plater, plate2, "Benchy plate", &revision));
+    expect_ok(g9, "rename plate");
+    const orca_revision before_select = revision;
+    GUARD(g10, orca_plater_plate_select(plater, plate2, &snap));
+    expect_ok(g10, "select plate 2");
+    CHECK_EQ(snap.current_plate, 1);
+    CHECK_EQ(snap.revision, before_select);
+    CHECK(std::string(snap.plates[1].name.data ? snap.plates[1].name.data : "") ==
+          "Benchy plate");
+    orca_scene_snapshot_dispose(&snap);
+    GUARD(e4, orca_plater_plate_select(plater, 424242, &snap));
+    expect_code(e4, ORCA_STATUS_NOT_FOUND, "select a missing plate");
+
+    // --- duplicate: members copied onto a trailing plate -------------------
+    GUARD(e5d, orca_plater_plate_duplicate(plater, 424242, &plate3, &revision));
+    expect_code(e5d, ORCA_STATUS_NOT_FOUND, "duplicate a missing plate");
+    orca_plate_id plate2_copy = 0;
+    GUARD(g9d, orca_plater_plate_duplicate(plater, plate2, &plate2_copy, &revision));
+    expect_ok(g9d, "duplicate plate 2");
+    snap = take_snapshot(plater);
+    CHECK_EQ(snap.plate_count, 3); // back to 3 (plate 3 was deleted earlier)
+    CHECK_EQ(snap.object_count, 3); // a, b, and b's copy
+    CHECK_EQ(snap.plates[2].object_count, 1);
+    CHECK(snapshot_label(snap.undo_label) == "Duplicate plate");
+    orca_scene_snapshot_dispose(&snap);
+    GUARD(g10d, orca_plater_undo(plater, &revision));
+    expect_ok(g10d, "undo duplicate plate");
+    snap = take_snapshot(plater);
+    CHECK_EQ(snap.object_count, 2);
+    CHECK_EQ(snap.plate_count, 2);
+    orca_scene_snapshot_dispose(&snap);
+
+    // --- move to front: reorder keeps the selected plate selected ----------
+    GUARD(g11d, orca_plater_plate_select(plater, plate2, &snap));
+    expect_ok(g11d, "select plate 2 again");
+    CHECK_EQ(snap.current_plate, 1);
+    orca_scene_snapshot_dispose(&snap);
+    GUARD(g12d, orca_plater_plate_move_to_front(plater, plate2, &revision));
+    expect_ok(g12d, "move plate 2 to front");
+    snap = take_snapshot(plater);
+    CHECK_EQ(snap.plates[0].id, plate2);
+    CHECK_EQ(snap.current_plate, 0); // selection followed the plate
+    CHECK_EQ(snap.plates[0].object_count, 1);
+    CHECK(snapshot_label(snap.undo_label) == "Move plate to front");
+    orca_scene_snapshot_dispose(&snap);
+    GUARD(g13d, orca_plater_plate_move_to_front(plater, plate2, &revision));
+    expect_code(g13d, ORCA_STATUS_INVALID_ARGUMENT, "move the first plate to front");
+    GUARD(g14d, orca_plater_undo(plater, &revision));
+    expect_ok(g14d, "undo move to front");
+    snap = take_snapshot(plater);
+    CHECK_EQ(snap.plates[1].id, plate2); // order restored
+    // selection is session state: it stays at the INDEX (0), not the plate
+    CHECK_EQ(snap.current_plate, 0);
+    orca_scene_snapshot_dispose(&snap);
+    GUARD(g15d, orca_plater_plate_select(plater, plate2, &snap));
+    expect_ok(g15d, "reselect plate 2");
+    orca_scene_snapshot_dispose(&snap);
+
+    // --- lock pins: assignment survives moves; unlock returns to position --
+    GUARD(g11, orca_plater_plate_lock(plater, plate2, 1, &revision));
+    expect_ok(g11, "lock plate 2");
+    orca_instance_transform moved = b_transform;
+    moved.offset_x = 100; // squarely on plate 0
+    moved.offset_y = 150;
+    GUARD(g12, orca_plater_instance_set(plater, b, b_instance, &moved, "Move",
+                                        &revision));
+    expect_ok(g12, "move pinned object onto plate 0");
+    snap = take_snapshot(plater);
+    CHECK_EQ(find_object(snap, b)->instances[0].plate, 1); // PIN sticks
+    orca_scene_snapshot_dispose(&snap);
+    GUARD(g13, orca_plater_plate_lock(plater, plate2, 0, &revision));
+    expect_ok(g13, "unlock plate 2");
+    snap = take_snapshot(plater);
+    CHECK_EQ(find_object(snap, b)->instances[0].plate, 0); // position rules again
+    orca_scene_snapshot_dispose(&snap);
+    GUARD(g14, orca_plater_instance_set(plater, b, b_instance, &b_transform,
+                                        "Move back", &revision));
+    expect_ok(g14, "move b back to plate 1");
+
+    // --- slice sees only the selected plate --------------------------------
+    GUARD(g15, orca_plater_plate_select(plater, plate2, &snap));
+    expect_ok(g15, "select plate 2 for slicing");
+    orca_scene_snapshot_dispose(&snap);
+    const std::string gcode_p2 = dir + "/plates-2.gcode";
+    {
+        ProgressRecord progress;
+        orca_slice_report report;
+        GUARD(g16, orca_plater_slice_to_gcode(
+                      plater, gcode_p2.c_str(), progress_trampoline, &progress,
+                      nullptr, &report));
+        expect_ok(g16, "slice plate 2");
+        orca_slice_report_dispose(&report);
+        const auto range = gcode_x_range(gcode_p2.c_str());
+        // only b (x 330..350): inside plate 1's 240..440 box
+        CHECK(range.first >= 240.0 && range.second <= 440.0);
+    }
+    GUARD(g17, orca_plater_plate_select(plater, plate1, &snap));
+    expect_ok(g17, "select plate 1 for slicing");
+    orca_scene_snapshot_dispose(&snap);
+    const std::string gcode_p1 = dir + "/plates-1.gcode";
+    {
+        ProgressRecord progress;
+        orca_slice_report report;
+        GUARD(g18, orca_plater_slice_to_gcode(
+                      plater, gcode_p1.c_str(), progress_trampoline, &progress,
+                      nullptr, &report));
+        expect_ok(g18, "slice plate 1");
+        orca_slice_report_dispose(&report);
+        const auto range = gcode_x_range(gcode_p1.c_str());
+        // only a (x 90..110) — and NEVER b
+        CHECK(range.first >= 0.0 && range.second <= 200.0);
+    }
+    orca_plater_free(plater);
+
+    // --- empty plate slicing is a typed failure ----------------------------
+    {
+        orca_plater *empty = nullptr;
+        GUARD(n0, orca_plater_new(&empty));
+        expect_ok(n0, "plater_new empty");
+        orca_scene_snapshot s;
+        GUARD(n1, orca_plater_set_bed(empty, 0, 0, 200, 200, 200, &s));
+        expect_ok(n1, "set bed empty");
+        orca_scene_snapshot_dispose(&s);
+        GUARD(n2, orca_plater_plate_add(empty, &plate2, &revision));
+        expect_ok(n2, "add plate to empty doc");
+        orca_object_id unused = 0;
+        GUARD(n3, import_one(empty, cube.c_str(), 100, 100, &unused, &revision));
+        expect_ok(n3, "import onto plate 1");
+        GUARD(n4, orca_plater_plate_select(empty, plate2, &s));
+        expect_ok(n4, "select empty plate");
+        orca_scene_snapshot_dispose(&s);
+        ProgressRecord progress;
+        orca_slice_report report;
+        GUARD(e5, orca_plater_slice_to_gcode(
+                      empty, (dir + "/plates-empty.gcode").c_str(),
+                      progress_trampoline, &progress, nullptr, &report));
+        expect_code(e5, ORCA_STATUS_INVALID_MODEL, "slice an empty plate");
+        orca_plater_free(empty);
+    }
+
+    // --- arrange overflow becomes plates (Vyper 250x255) -------------------
+    {
+        orca_presets *presets = nullptr;
+        GUARD(p0, orca_presets_new(data_dir.c_str(), &presets));
+        expect_ok(p0, "presets_new plates");
+        orca_owned_string vyper_filament, vyper_process;
+        GUARD(pf, orca_presets_list_name(presets, 1, 0, &vyper_filament));
+        expect_ok(pf, "vyper filament names[0]");
+        GUARD(pp, orca_presets_list_name(presets, 2, 0, &vyper_process));
+        expect_ok(pp, "vyper process names[0]");
+        GUARD(p1, orca_presets_select(presets, "Anycubic Vyper 0.4 nozzle",
+                                      vyper_filament.data, vyper_process.data));
+        expect_ok(p1, "select Vyper");
+        orca_owned_string_dispose(&vyper_filament);
+        orca_owned_string_dispose(&vyper_process);
+        orca_plater *arranger = nullptr;
+        GUARD(p2, orca_plater_new(&arranger));
+        expect_ok(p2, "plater_new arranger");
+        orca_scene_snapshot s;
+        GUARD(p3, orca_plater_set_bed(arranger, 0, 0, 250, 255, 265, &s));
+        expect_ok(p3, "set Vyper bed");
+        CHECK_EQ(s.plate_count, 1);
+        orca_scene_snapshot_dispose(&s);
+        orca_object_id big = 0;
+        GUARD(p4, import_one(arranger, cube.c_str(), 100, 100, &big, &revision));
+        expect_ok(p4, "import for arrange");
+        // 60 mm cubes (scale 3), 30 instances: the 250x255 bed fits ~9,
+        // the rest must spill onto new plates.
+        std::vector<orca_instance_id> instances;
+        {
+            orca_scene_snapshot first = take_snapshot(arranger);
+            instances.push_back(find_object(first, big)->instances[0].id);
+            orca_instance_transform t = find_object(first, big)->instances[0].transform;
+            t.scale_x = 3; t.scale_y = 3; t.scale_z = 3;
+            orca_scene_snapshot_dispose(&first);
+            GUARD(p5, orca_plater_instance_set(arranger, big, instances[0], &t,
+                                               "Scale", &revision));
+            expect_ok(p5, "scale first instance");
+        }
+        for (int i = 1; i < 30; ++i) {
+            orca_instance_id added = 0;
+            GUARD(p6, orca_plater_instance_add(arranger, big, &added, &revision));
+            expect_ok(p6, "add instance");
+            instances.push_back(added);
+        }
+        // scale every instance (arrange works on the transformed footprints)
+        {
+            orca_scene_snapshot cur = take_snapshot(arranger);
+            orca_instance_transform t{};
+            for (int32_t o = 0; o < cur.object_count; ++o)
+                if (cur.objects[o].id == big) {
+                    t = cur.objects[o].instances[0].transform;
+                    break;
+                }
+            t.scale_x = 3; t.scale_y = 3; t.scale_z = 3;
+            for (orca_instance_id id : instances) {
+                GUARD(p7, orca_plater_instance_set(arranger, big, id, &t,
+                                                   "Scale", &revision));
+                expect_ok(p7, "scale instance");
+            }
+            orca_scene_snapshot_dispose(&cur);
+        }
+        uint32_t unprintable = 0;
+        GUARD(p8, orca_plater_arrange(arranger, presets, 0, &unprintable,
+                                      &revision));
+        expect_ok(p8, "arrange overflow");
+        CHECK_EQ(unprintable, 0u);
+        s = take_snapshot(arranger);
+        CHECK(s.plate_count > 1);
+        int32_t unplaced = 0;
+        for (int32_t o = 0; o < s.object_count; ++o)
+            for (int32_t i = 0; i < s.objects[o].instance_count; ++i)
+                if (s.objects[o].instances[i].plate < 0) ++unplaced;
+        CHECK_EQ(unplaced, 0);
+        // arrange is ONE undo step and reverting it removes the created plates
+        GUARD(p9, orca_plater_undo(arranger, &revision));
+        expect_ok(p9, "undo arrange");
+        s = take_snapshot(arranger);
+        CHECK_EQ(s.plate_count, 1);
+        orca_scene_snapshot_dispose(&s);
+        orca_plater_free(arranger);
+        orca_presets_free(presets);
+    }
+
+    // --- 3MF roundtrip: plate names, locks, membership ----------------------
+    {
+        orca_presets *presets = nullptr;
+        GUARD(r0, orca_presets_new(data_dir.c_str(), &presets));
+        expect_ok(r0, "presets_new roundtrip");
+        GUARD(r1, orca_presets_select(presets, "Bambu Lab X1 Carbon 0.4 nozzle",
+                                      "Bambu PLA Basic @BBL X1C",
+                                      "0.20mm Standard @BBL X1C"));
+        expect_ok(r1, "select X1C");
+        orca_plater *writer = nullptr;
+        GUARD(r2, orca_plater_new(&writer));
+        expect_ok(r2, "plater_new writer");
+        orca_scene_snapshot s;
+        GUARD(r3, orca_plater_set_bed(writer, 0, 0, 200, 200, 200, &s));
+        expect_ok(r3, "set bed writer");
+        orca_scene_snapshot_dispose(&s);
+        orca_plate_id p2 = 0;
+        GUARD(r4, orca_plater_plate_add(writer, &p2, &revision));
+        expect_ok(r4, "roundtrip add plate");
+        GUARD(r5, orca_plater_plate_rename(writer, p2, "Roundtrip plate", &revision));
+        expect_ok(r5, "roundtrip rename");
+        orca_object_id left = 0, right = 0;
+        GUARD(r6, import_one(writer, cube.c_str(), 100, 100, &left, &revision));
+        GUARD(r7, import_one(writer, cube.c_str(), 340, 100, &right, &revision));
+        expect_ok(r6, "roundtrip import left");
+        expect_ok(r7, "roundtrip import right");
+        GUARD(r8, orca_plater_plate_lock(writer, p2, 1, &revision));
+        expect_ok(r8, "roundtrip lock");
+        const std::string project = dir + "/plates.3mf";
+        GUARD(r9, orca_project_save(writer, presets, project.c_str(), 0, nullptr));
+        expect_ok(r9, "roundtrip save");
+        orca_plater_free(writer);
+
+        orca_plater *reader = nullptr;
+        GUARD(r10, orca_plater_new(&reader));
+        expect_ok(r10, "plater_new reader");
+        GUARD(r11, orca_plater_set_bed(reader, 0, 0, 200, 200, 200, &s));
+        expect_ok(r11, "set bed reader");
+        orca_scene_snapshot_dispose(&s);
+        orca_presets *reader_presets = nullptr;
+        GUARD(r12, orca_presets_new(data_dir.c_str(), &reader_presets));
+        expect_ok(r12, "presets_new reader");
+        orca_project_info info;
+        GUARD(r13, orca_project_open(reader, reader_presets, project.c_str(), &info));
+        expect_ok(r13, "roundtrip open");
+        CHECK_EQ(info.plate_count, 2u);
+        s = take_snapshot(reader);
+        CHECK_EQ(s.plate_count, 2);
+        CHECK_EQ(s.plates[1].locked, 1);
+        CHECK(std::string(s.plates[1].name.data ? s.plates[1].name.data : "") ==
+              "Roundtrip plate");
+        // the second object stays pinned to the locked plate
+        int32_t right_plate = -1;
+        for (int32_t o = 0; o < s.object_count; ++o)
+            if (std::string(s.objects[o].name.data ? s.objects[o].name.data : "")
+                    .find("plates_cube") != std::string::npos &&
+                s.objects[o].instances[0].transform.offset_x > 300.0)
+                right_plate = s.objects[o].instances[0].plate;
+        CHECK_EQ(right_plate, 1);
+        orca_scene_snapshot_dispose(&s);
+        orca_plater_free(reader);
+        orca_presets_free(reader_presets);
+        orca_presets_free(presets);
+    }
+}
 // ABI v23: object operations (printable, instance count, clone, instance to
 // object, assemble, scale to fit, unit conversion).
 static void test_object_ops(const std::string &dir, const std::string &data_dir) {
@@ -2078,25 +2498,6 @@ static void test_select_machine(const std::string &dir, const std::string &data_
 
     orca_plater_free(plater);
     orca_presets_free(presets);
-}
-
-struct ProgressRecord {
-    std::atomic<int> calls{0};
-    std::atomic<int> max_percent{0};
-    std::atomic<int> min_percent{1000};
-};
-
-static void progress_trampoline(int32_t percent, const char *message,
-                                void *context) {
-    // Callbacks arrive serialized on the slicing thread.
-    ProgressRecord *record = static_cast<ProgressRecord *>(context);
-    record->calls += 1;
-    const int current = percent;
-    if (current > record->max_percent.load())
-        record->max_percent.store(current);
-    if (current < record->min_percent.load())
-        record->min_percent.store(current);
-    (void)message;
 }
 
 static void check_slice_outputs(const char *gcode_path,
@@ -3440,6 +3841,7 @@ int main() {
     test_group_transforms(dir);
     test_object_settings(dir);
     test_batch_operations(dir);
+    test_plates(dir, data_dir);
     test_object_ops(dir, data_dir);
     test_add_failures(dir);
     test_stable_ids_and_revisions(dir);

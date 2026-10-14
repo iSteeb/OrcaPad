@@ -285,6 +285,14 @@ in ~/xtool-cheatsheet.md — link, don't duplicate.)
   the snapshot builder FAILS LOUDLY when the ranges stop covering the merged
   mesh. Never weaken that check if upstream reshapes raw_mesh — a silent
   mismatch would mis-map every part pick.
+- Plate membership is DERIVED from instance positions (ABI v27): never
+  store a client-side copy as a second authority. The only stored state is
+  the plate list (names/locks/pins); the engine's 3mf PlateData already
+  carries names/locks/membership — adopt it on open, write it on save.
+- Plate selection (like the camera) is session state: it must NEVER advance
+  the revision, and undo/redo must NOT restore it (only clamp its index).
+  Documents with zero plates are an internal-invariant failure — every
+  plater is born with one.
 - All-or-nothing edit scripts lose EVERY edit when one anchor no longer
   matches (e.g. an edit that already landed on a previous run). Make each
   scripted edit idempotent (skip when the new text is present) or apply one

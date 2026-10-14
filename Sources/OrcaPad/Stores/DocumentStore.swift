@@ -957,6 +957,88 @@ final class DocumentStore {
         )
     }
 
+    // MARK: Plates (ABI v27; desktop plate bar)
+
+    /// The document's plates (index order); derived from the snapshot.
+    var plates: [ScenePlate] { scene?.plates ?? [] }
+
+    /// The selected plate (working plate: import target + slice source).
+    var currentPlate: ScenePlate? {
+        guard let scene, scene.currentPlate >= 0,
+              scene.currentPlate < scene.plates.count else { return nil }
+        return scene.plates[scene.currentPlate]
+    }
+
+    /// Import anchor of the working plate (bed-center semantics).
+    var currentPlateCenter: SIMD2<Double>? {
+        currentPlate.map { SIMD2(Double($0.center.x), Double($0.center.y)) }
+    }
+
+    /// Bed geometry sync: the plate grid derives from the selected machine's
+    /// print volume (client-driven; desktop resets plate size on machine
+    /// change). The z range is open — every instance rests on the bed, so
+    /// assignment is decided by the X/Y footprint.
+    func syncBed(_ volume: PrintVolume) async {
+        guard let plater else { return }
+        let result = await BackgroundWork.run(operation: "sync bed geometry") {
+            try plater.setBed(
+                originX: volume.minX, originY: volume.minY,
+                width: volume.width, depth: volume.depth, height: 1000.0
+            )
+        }
+        switch result {
+        case .success(let snapshot):
+            install(snapshot)
+        case .failure(let failure):
+            status.report(.document, failure: failure)
+        }
+    }
+
+    func addPlate() async {
+        if let mutation = await applyMutation(.addPlate, operation: "add plate"),
+           let plate = mutation.createdPlateID.flatMap({ mutation.snapshot.plate(id: $0) }) {
+            status.report(.document, "added \(plate.name)")
+        }
+    }
+
+    func deletePlate(_ id: PlateID) async {
+        _ = await applyMutation(.deletePlate(id), operation: "delete plate")
+    }
+
+    func renamePlate(_ id: PlateID, to name: String) async {
+        _ = await applyMutation(.renamePlate(id, name: name), operation: "rename plate")
+    }
+
+    func lockPlate(_ id: PlateID, locked: Bool) async {
+        _ = await applyMutation(
+            .lockPlate(id, locked: locked),
+            operation: locked ? "lock plate" : "unlock plate"
+        )
+    }
+
+    func movePlateToFront(_ id: PlateID) async {
+        _ = await applyMutation(.movePlateToFront(id), operation: "move plate to front")
+    }
+
+    func duplicatePlate(_ id: PlateID) async {
+        _ = await applyMutation(.duplicatePlate(id), operation: "duplicate plate")
+    }
+
+    /// Selects the working plate (session state) and re-frames the camera.
+    func selectPlate(_ id: PlateID) async {
+        guard let plater, !isBusy else { return }
+        let result = await BackgroundWork.run(operation: "select plate") {
+            try plater.selectPlate(id)
+        }
+        switch result {
+        case .success(let snapshot):
+            install(snapshot)
+            frameRequest += 1
+        case .failure(let failure):
+            status.report(.document, failure: failure)
+        }
+    }
+
     // MARK: Arrange / orient / lay flat (desktop toolbar parity)
 
     func arrangeAll(presets: EnginePresets, allowRotations: Bool) async {
