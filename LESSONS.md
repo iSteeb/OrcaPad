@@ -302,6 +302,10 @@ in ~/xtool-cheatsheet.md — link, don't duplicate.)
   never-dereferenced function argument!). `set_plate_origin(index)`+
   `set_plate_name` are now mandatory in every Bridge slice path; per-plate
   G-code is plate-relative and the client preview shifts it back.
+- Release tags do NOT wait for a local iPoke install [USER 2026-10-14]:
+  tag after the local gates are green; iPoke receives the build through
+  TestFlight (external group) — device verification happens there, after
+  Beta App Review approval.
 - Diagnose engine corruption with a FAST standalone probe (link against
   `Bridge/build-host/libengine-host.a`, ~20 s iterations), never by rerunning
   the full host suite per hypothesis — a 6-minute gate per guess cost 45 min

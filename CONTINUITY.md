@@ -2,6 +2,11 @@
 
 ## PLAN
 
+- [2026-10-14 USER] Feature priority = app "feels complete": high-traffic
+  interactions (transforms, core loop) BEFORE raw parity %. Release flow:
+  tag after local gates, NO pre-tag device install - iPoke gets builds via
+  TestFlight.
+
 - Current goal: desktop feature parity over the three-module architecture
   (Swift Client → Bridge → untouched Engine). [USER 2026-10-07: "complete
   feature parity, highest priority first, mark completions in the .md files"]

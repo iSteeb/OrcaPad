@@ -254,6 +254,7 @@ Ground rules for the matrix:
   (`65476863+iSteeb@users.noreply.github.com`) [USER 2026-10-13]; history
   was rewritten to it on 2026-10-13, so every earlier commit SHA changed.
 - Pushes to `main` run no CI. A `release*` tag ships an external TestFlight
-  build and costs a Beta App Review: tag deliberately, only after the local
-  gates and a device check.
+  build and costs a Beta App Review: tag deliberately once the local gates
+  are green [USER 2026-10-14: no pre-tag device install needed — iPoke
+  receives releases through TestFlight; verify on device after approval].
 - Never commit built artifacts, logs, or provision profiles.
