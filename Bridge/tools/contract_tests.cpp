@@ -276,7 +276,7 @@ static void test_md5_shim() {
 
 static void test_abi_version() {
     CHECK_EQ(orca_bridge_abi_version(), ORCA_BRIDGE_ABI_VERSION);
-    CHECK_EQ(ORCA_BRIDGE_ABI_VERSION, 25);
+    CHECK_EQ(ORCA_BRIDGE_ABI_VERSION, 26);
 }
 
 static std::string snapshot_label(const orca_owned_string &label) {
@@ -1173,6 +1173,309 @@ static void test_object_settings(const std::string &dir) {
         orca_scene_snapshot_dispose(&snap);
     }
     orca_plater_free(plater);
+}
+// ABI v26: batch delete (one undo step), multi-object clipboard, batch
+// settings apply (one undo step) and part triangle ranges in snapshots.
+static void test_batch_operations(const std::string &dir) {
+    orca_plater *plater = nullptr;
+    GUARD(g0, orca_plater_new(&plater));
+    expect_ok(g0, "plater_new");
+    orca_revision revision = 0;
+    const std::string cube = write_cube_stl(dir, "batch_cube.stl");
+    orca_object_id a = 0, b = 0, c = 0;
+    GUARD(g1, import_one(plater, cube.c_str(), 30, 30, &a, &revision));
+    GUARD(g2, import_one(plater, cube.c_str(), 60, 30, &b, &revision));
+    GUARD(g3, import_one(plater, cube.c_str(), 90, 30, &c, &revision));
+    expect_ok(g1, "import a");
+    expect_ok(g2, "import b");
+    expect_ok(g3, "import c");
+
+    // --- batch delete: atomic on a missing ID, ONE undo step -------------
+    {
+        orca_scene_snapshot snap = take_snapshot(plater);
+        const uint32_t undo_before = snap.undo_count;
+        orca_scene_snapshot_dispose(&snap);
+        const orca_object_id missing[2] = {a, 999999};
+        GUARD(e0, orca_plater_objects_delete(plater, missing, 2, &revision));
+        expect_code(e0, ORCA_STATUS_NOT_FOUND, "batch delete with a missing ID");
+        GUARD(e1, orca_plater_objects_delete(plater, nullptr, 1, &revision));
+        expect_code(e1, ORCA_STATUS_INVALID_ARGUMENT, "batch delete null array");
+        GUARD(e2, orca_plater_objects_delete(plater, &a, 0, &revision));
+        expect_code(e2, ORCA_STATUS_INVALID_ARGUMENT, "batch delete zero count");
+        snap = take_snapshot(plater);
+        CHECK_EQ(snap.object_count, 3);
+        orca_scene_snapshot_dispose(&snap);
+
+        const orca_object_id pair[3] = {a, b, a}; // duplicate collapses
+        GUARD(g4, orca_plater_objects_delete(plater, pair, 3, &revision));
+        expect_ok(g4, "batch delete");
+        snap = take_snapshot(plater);
+        CHECK_EQ(snap.object_count, 1);
+        CHECK(find_object(snap, a) == nullptr);
+        CHECK(find_object(snap, b) == nullptr);
+        CHECK(find_object(snap, c) != nullptr);
+        CHECK_EQ(snap.undo_count, undo_before + 1);
+        CHECK(snapshot_label(snap.undo_label) == "Delete objects");
+        orca_scene_snapshot_dispose(&snap);
+        GUARD(g5, orca_plater_undo(plater, &revision));
+        expect_ok(g5, "undo batch delete");
+        snap = take_snapshot(plater);
+        CHECK_EQ(snap.object_count, 3);
+        CHECK(find_object(snap, a) != nullptr);
+        CHECK(find_object(snap, b) != nullptr);
+        orca_scene_snapshot_dispose(&snap);
+    }
+
+    // --- batch instance delete: one undo step, whole-object promotion ---
+    {
+        // give object a two more instances (3 total)
+        GUARD(ig1, orca_plater_set_instance_count(plater, a, 3, &revision));
+        expect_ok(ig1, "instance count 3");
+        orca_scene_snapshot snap = take_snapshot(plater);
+        const orca_object_id three = a;
+        const orca_scene_object *obj = find_object(snap, three);
+        CHECK(obj != nullptr);
+        CHECK_EQ(obj->instance_count, 3);
+        orca_instance_id i0 = obj->instances[0].id;
+        orca_instance_id i1 = obj->instances[1].id;
+        orca_instance_id i2 = obj->instances[2].id;
+        orca_scene_snapshot_dispose(&snap);
+
+        // deleting ALL instances of a removes the object entirely
+        const orca_object_id objs[3] = {a, a, a};
+        const orca_instance_id insts[3] = {i0, i1, i2};
+        GUARD(ig2, orca_plater_instances_delete(plater, objs, insts, 3, &revision));
+        expect_ok(ig2, "batch instance delete removes object");
+        snap = take_snapshot(plater);
+        CHECK(find_object(snap, a) == nullptr);
+        CHECK_EQ(snap.object_count, 2);
+        CHECK(snapshot_label(snap.undo_label) == "Delete instances");
+        orca_scene_snapshot_dispose(&snap);
+        GUARD(ig3, orca_plater_undo(plater, &revision));
+        expect_ok(ig3, "undo instance batch");
+        snap = take_snapshot(plater);
+        CHECK(find_object(snap, a) != nullptr);
+        CHECK_EQ(find_object(snap, a)->instance_count, 3);
+        orca_scene_snapshot_dispose(&snap);
+
+        // a subset deletes just those instances, one undo step
+        const uint32_t undo_before = [&] {
+            orca_scene_snapshot s = take_snapshot(plater);
+            const uint32_t u = s.undo_count;
+            orca_scene_snapshot_dispose(&s);
+            return u;
+        }();
+        const orca_instance_id subset[2] = {i0, i2};
+        GUARD(ig4, orca_plater_instances_delete(plater, objs, subset, 2, &revision));
+        expect_ok(ig4, "batch instance delete subset");
+        snap = take_snapshot(plater);
+        CHECK_EQ(find_object(snap, a)->instance_count, 1);
+        CHECK_EQ(find_object(snap, a)->instances[0].id, i1);
+        CHECK_EQ(snap.undo_count, undo_before + 1);
+        orca_scene_snapshot_dispose(&snap);
+
+        // missing instance deletes nothing
+        const orca_instance_id bogus[1] = {i0};
+        GUARD(e8, orca_plater_instances_delete(plater, objs, bogus, 1, &revision));
+        expect_code(e8, ORCA_STATUS_NOT_FOUND, "instance batch with stale ID");
+        snap = take_snapshot(plater);
+        CHECK_EQ(find_object(snap, a)->instance_count, 1);
+        orca_scene_snapshot_dispose(&snap);
+    }
+
+    // --- multi-object clipboard: paste keeps relative placement ---------
+    orca_object_id pasted[4] = {0, 0, 0, 0};
+    int32_t pasted_count = 0;
+    {
+        GUARD(e3, orca_plater_objects_paste(plater, 50, 50, pasted, 4,
+                                            &pasted_count, &revision));
+        expect_code(e3, ORCA_STATUS_NOT_FOUND, "paste with an empty clipboard");
+        const orca_object_id two[2] = {a, b};
+        GUARD(g6, orca_plater_objects_copy(plater, two, 2));
+        expect_ok(g6, "copy two");
+        GUARD(e4, orca_plater_objects_paste(plater, 50, 50, pasted, 1,
+                                            &pasted_count, &revision));
+        expect_code(e4, ORCA_STATUS_INVALID_ARGUMENT, "paste capacity too small");
+        // The relative placement of the sources (front-instance offsets) —
+        // the paste must reproduce exactly this delta around its anchor.
+        double src_dx = 0.0, src_dy = 0.0;
+        {
+            orca_scene_snapshot src = take_snapshot(plater);
+            const orca_scene_object *src_a = find_object(src, a);
+            const orca_scene_object *src_b = find_object(src, b);
+            CHECK(src_a != nullptr && src_b != nullptr);
+            src_dx = src_b->instances[0].transform.offset_x -
+                     src_a->instances[0].transform.offset_x;
+            src_dy = src_b->instances[0].transform.offset_y -
+                     src_a->instances[0].transform.offset_y;
+            orca_scene_snapshot_dispose(&src);
+        }
+        orca_scene_snapshot snap = take_snapshot(plater);
+        const uint32_t undo_before = snap.undo_count;
+        orca_scene_snapshot_dispose(&snap);
+        GUARD(g7, orca_plater_objects_paste(plater, 50, 50, pasted, 4,
+                                            &pasted_count, &revision));
+        expect_ok(g7, "paste two");
+        CHECK_EQ(pasted_count, 2);
+        CHECK(pasted[0] != 0 && pasted[0] != a && pasted[1] != 0 && pasted[1] != b);
+        snap = take_snapshot(plater);
+        CHECK_EQ(snap.object_count, 5);
+        CHECK_EQ(snap.undo_count, undo_before + 1);
+        CHECK(snapshot_label(snap.undo_label) == "Paste objects");
+        const orca_scene_object *p0 = find_object(snap, pasted[0]);
+        const orca_scene_object *p1 = find_object(snap, pasted[1]);
+        CHECK(p0 != nullptr && p1 != nullptr);
+        // the pasted pair keeps the sources' relative spacing around the
+        // (50,50) anchor
+        CHECK(std::fabs((p1->instances[0].transform.offset_x -
+                         p0->instances[0].transform.offset_x) - src_dx) < 1e-6);
+        CHECK(std::fabs((p1->instances[0].transform.offset_y -
+                         p0->instances[0].transform.offset_y) - src_dy) < 1e-6);
+        CHECK(std::fabs(p0->instances[0].transform.offset_x - 50.0) < 1e-6);
+        CHECK(std::fabs(p0->instances[0].transform.offset_y - 50.0) < 1e-6);
+        orca_scene_snapshot_dispose(&snap);
+        GUARD(g8, orca_plater_undo(plater, &revision));
+        expect_ok(g8, "undo multi paste");
+        snap = take_snapshot(plater);
+        CHECK_EQ(snap.object_count, 3);
+        orca_scene_snapshot_dispose(&snap);
+
+        // the single-object wrappers keep working beside the batch ones
+        GUARD(g9, orca_plater_object_copy(plater, c));
+        expect_ok(g9, "legacy copy");
+        orca_object_id single = 0;
+        GUARD(g10, orca_plater_object_paste(plater, 10, 10, &single, &revision));
+        expect_ok(g10, "legacy paste");
+        CHECK(single != 0);
+        snap = take_snapshot(plater);
+        CHECK_EQ(snap.object_count, 4);
+        CHECK(snapshot_label(snap.undo_label) == "Paste");
+        orca_scene_snapshot_dispose(&snap);
+        GUARD(g11, orca_plater_undo(plater, &revision));
+        expect_ok(g11, "undo legacy paste");
+    }
+
+    // --- settings_apply: atomic replace in one undo step -----------------
+    orca_volume_id part_id = 0;
+    {
+        orca_scene_snapshot snap = take_snapshot(plater);
+        part_id = snap.objects[0].volumes[0].id;
+        orca_scene_snapshot_dispose(&snap);
+    }
+    GUARD(s1, orca_plater_settings_set(plater, a, 0, "wall_loops", "9", &revision));
+    expect_ok(s1, "seed override on a");
+    GUARD(s2, orca_plater_settings_set(plater, b, 0, "top_shell_layers", "7", &revision));
+    expect_ok(s2, "seed override on b");
+    const char *keys[2] = {"sparse_infill_density", "top_shell_layers"};
+    const char *values[2] = {"15%", "2"};
+    const char *bad_keys[2] = {"sparse_infill_density", "no_such_key"};
+    const char *bad_values[2] = {"15%", "lots"};
+    // layer_height is PrintObjectConfig: object targets only.
+    const char *object_keys[2] = {"layer_height", "sparse_infill_density"};
+    GUARD(e5, orca_plater_settings_apply(plater, b, 0, bad_keys, values, 2, &revision));
+    expect_code(e5, ORCA_STATUS_INVALID_ARGUMENT, "apply with an unknown key");
+    GUARD(e6, orca_plater_settings_apply(plater, b, 0, keys, bad_values, 2, &revision));
+    expect_code(e6, ORCA_STATUS_INVALID_CONFIGURATION, "apply with an unparsable value");
+    GUARD(e7, orca_plater_settings_apply(plater, a, part_id, object_keys, values, 2,
+                                         &revision));
+    expect_code(e7, ORCA_STATUS_INVALID_ARGUMENT, "object keys on a part");
+    {
+        // the failed applies changed nothing
+        orca_owned_string dump{};
+        GUARD(g12, orca_plater_settings_dump(plater, b, 0, &dump));
+        expect_ok(g12, "dump b after failures");
+        CHECK(dump.data && strstr(dump.data, "top_shell_layers\":\"7\"") != nullptr);
+        CHECK(dump.data && strstr(dump.data, "sparse_infill_density") == nullptr);
+        orca_owned_string_dispose(&dump);
+    }
+    orca_scene_snapshot snap = take_snapshot(plater);
+    const uint32_t undo_before = snap.undo_count;
+    orca_scene_snapshot_dispose(&snap);
+    GUARD(s3, orca_plater_settings_apply(plater, b, 0, keys, values, 2, &revision));
+    expect_ok(s3, "apply to b");
+    {
+        orca_owned_string dump{};
+        GUARD(g13, orca_plater_settings_dump(plater, b, 0, &dump));
+        expect_ok(g13, "dump b after apply");
+        CHECK(dump.data && strstr(dump.data, "sparse_infill_density\":\"15%\"") != nullptr);
+        CHECK(dump.data && strstr(dump.data, "top_shell_layers\":\"2\"") != nullptr);
+        // the previous override is GONE (replace, not merge)
+        CHECK(dump.data && strstr(dump.data, "top_shell_layers\":\"7\"") == nullptr);
+        orca_owned_string_dispose(&dump);
+        snap = take_snapshot(plater);
+        CHECK_EQ(find_object(snap, b)->override_count, 2u);
+        CHECK_EQ(snap.undo_count, undo_before + 1);
+        CHECK(snapshot_label(snap.undo_label) == "Paste object settings");
+        orca_scene_snapshot_dispose(&snap);
+    }
+    GUARD(s4, orca_plater_undo(plater, &revision));
+    expect_ok(s4, "undo apply");
+    {
+        orca_owned_string dump{};
+        GUARD(g14, orca_plater_settings_dump(plater, b, 0, &dump));
+        expect_ok(g14, "dump b after undo");
+        CHECK(dump.data && strstr(dump.data, "top_shell_layers\":\"7\"") != nullptr);
+        orca_owned_string_dispose(&dump);
+    }
+    // count 0 clears everything
+    GUARD(s5, orca_plater_settings_apply(plater, b, 0, nullptr, nullptr, 0, &revision));
+    expect_ok(s5, "apply clears");
+    {
+        orca_owned_string dump{};
+        GUARD(g15, orca_plater_settings_dump(plater, b, 0, &dump));
+        expect_ok(g15, "dump b after clear");
+        CHECK(dump.data && strcmp(dump.data, "{}") == 0);
+        orca_owned_string_dispose(&dump);
+    }
+    orca_plater_free(plater);
+
+    // --- part triangle ranges: two parts merged into one object ----------
+    orca_plater *ranger = nullptr;
+    GUARD(r0, orca_plater_new(&ranger));
+    expect_ok(r0, "plater_new ranger");
+    orca_object_id first = 0, second = 0, merged_id = 0;
+    GUARD(r1, import_one(ranger, cube.c_str(), 30, 30, &first, &revision));
+    GUARD(r2, import_one(ranger, cube.c_str(), 60, 30, &second, &revision));
+    expect_ok(r1, "import first");
+    expect_ok(r2, "import second");
+    const orca_object_id merge_ids[2] = {first, second};
+    GUARD(r3, orca_plater_merge_objects(ranger, merge_ids, 2, &merged_id, &revision));
+    expect_ok(r3, "merge");
+    orca_instance_id merged_instance = 0;
+    {
+        orca_scene_snapshot m = take_snapshot(ranger);
+        const orca_scene_object *merged = find_object(m, merged_id);
+        CHECK(merged != nullptr);
+        merged_instance = merged->instances[0].id;
+        orca_scene_snapshot_dispose(&m);
+    }
+    orca_volume_id modifier_id = 0;
+    GUARD(r4, orca_plater_volume_add_shape(ranger, merged_id, merged_instance,
+                                           ORCA_VOLUME_MODIFIER,
+                                           ORCA_SHAPE_CUBE, 10.0,
+                                           &modifier_id, &revision));
+    expect_ok(r4, "add modifier");
+    {
+        orca_scene_snapshot m = take_snapshot(ranger);
+        const orca_scene_object *merged = find_object(m, merged_id);
+        CHECK(merged != nullptr);
+        CHECK_EQ(merged->volume_count, 3);
+        const orca_scene_volume &v0 = merged->volumes[0];
+        const orca_scene_volume &v1 = merged->volumes[1];
+        const orca_scene_volume &mod = merged->volumes[2];
+        CHECK_EQ(v0.merged_triangle_start, 0u);
+        CHECK(v0.merged_triangle_count > 0);
+        CHECK_EQ(v1.merged_triangle_start, v0.merged_triangle_count);
+        CHECK_EQ(v0.merged_triangle_count + v1.merged_triangle_count,
+                 static_cast<uint32_t>(merged->index_count / 3));
+        CHECK_EQ(v0.merged_triangle_count, v1.merged_triangle_count);
+        CHECK_EQ(mod.merged_triangle_start, 0u);
+        CHECK_EQ(mod.merged_triangle_count, 0u);
+        CHECK(mod.positions != nullptr && mod.position_count > 0);
+        CHECK_EQ(v0.positions, nullptr);
+        orca_scene_snapshot_dispose(&m);
+    }
+    orca_plater_free(ranger);
 }
 // ABI v23: object operations (printable, instance count, clone, instance to
 // object, assemble, scale to fit, unit conversion).
@@ -3136,6 +3439,7 @@ int main() {
     test_mirror_clipboard(dir);
     test_group_transforms(dir);
     test_object_settings(dir);
+    test_batch_operations(dir);
     test_object_ops(dir, data_dir);
     test_add_failures(dir);
     test_stable_ids_and_revisions(dir);

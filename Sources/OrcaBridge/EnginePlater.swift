@@ -61,6 +61,17 @@ public final class EnginePlater: @unchecked Sendable {
         /// Desktop clipboard.
         case copyObject(objectID: ObjectID)
         case pasteObject(bedCenter: SIMD2<Double>)
+        /// Batch delete (ABI v26): one undo step for the whole group.
+        case deleteObjects([ObjectID])
+        /// Multi-object clipboard (ABI v26).
+        case copyObjects([ObjectID])
+        case pasteObjects(bedCenter: SIMD2<Double>)
+        /// Batch instance delete (ABI v26): one undo step for the whole
+        /// group; an object left without instances is removed entirely.
+        case deleteInstances([GroupInstance])
+        /// Desktop "Paste Process Settings": replaces every override of the
+        /// target with `overrides` in one undo step (ABI v26).
+        case applySettings(objectID: ObjectID, volumeID: VolumeID?, overrides: [String: String])
         /// Group (multi-selection) absolute transforms; one undo step.
         case groupSetTransforms([GroupTransform], label: String)
         /// Group rotation about each instance's own origin; one undo step.
@@ -657,6 +668,95 @@ public final class EnginePlater: @unchecked Sendable {
                 )
                 createdObjectCount = 1
                 createdObjectID = try Self.objectID(rawObjectID, operation: "paste object")
+
+            case .deleteObjects(let objectIDs):
+                var rawIDs = objectIDs.map(\.rawValue)
+                try BridgeResult.consume(
+                    rawIDs.withUnsafeBufferPointer { buffer in
+                        orca_plater_objects_delete(
+                            handle, buffer.baseAddress, Int32(objectIDs.count),
+                            &mutationRevision
+                        )
+                    },
+                    operation: "delete \(objectIDs.count) object(s)"
+                )
+
+            case .copyObjects(let objectIDs):
+                var rawIDs = objectIDs.map(\.rawValue)
+                try BridgeResult.consume(
+                    rawIDs.withUnsafeBufferPointer { buffer in
+                        orca_plater_objects_copy(
+                            handle, buffer.baseAddress, Int32(objectIDs.count)
+                        )
+                    },
+                    operation: "copy \(objectIDs.count) object(s)"
+                )
+
+            case .deleteInstances(let group):
+                var objectIDs = [UInt64](repeating: 0, count: group.count)
+                var instanceIDs = [UInt64](repeating: 0, count: group.count)
+                for (index, member) in group.enumerated() {
+                    objectIDs[index] = member.objectID.rawValue
+                    instanceIDs[index] = member.instanceID.rawValue
+                }
+                try BridgeResult.consume(
+                    objectIDs.withUnsafeBufferPointer { objects in
+                        instanceIDs.withUnsafeBufferPointer { instances in
+                            orca_plater_instances_delete(
+                                handle, objects.baseAddress, instances.baseAddress,
+                                Int32(group.count), &mutationRevision
+                            )
+                        }
+                    },
+                    operation: "delete \(group.count) instance(s)"
+                )
+
+            case .pasteObjects(let bedCenter):
+                // Generous fixed capacity: whole-object clipboard entries;
+                // a plate larger than this fails loudly (typed) instead of
+                // truncating.
+                var pastedIDs = [UInt64](repeating: 0, count: 1024)
+                var pastedCount: Int32 = 0
+                try BridgeResult.consume(
+                    pastedIDs.withUnsafeMutableBufferPointer { buffer in
+                        orca_plater_objects_paste(
+                            handle, bedCenter.x, bedCenter.y,
+                            buffer.baseAddress, Int32(buffer.count),
+                            &pastedCount, &mutationRevision
+                        )
+                    },
+                    operation: "paste objects"
+                )
+                createdObjectCount = Int(pastedCount)
+                createdObjectID = pastedCount > 0
+                    ? try Self.objectID(pastedIDs[0], operation: "paste objects") : nil
+
+            case .applySettings(let objectID, let volumeID, let overrides):
+                let orderedKeys = Array(overrides.keys)
+                // C-string arena: mutable duplicates own the memory, the call
+                // receives an immutable view.
+                let allocatedKeys = orderedKeys.map { strdup($0) }
+                let allocatedValues = orderedKeys.map { strdup(overrides[$0] ?? "") }
+                defer {
+                    allocatedKeys.forEach { free($0) }
+                    allocatedValues.forEach { free($0) }
+                }
+                let cKeys: [UnsafePointer<CChar>?] =
+                    allocatedKeys.map { $0.map { UnsafePointer($0) } }
+                let cValues: [UnsafePointer<CChar>?] =
+                    allocatedValues.map { $0.map { UnsafePointer($0) } }
+                try BridgeResult.consume(
+                    cKeys.withUnsafeBufferPointer { keys in
+                        cValues.withUnsafeBufferPointer { values in
+                            orca_plater_settings_apply(
+                                handle, objectID.rawValue, volumeID?.rawValue ?? 0,
+                                keys.baseAddress, values.baseAddress,
+                                Int32(orderedKeys.count), &mutationRevision
+                            )
+                        }
+                    },
+                    operation: "paste settings onto object \(objectID)"
+                )
             }
 
             let scene = try snapshotLocked()
@@ -1112,7 +1212,9 @@ public final class EnginePlater: @unchecked Sendable {
                 role: role,
                 extruder: Int(raw.extruder),
                 mesh: mesh,
-                overrideCount: Int(raw.override_count)
+                overrideCount: Int(raw.override_count),
+                mergedTriangleStart: raw.merged_triangle_start,
+                mergedTriangleCount: raw.merged_triangle_count
             ))
         }
         return volumes

@@ -97,7 +97,13 @@ contract test literal in the same commit)**
   (ABI v7); mirroring is not supported yet (typed rejection).
 - Document mutations are transactional (a failure leaves the document
   unchanged) and each success is one labelled undo step; undo/redo restore
-  the same stable IDs and still advance the revision (ABI v18).
+  the same stable IDs and still advance the revision (ABI v18). Batch
+  operations (group delete, multi-object clipboard, settings paste) are
+  one mutation per user action (ABI v26).
+- Scene snapshots carry each part volume's triangle range inside the
+  object's merged mesh (ABI v26): client-side part picking and highlight
+  without duplicating part geometry; the snapshot fails loudly if the
+  ranges stop covering the merged mesh.
 - Presets: entries expose engine vendor + `is_compatible`; overrides are
   written to the edited preset of a kind (`full_config()` merges edited
   presets, so slices consume them); edited vs system dumps detect changes.

@@ -13,6 +13,9 @@ struct ObjectSettingsSheet: View {
     let objectID: ObjectID
     let volumeID: VolumeID?
     let title: String
+    /// A quick-menu pick (frequent settings / object-list settings row):
+    /// seeds this override with today's resolved value when absent.
+    var preselectKey: String?
 
     @Environment(AppEnvironment.self) private var environment
     @Environment(\.dismiss) private var dismiss
@@ -21,6 +24,7 @@ struct ObjectSettingsSheet: View {
     @State private var resolved: [String: String] = [:]
     @State private var loadFailure: String?
     @State private var addPresented = false
+    @State private var seededPreselect = false
 
     @State private var schemaIndex: [String: ConfigOptionSchema] = [:]
 
@@ -112,6 +116,21 @@ struct ObjectSettingsSheet: View {
         }
     }
 
+    /// Frequent-settings / settings-row pick: create the override now
+    /// (desktop add_category_to_settings_from_frequent), seeded with the
+    /// value the slice would use today. Runs once, after the static loader
+    /// has the allowed keys and the resolved config.
+    private func seedPreselect() async {
+        guard let key = preselectKey, !seededPreselect,
+              allowedKeys.contains(key), overrides[key] == nil else { return }
+        let seed = resolved[key] ?? schemaIndex[key]?.defaultValue ?? ""
+        guard !seed.isEmpty else { return }
+        seededPreselect = true
+        await document.setSetting(
+            objectID: objectID, volumeID: volumeID, key: key, value: seed
+        )
+    }
+
     /// Allowed keys + today's resolved values (seeds for new overrides).
     private func loadStatic() async {
         switch ConfigSchema.index {
@@ -152,6 +171,10 @@ struct ObjectSettingsSheet: View {
         case .failure(let failure):
             environment.status.report(.document, failure: failure)
         }
+        // A frequent-settings pick waits for exactly this state (allowed
+        // keys + resolved seeds) before creating its override.
+        await reload()
+        await seedPreselect()
     }
 
     private func commit(key: String, value: String) {

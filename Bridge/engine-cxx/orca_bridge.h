@@ -7,7 +7,7 @@ extern "C" {
 #endif
 
 /// Version of the C ABI contract in this header. Callers verify it at runtime.
-#define ORCA_BRIDGE_ABI_VERSION ((uint32_t)25)
+#define ORCA_BRIDGE_ABI_VERSION ((uint32_t)26)
 
 typedef int32_t orca_status_code;
 #define ORCA_STATUS_OK                     ((orca_status_code)0)
@@ -100,6 +100,13 @@ typedef struct {
     int32_t position_count;
     uint32_t *indices;
     int32_t index_count;
+    // Model parts only: the volume's triangle range inside the object's
+    // merged mesh (raw_mesh() concatenates part volumes in document order,
+    // so triangle t lives at flattened indices [3t, 3t+3)). 0/0 for every
+    // other role. Enables client-side part picking + highlight without
+    // duplicating part geometry in the snapshot.
+    uint32_t merged_triangle_start;
+    uint32_t merged_triangle_count;
     uint32_t override_count;      // per-volume setting overrides
 } orca_scene_volume;
 
@@ -296,6 +303,16 @@ orca_result orca_plater_instances_rotate(
     const orca_instance_id *instance_ids,
     int32_t count, int32_t axis, double radians,
     orca_revision *out_revision);
+/// Desktop multi-selection delete of individual instances (subset of an
+/// object's instances): every listed (object, instance) pair is removed in
+/// ONE undo step (a failure deletes nothing). Duplicate pairs collapse;
+/// deleting an object's last instance this way deletes the object.
+orca_result orca_plater_instances_delete(
+    orca_plater *plater,
+    const orca_object_id *object_ids,
+    const orca_instance_id *instance_ids,
+    int32_t count,
+    orca_revision *out_revision);
 /// Per-object / per-part setting overrides (desktop object list "Edit
 /// Process Settings"): ModelObject::config when `volume_id` is 0, else the
 /// ModelVolume::config. Objects accept PrintObjectConfig + PrintRegionConfig
@@ -318,6 +335,17 @@ orca_result orca_plater_settings_set(orca_plater *plater, orca_object_id object_
 orca_result orca_plater_settings_erase(orca_plater *plater, orca_object_id object_id,
                                        orca_volume_id volume_id, const char *key,
                                        orca_revision *out_revision);
+/// Desktop "Paste Process Settings": REPLACES every override of the target
+/// with the given key/value pairs in ONE undo step (a failure changes
+/// nothing). Semantics follow ObjectList::paste_settings_into_list: existing
+/// overrides are cleared, then each pair is applied after validation; every
+/// key must be accepted by the target kind (INVALID_ARGUMENT otherwise) and
+/// every value must parse (INVALID_CONFIGURATION otherwise).
+orca_result orca_plater_settings_apply(orca_plater *plater, orca_object_id object_id,
+                                       orca_volume_id volume_id,
+                                       const char *const *keys,
+                                       const char *const *serialized_values,
+                                       int32_t count, orca_revision *out_revision);
 /// Desktop printable toggle: `instance_id` 0 applies to the object and all
 /// its instances. Non-printable instances are skipped by slicing.
 orca_result orca_plater_set_printable(orca_plater *plater, orca_object_id object_id,
@@ -383,13 +411,37 @@ orca_result orca_plater_custom_gcode_add(orca_plater *plater, double print_z,
 orca_result orca_plater_custom_gcode_delete(orca_plater *plater, double print_z,
                                             orca_revision *out_revision);
 /// Desktop clipboard: copies one object (volumes + instances). No document
-/// change, no undo step.
+/// change, no undo step. Superseded by orca_plater_objects_copy (kept as a
+/// count = 1 convenience wrapper).
 orca_result orca_plater_object_copy(orca_plater *plater, orca_object_id object_id);
 /// Pastes the clipboard object at (bed_center_x, bed_center_y)
 /// (ORCA_STATUS_NOT_FOUND when the clipboard is empty). One undo step.
 orca_result orca_plater_object_paste(orca_plater *plater, double bed_center_x,
                                      double bed_center_y,
                                      orca_object_id *out_object_id,
+                                     orca_revision *out_revision);
+/// Desktop "Cut"/group delete: removes every listed object in ONE undo
+/// step (a failure deletes nothing). Duplicate IDs are collapsed.
+orca_result orca_plater_objects_delete(orca_plater *plater,
+                                       const orca_object_id *object_ids,
+                                       int32_t count,
+                                       orca_revision *out_revision);
+/// Desktop multi-object clipboard: copies all listed objects (volumes +
+/// instances) keeping their relative placements. No document change, no
+/// undo step. Duplicate IDs are collapsed; every ID must exist.
+orca_result orca_plater_objects_copy(orca_plater *plater,
+                                     const orca_object_id *object_ids,
+                                     int32_t count);
+/// Pastes every clipboard object: the first lands centred at
+/// (bed_center_x, bed_center_y), the others keep their relative placement
+/// (ORCA_STATUS_NOT_FOUND when the clipboard is empty). One undo step for
+/// the whole batch. out_ids receives the pasted object IDs in clipboard
+/// order (capacity must be >= the clipboard size; pass the actual capacity,
+/// the call fails with INVALID_ARGUMENT when it is too small).
+orca_result orca_plater_objects_paste(orca_plater *plater,
+                                     double bed_center_x, double bed_center_y,
+                                     orca_object_id *out_ids, int32_t capacity,
+                                     int32_t *out_count,
                                      orca_revision *out_revision);
 
 /// Produces a deep copy at one authoritative document revision. The caller

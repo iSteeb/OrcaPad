@@ -123,6 +123,14 @@ Device, each tab a clean feature module over the same stores.
       formats (v10), 3MF projects (v11), preview v14 (markers, all schemes,
       filament totals), physical printers + OctoPrint/Moonraker upload (v15),
       G-code/3MF thumbnails (v16) — see PARITY.md
+- [x] C8: selection, clipboard and part-editing parity (ABI v26) —
+      rectangle (marquee) selection + one-undo-step group delete
+      (instances_delete with whole-object promotion), multi-object clipboard
+      + cut, canvas part selection (snapshot part triangle ranges: tap the
+      selected object again to pick and highlight the tapped part),
+      Copy/Paste Process Settings (one-step replace via settings_apply),
+      parameter table, frequent-settings quick menu, object-list Settings
+      child rows
 - [x] Programmatic parity checker (`Bridge/tools/parity-check.py`): desktop
       surface extracted from upstream (551 items, 14 surfaces), manifest
       evidence verified, PARITY.md generated + commit-gated

@@ -304,10 +304,16 @@ public struct SceneVolume: Identifiable, Sendable {
     public let mesh: SceneMesh?
     /// Per-volume setting overrides.
     public let overrideCount: Int
+    /// Parts only (ABI v26): this volume's triangle range inside the
+    /// object's merged mesh (`SceneObject.mesh`), for canvas part picking
+    /// and highlight. 0/0 for other roles.
+    public let mergedTriangleStart: UInt32
+    public let mergedTriangleCount: UInt32
 
     public init(
         id: VolumeID, name: String, role: VolumeRole, extruder: Int, mesh: SceneMesh?,
-        overrideCount: Int
+        overrideCount: Int,
+        mergedTriangleStart: UInt32 = 0, mergedTriangleCount: UInt32 = 0
     ) {
         self.id = id
         self.name = name
@@ -315,6 +321,8 @@ public struct SceneVolume: Identifiable, Sendable {
         self.extruder = extruder
         self.mesh = mesh
         self.overrideCount = overrideCount
+        self.mergedTriangleStart = mergedTriangleStart
+        self.mergedTriangleCount = mergedTriangleCount
     }
 }
 

@@ -95,6 +95,13 @@ in ~/xtool-cheatsheet.md — link, don't duplicate.)
   hoist to a local before `logger.notice("\(x)")`.
 - @unchecked Sendable wrapper + internal NSLock is the working pattern for
   engine handles that must cross into Task.detached (engine not reentrant).
+- `@Observable` stores take PLAIN stored properties; adding `@Published`
+  breaks with "invalid redeclaration of synthesized property _x"
+  (ObservationTracked vs Combine collide).
+- ABI struct extensions must keep the Swift decode, the Swift ABI literal,
+  the C header and the contract-test literal in ONE commit — the audit
+  checks the literal match; the decoder silently keeps default values
+  otherwise.
 
 ## Lessons learned (2026-10-03, engine bring-up night)
 
@@ -273,6 +280,11 @@ in ~/xtool-cheatsheet.md — link, don't duplicate.)
 - Entity snapshots must validate raw ABI values BEFORE calling a Swift
   initializer with preconditions, or a bad engine value traps instead of
   surfacing a typed BridgeFailure.
+- Part picking/highlight (ABI v26 `merged_triangle_start/count`) relies on
+  `ModelObject::raw_mesh()` concatenating PART volumes in document order;
+  the snapshot builder FAILS LOUDLY when the ranges stop covering the merged
+  mesh. Never weaken that check if upstream reshapes raw_mesh — a silent
+  mismatch would mis-map every part pick.
 - All-or-nothing edit scripts lose EVERY edit when one anchor no longer
   matches (e.g. an edit that already landed on a previous run). Make each
   scripted edit idempotent (skip when the new text is present) or apply one

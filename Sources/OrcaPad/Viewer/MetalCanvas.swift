@@ -13,6 +13,8 @@ struct SceneSync {
     var bed: EngineBed
     var selectedObjectID: ObjectID?
     var selectedInstanceID: InstanceID?
+    /// The selected volume of the selected object (part selection), if any.
+    var selectedVolumeID: VolumeID?
     /// Every selected instance (multi-selection highlight).
     var highlightedInstanceIDs: Set<InstanceID>
     /// Live gesture previews (engine-frame matrices) keyed by instance.
@@ -30,6 +32,12 @@ struct CanvasManipulation {
     let onSelect: (ObjectID?, InstanceID?) -> Void
     /// Desktop ctrl+click: long-press toggles multi-selection membership.
     let onToggleSelect: (ObjectID, InstanceID) -> Void
+    /// Part selection: refine the (already selected) instance to one volume
+    /// (nil returns to the whole object).
+    let onSelectVolume: (ObjectID, InstanceID, VolumeID?) -> Void
+    /// Rectangle (marquee) selection: the instances whose screen footprint
+    /// intersected the drawn rectangle.
+    let onRectangleSelect: ([(objectID: ObjectID, instanceID: InstanceID)]) -> Void
     /// Incremental bed-plane translation in engine millimetres.
     let onMove: (SIMD2<Float>) -> Void
     let onBegin: () -> Void
@@ -83,13 +91,15 @@ struct MetalCanvas: UIViewRepresentable {
     func updateUIView(_ view: MTKView, context: Context) {
         let coordinator = context.coordinator
         coordinator.manipulation = manipulation
+        coordinator.lastVolumeOfSelection = scene.selectedVolumeID
         coordinator.renderer?.setGizmo(mode: scene.gizmoMode, rotationAxis: scene.rotationAxis)
         let needsSceneApply =
             scene.snapshot.documentID != coordinator.lastDocumentID ||
             scene.snapshot.revision != coordinator.lastDocumentRevision ||
             scene.presentationRevision != coordinator.lastPresentationRevision ||
             scene.selectedObjectID != coordinator.lastSelectedObjectID ||
-            scene.selectedInstanceID != coordinator.lastSelectedInstanceID
+            scene.selectedInstanceID != coordinator.lastSelectedInstanceID ||
+            scene.selectedVolumeID != coordinator.lastSelectedVolumeID
 
         if needsSceneApply {
             do {
@@ -99,13 +109,15 @@ struct MetalCanvas: UIViewRepresentable {
                     selectedObjectID: scene.selectedObjectID,
                     selectedInstanceID: scene.selectedInstanceID,
                     highlightedInstanceIDs: scene.highlightedInstanceIDs,
-                    previewMatrices: scene.previewMatrices
+                    previewMatrices: scene.previewMatrices,
+                    selectedVolumeID: scene.selectedVolumeID
                 )
                 coordinator.lastDocumentID = scene.snapshot.documentID
                 coordinator.lastDocumentRevision = scene.snapshot.revision
                 coordinator.lastPresentationRevision = scene.presentationRevision
                 coordinator.lastSelectedObjectID = scene.selectedObjectID
                 coordinator.lastSelectedInstanceID = scene.selectedInstanceID
+                coordinator.lastSelectedVolumeID = scene.selectedVolumeID
             } catch {
                 coordinator.report(
                     "Metal scene ERROR — \(String(describing: error))"
@@ -132,10 +144,14 @@ struct MetalCanvas: UIViewRepresentable {
         var lastPresentationRevision: UInt64?
         var lastSelectedObjectID: ObjectID?
         var lastSelectedInstanceID: InstanceID?
+        var lastSelectedVolumeID: VolumeID?
         var lastFrameRequest: UInt64?
         var lastCameraRequest: UInt64?
 
         var manipulation: CanvasManipulation?
+        /// The renderer's current selection volume (for the tap toggle);
+        /// kept in sync by updateUIView.
+        var lastVolumeOfSelection: VolumeID?
         private var onStatus: ((String) -> Void)?
 
         private enum DragState {
@@ -143,6 +159,8 @@ struct MetalCanvas: UIViewRepresentable {
             case move(bedOrigin: SIMD3<Float>)
             case rotate(center: CGPoint, startAngle: Double)
             case scale(startY: CGFloat)
+            /// Rectangle selection: one-finger drag draws the marquee.
+            case marquee(start: CGPoint)
         }
         private var dragState: DragState?
 
@@ -200,7 +218,20 @@ struct MetalCanvas: UIViewRepresentable {
                 manipulation?.onSelect(face.objectID, face.instanceID)
                 manipulation?.onLayFlat(face.engineNormal)
             } else if let hit = renderer.pickInstance(at: location, in: view) {
-                manipulation?.onSelect(hit.objectID, hit.instanceID)
+                // Desktop part selection: tapping the already-selected
+                // instance refines the selection to the tapped volume; the
+                // currently selected part toggles back to the object.
+                if renderer.selectedInstanceIDs.count == 1, isSelected(hit),
+                   let volume = renderer.pickVolume(at: location, in: view),
+                   volume.objectID == hit.objectID, volume.instanceID == hit.instanceID {
+                    let current = lastVolumeOfSelection
+                    manipulation?.onSelectVolume(
+                        hit.objectID, hit.instanceID,
+                        current == volume.volumeID ? nil : volume.volumeID
+                    )
+                } else {
+                    manipulation?.onSelect(hit.objectID, hit.instanceID)
+                }
             } else {
                 manipulation?.onSelect(nil, nil)
             }
@@ -253,6 +284,8 @@ struct MetalCanvas: UIViewRepresentable {
                     manipulation?.onRotate(delta)
                 case .scale(let startY):
                     manipulation?.onScale(exp(Double(startY - location.y) / 220))
+                case .marquee(let start):
+                    renderer.setMarquee(Self.normalizedRect(from: start, to: location))
                 case .orbit, .none:
                     let translation = gesture.translation(in: gesture.view)
                     renderer.camera.orbit(dx: Float(translation.x), dy: Float(translation.y))
@@ -262,6 +295,17 @@ struct MetalCanvas: UIViewRepresentable {
                 switch dragState {
                 case .move, .rotate, .scale:
                     manipulation?.onEnd()
+                case .marquee(let start):
+                    renderer.setMarquee(nil)
+                    let rect = Self.normalizedRect(from: start, to: location)
+                    // A near-degenerate rect is a tap: the tap gesture
+                    // handles selection.
+                    if rect.width > 6, rect.height > 6 {
+                        let hits = renderer.instancesIntersecting(rect: rect, in: view)
+                        if !hits.isEmpty {
+                            manipulation?.onRectangleSelect(hits)
+                        }
+                    }
                 case .orbit, .none:
                     break
                 }
@@ -271,13 +315,27 @@ struct MetalCanvas: UIViewRepresentable {
             }
         }
 
+        private static func normalizedRect(from start: CGPoint, to end: CGPoint) -> CGRect {
+            CGRect(
+                x: min(start.x, end.x),
+                y: min(start.y, end.y),
+                width: abs(end.x - start.x),
+                height: abs(end.y - start.y)
+            )
+        }
+
         private func beginDrag(
             at location: CGPoint,
             in view: MTKView,
             renderer: Renderer
         ) -> DragState {
-            let hit = renderer.pickInstance(at: location, in: view)
             let mode = renderer.gizmoMode
+            // Rectangle selection: the drag ALWAYS draws the marquee in this
+            // mode (taps still select).
+            if mode == .select {
+                return .marquee(start: location)
+            }
+            let hit = renderer.pickInstance(at: location, in: view)
             if mode != .move, hit == nil, let center = gizmoRingHit(at: location, in: view) {
                 manipulation?.onBegin()
                 return mode == .rotate
@@ -289,8 +347,8 @@ struct MetalCanvas: UIViewRepresentable {
                 manipulation?.onSelect(hit.objectID, hit.instanceID)
             }
             switch mode {
-            case .layFlat:
-                // tap-only interaction; drags orbit the camera
+            case .select, .layFlat:
+                // layFlat is tap-only; select never reaches here (above).
                 return .orbit
             case .move:
                 guard let bed = renderer.bedPlaneHit(at: location, in: view) else { return .orbit }

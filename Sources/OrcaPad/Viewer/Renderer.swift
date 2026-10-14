@@ -16,6 +16,9 @@ enum GizmoMode: String, CaseIterable, Sendable {
     /// Desktop Flatten gizmo (subset): tapping the object lays it on the
     /// tapped face.
     case layFlat
+    /// Desktop rectangle selection: one-finger drag draws a marquee and
+    /// selects every instance whose screen footprint it intersects.
+    case select
 }
 
 /// One immutable instance draw derived from a revisioned scene snapshot.
@@ -25,6 +28,19 @@ private struct InstanceDraw {
     let selected: Bool
     let mirrored: Bool
     let printable: Bool
+}
+
+/// A part volume's triangle range inside the object's merged mesh (ABI v26):
+/// triangle `t` occupies flattened indices [3t, 3t+3).
+struct PartRange {
+    let volumeID: VolumeID
+    let start: UInt32
+    let count: UInt32
+
+    /// The volume containing merged-mesh triangle `t`, if any (parts only).
+    static func containing(_ t: UInt32, in ranges: [PartRange]) -> PartRange? {
+        ranges.first { t >= $0.start && t < $0.start + $0.count }
+    }
 }
 
 /// A translucent non-part volume (desktop color_from_model_volume) drawn
@@ -80,16 +96,27 @@ final class Renderer: NSObject, MTKViewDelegate {
         let pickIndices: [UInt32]
         var instances: [InstanceDraw]
         var volumes: [VolumeDraw]
+        /// Part triangle ranges into the merged mesh (canvas part picking).
+        let partRanges: [PartRange]
+        /// Object-space meshes of non-part volumes (canvas part picking).
+        let volumeMeshes: [VolumeID: SceneMesh]
+        /// The selected volume of THIS object (highlight), if any.
+        var selectedVolumeID: VolumeID?
     }
     private var objects: [RenderObject] = []
     private var documentID: DocumentID?
     private var appliedRevision = DocumentRevision(rawValue: 0)
     private var bed: EngineBed = .fallback
+    /// Marquee rectangle in view POINTS (rectangle selection mode); drawn as
+    /// a screen-space overlay each frame.
+    private var marqueeRect: CGRect?
 
     private static let objectColor = SIMD4<Float>(0.96, 0.52, 0.11, 1)
     private static let selectedColor = SIMD4<Float>(0.16, 0.80, 0.95, 1)
     /// Desktop draws non-printable instances greyed out.
     private static let unprintableColor = SIMD4<Float>(0.42, 0.42, 0.44, 1)
+    /// Selected volume/part highlight (desktop GLVolume selection tint).
+    static let selectedVolumeColor = SIMD4<Float>(0.35, 0.95, 0.55, 0.55)
 
     /// Desktop GLVolume colors for non-part volumes (3DScene.cpp).
     static func volumeColor(_ role: VolumeRole) -> SIMD4<Float> {
@@ -281,7 +308,8 @@ final class Renderer: NSObject, MTKViewDelegate {
         selectedObjectID: ObjectID?,
         selectedInstanceID: InstanceID?,
         highlightedInstanceIDs: Set<InstanceID>,
-        previewMatrices: [InstanceID: simd_float4x4]
+        previewMatrices: [InstanceID: simd_float4x4],
+        selectedVolumeID: VolumeID? = nil
     ) throws {
         if bed != self.bed {
             buildScene(for: bed)
@@ -321,6 +349,8 @@ final class Renderer: NSObject, MTKViewDelegate {
             }) {
                 var reused = existing
                 reused.instances = instances
+                reused.selectedVolumeID =
+                    sceneObject.id == selectedObjectID ? selectedVolumeID : nil
                 rebuilt.append(reused)
                 continue
             }
@@ -401,7 +431,22 @@ final class Renderer: NSObject, MTKViewDelegate {
                 pickPositions: positions,
                 pickIndices: geometry.idx,
                 instances: instances,
-                volumes: volumeDraws
+                volumes: volumeDraws,
+                partRanges: sceneObject.volumes
+                    .filter { $0.role == .part && $0.mergedTriangleCount > 0 }
+                    .map { PartRange(
+                        volumeID: $0.id,
+                        start: $0.mergedTriangleStart,
+                        count: $0.mergedTriangleCount
+                    ) },
+                volumeMeshes: Dictionary(
+                    uniqueKeysWithValues: sceneObject.nonPartVolumes
+                        .compactMap { volume in
+                            volume.mesh.map { (volume.id, $0) }
+                        }
+                ),
+                selectedVolumeID:
+                    sceneObject.id == selectedObjectID ? selectedVolumeID : nil
             ))
         }
 
@@ -624,6 +669,52 @@ final class Renderer: NSObject, MTKViewDelegate {
         pick(at: point, in: view)?.pick
     }
 
+    /// Desktop part selection (tap on a selected object): refines the nearest
+    /// hit to the tapped VOLUME — parts through their merged-mesh triangle
+    /// range, other roles by ray-casting their own object-space mesh.
+    struct VolumePick {
+        let objectID: ObjectID
+        let instanceID: InstanceID
+        let volumeID: VolumeID
+    }
+
+    func pickVolume(at point: CGPoint, in view: MTKView) -> VolumePick? {
+        let ray = screenRay(at: point, in: view)
+        var best: (pick: VolumePick, t: Float)?
+        for obj in objects {
+            for inst in obj.instances {
+                if let hit = rayCastObject(ray, object: obj, model: inst.model),
+                   let range = PartRange.containing(hit.triangle, in: obj.partRanges),
+                   best == nil || hit.t < best!.t {
+                    best = (VolumePick(
+                        objectID: obj.objectID,
+                        instanceID: inst.instanceID,
+                        volumeID: range.volumeID
+                    ), hit.t)
+                }
+                for (volumeID, mesh) in obj.volumeMeshes {
+                    let model = volumeModel(mesh: mesh, instance: inst.model)
+                    guard let t = rayCastMesh(ray, mesh: mesh, model: model),
+                        best == nil || t < best!.t else { continue }
+                    best = (VolumePick(
+                        objectID: obj.objectID,
+                        instanceID: inst.instanceID,
+                        volumeID: volumeID
+                    ), t)
+                }
+            }
+        }
+        return best?.pick
+    }
+
+    /// Engine object-space mesh → viewer world for one instance (mesh
+    /// vertices are `L(p - pivot)`-compatible: engineToViewer then un-shift
+    /// by the pivot matches the packed object mesh).
+    private func volumeModel(mesh: SceneMesh, instance: simd_float4x4) -> simd_float4x4 {
+        instance * CoordinateMapper.engineToViewer
+            * EngineMatrix.translation(-mesh.pivot)
+    }
+
     private func pick(
         at point: CGPoint,
         in view: MTKView
@@ -655,10 +746,10 @@ final class Renderer: NSObject, MTKViewDelegate {
 
     /// Ray vs one instance: world-space AABB pre-test, then exact test in
     /// object space (ray transformed by the inverse model matrix).
-    /// Returns (distance, object-space face normal of the hit facet).
+    /// Returns (distance, object-space face normal, merged-mesh triangle).
     private func rayCastObject(_ ray: (origin: SIMD3<Float>, dir: SIMD3<Float>),
                                object: RenderObject, model: simd_float4x4)
-        -> (t: Float, normal: SIMD3<Float>)? {
+        -> (t: Float, normal: SIMD3<Float>, triangle: UInt32)? {
         // AABB in world space (transform 8 corners of the packed bbox).
         var bbMin = SIMD3<Float>(repeating: .infinity)
         var bbMax = SIMD3<Float>(repeating: -.infinity)
@@ -688,16 +779,48 @@ final class Renderer: NSObject, MTKViewDelegate {
         let ro = SIMD3(ro4.x, ro4.y, ro4.z) / ro4.w
         let rd = simd_normalize(SIMD3(near4.x, near4.y, near4.z) / near4.w - ro)
 
-        let p = object.pickPositions
-        let idx = object.pickIndices
-        var bestT: Float? = nil
-        var bestNormal = SIMD3<Float>.zero
-        var t = 0, i0 = 0, i1 = 0, i2 = 0
-        let triCount = idx.count / 3
+        var best: (t: Float, normal: SIMD3<Float>, triangle: UInt32)?
+        rayCastTriangles(ro: ro, rd: rd, positions: object.pickPositions,
+                         indices: object.pickIndices) { t, normal, triangle in
+            if best == nil || t < best!.t {
+                best = (t, normal, triangle)
+            }
+        }
+        return best
+    }
+
+    /// Ray vs one raw object-space mesh behind a full model matrix.
+    /// Returns the hit distance (object space) or nil.
+    private func rayCastMesh(_ ray: (origin: SIMD3<Float>, dir: SIMD3<Float>),
+                             mesh: SceneMesh, model: simd_float4x4) -> Float? {
+        let invModel = model.inverse
+        let ro4 = invModel * SIMD4(ray.origin.x, ray.origin.y, ray.origin.z, 1)
+        let near4 = invModel * SIMD4((ray.origin + ray.dir).x, (ray.origin + ray.dir).y,
+                                     (ray.origin + ray.dir).z, 1)
+        let ro = SIMD3(ro4.x, ro4.y, ro4.z) / ro4.w
+        let rd = simd_normalize(SIMD3(near4.x, near4.y, near4.z) / near4.w - ro)
+        var bestT: Float?
+        rayCastTriangles(ro: ro, rd: rd, positions: mesh.positions,
+                         indices: mesh.indices) { t, _, _ in
+            if bestT == nil || t < bestT! {
+                bestT = t
+            }
+        }
+        return bestT
+    }
+
+    /// Möller–Trumbore over an indexed triangle soup in the ray's own space;
+    /// `onHit` receives (distance, face normal, triangle index).
+    private func rayCastTriangles(
+        ro: SIMD3<Float>, rd: SIMD3<Float>,
+        positions: [SIMD3<Float>], indices: [UInt32],
+        onHit: (Float, SIMD3<Float>, UInt32) -> Void
+    ) {
+        let triCount = indices.count / 3
         let e = Float.ulpOfOne
-        while t < triCount {
-            i0 = Int(idx[t * 3]); i1 = Int(idx[t * 3 + 1]); i2 = Int(idx[t * 3 + 2])
-            let a = p[i0], b = p[i1], c = p[i2]
+        for t in 0..<triCount {
+            let i0 = Int(indices[t * 3]), i1 = Int(indices[t * 3 + 1]), i2 = Int(indices[t * 3 + 2])
+            let a = positions[i0], b = positions[i1], c = positions[i2]
             let ab = b - a, ac = c - a
             let pvec = simd_cross(rd, ac)
             let det = simd_dot(ab, pvec)
@@ -710,17 +833,13 @@ final class Renderer: NSObject, MTKViewDelegate {
                     let v = simd_dot(rd, qvec) * invDet
                     if v >= 0 && u + v <= 1 {
                         let dist = simd_dot(ac, qvec) * invDet
-                        if dist > 0.01 && (bestT == nil || dist < bestT!) {
-                            bestT = dist
-                            bestNormal = simd_normalize(simd_cross(b - a, c - a))
+                        if dist > 0.01 {
+                            onHit(dist, simd_normalize(simd_cross(b - a, c - a)), UInt32(t))
                         }
                     }
                 }
             }
-            t += 1
         }
-        guard let t = bestT else { return nil }
-        return (t, bestNormal)
     }
 
     // MARK: MTKViewDelegate (invoked on the main thread)
@@ -737,6 +856,54 @@ final class Renderer: NSObject, MTKViewDelegate {
             x: CGFloat((ndc.x + 1) * 0.5) * size.width,
             y: CGFloat((1 - ndc.y) * 0.5) * size.height
         )
+    }
+
+    // MARK: Rectangle (marquee) selection — desktop "Select objects by rectangle"
+
+    /// Live marquee feedback while the drag runs (view POINTS; nil clears).
+    func setMarquee(_ rect: CGRect?) {
+        marqueeRect = rect
+    }
+
+    /// Every instance whose projected bounding box overlaps `rect` (view
+    /// points). Corners behind the camera are skipped; an instance with no
+    /// visible corner is not selectable this way.
+    func instancesIntersecting(rect: CGRect, in view: MTKView)
+        -> [(objectID: ObjectID, instanceID: InstanceID)] {
+        var hits: [(objectID: ObjectID, instanceID: InstanceID)] = []
+        for obj in objects {
+            outer: for inst in obj.instances {
+                var minX = CGFloat.greatestFiniteMagnitude
+                var minY = CGFloat.greatestFiniteMagnitude
+                var maxX = -CGFloat.greatestFiniteMagnitude
+                var maxY = -CGFloat.greatestFiniteMagnitude
+                var visible = false
+                for sx in [obj.bboxMin.x, obj.bboxMax.x] {
+                    for sy in [obj.bboxMin.y, obj.bboxMax.y] {
+                        for sz in [obj.bboxMin.z, obj.bboxMax.z] {
+                            let world = SIMD3(
+                                (inst.model * SIMD4(sx, sy, sz, 1)).x,
+                                (inst.model * SIMD4(sx, sy, sz, 1)).y,
+                                (inst.model * SIMD4(sx, sy, sz, 1)).z
+                            )
+                            guard let p = projectToScreen(world, in: view) else { continue }
+                            visible = true
+                            minX = min(minX, p.x); maxX = max(maxX, p.x)
+                            minY = min(minY, p.y); maxY = max(maxY, p.y)
+                        }
+                    }
+                }
+                guard visible else { continue outer }
+                let box = CGRect(
+                    x: minX, y: minY,
+                    width: maxX - minX, height: maxY - minY
+                )
+                if box.intersects(rect) {
+                    hits.append((objectID: obj.objectID, instanceID: inst.instanceID))
+                }
+            }
+        }
+        return hits
     }
 
     // MARK: Gizmos (selected instance manipulation feedback)
@@ -808,8 +975,9 @@ final class Renderer: NSObject, MTKViewDelegate {
         var vertices: [VertexPC] = []
         let accent = SIMD4<Float>(0.16, 0.80, 0.95, 1)
         switch gizmoMode {
-        case .layFlat:
-            // no on-canvas gizmo: the interaction is tapping a facet
+        case .layFlat, .select:
+            // no on-canvas gizmo: lay flat taps a facet; select draws the
+            // marquee rectangle instead
             break
         case .move:
             // Engine +X → viewer +X (red); engine +Y → viewer -Z (green),
@@ -933,7 +1101,8 @@ final class Renderer: NSObject, MTKViewDelegate {
         encoder.popDebugGroup()
 
         // Translucent volumes (modifiers / negatives / blockers / enforcers)
-        // over the opaque parts: depth-tested, not depth-writing.
+        // over the opaque parts: depth-tested, not depth-writing. A selected
+        // volume is tinted instead of its role color.
         encoder.pushDebugGroup("volumes")
         encoder.setRenderPipelineState(litBlendPipeline)
         encoder.setDepthStencilState(translucentDepthState)
@@ -944,7 +1113,8 @@ final class Renderer: NSObject, MTKViewDelegate {
                 for inst in obj.instances {
                     cubeUniforms.mvp = viewProj * inst.model
                     cubeUniforms.model = inst.model
-                    cubeUniforms.color = draw.color
+                    cubeUniforms.color = obj.selectedVolumeID == draw.volumeID
+                        ? Renderer.selectedVolumeColor : draw.color
                     cubeUniforms.normalSign = inst.mirrored ? -1 : 1
                     var cu = cubeUniforms
                     encoder.setVertexBytes(&cu, length: MemoryLayout<CubeUniforms>.stride, index: 1)
@@ -953,6 +1123,35 @@ final class Renderer: NSObject, MTKViewDelegate {
                         type: .triangle, indexCount: draw.indexCount, indexType: .uint32,
                         indexBuffer: draw.ib, indexBufferOffset: 0)
                 }
+            }
+        }
+        encoder.popDebugGroup()
+
+        // Selected PART highlight (ABI v26 part ranges): the part's
+        // merged-mesh sub-range re-drawn translucent over the opaque object.
+        encoder.pushDebugGroup("selected part")
+        encoder.setRenderPipelineState(litBlendPipeline)
+        encoder.setDepthStencilState(translucentDepthState)
+        encoder.setCullMode(.none)
+        for obj in objects {
+            guard let volumeID = obj.selectedVolumeID,
+                  let range = obj.partRanges.first(where: { $0.volumeID == volumeID }),
+                  range.count > 0 else { continue }
+            encoder.setVertexBuffer(obj.vb, offset: 0, index: 0)
+            for inst in obj.instances where inst.selected {
+                cubeUniforms.mvp = viewProj * inst.model
+                cubeUniforms.model = inst.model
+                cubeUniforms.color = Renderer.selectedVolumeColor
+                cubeUniforms.normalSign = inst.mirrored ? -1 : 1
+                var cu = cubeUniforms
+                encoder.setVertexBytes(&cu, length: MemoryLayout<CubeUniforms>.stride, index: 1)
+                encoder.setFragmentBytes(&cu, length: MemoryLayout<CubeUniforms>.stride, index: 1)
+                encoder.drawIndexedPrimitives(
+                    type: .triangle,
+                    indexCount: Int(range.count) * 3,
+                    indexType: .uint32,
+                    indexBuffer: obj.ib,
+                    indexBufferOffset: Int(range.start) * 3 * MemoryLayout<UInt32>.stride)
             }
         }
         encoder.popDebugGroup()
@@ -974,6 +1173,47 @@ final class Renderer: NSObject, MTKViewDelegate {
                 encoder.drawPrimitives(type: .line, vertexStart: 0, vertexCount: vertices.count)
                 encoder.popDebugGroup()
             }
+        }
+
+        // Marquee (rectangle selection): a screen-space rectangle drawn with
+        // an identity transform — view points map 1:1 onto NDC here.
+        if let rect = marqueeRect, abs(rect.width) > 1, abs(rect.height) > 1,
+           view.bounds.size.width > 0, view.bounds.size.height > 0 {
+            let size = view.bounds.size
+            func corner(_ x: CGFloat, _ y: CGFloat) -> SIMD3<Float> {
+                SIMD3(
+                    Float(x / size.width * 2 - 1),
+                    Float(1 - 2 * y / size.height),
+                    0.05 // just inside the near plane
+                )
+            }
+            let color = Renderer.selectedVolumeColor
+            let c0 = corner(rect.minX, rect.minY)
+            let c1 = corner(rect.maxX, rect.minY)
+            let c2 = corner(rect.maxX, rect.maxY)
+            let c3 = corner(rect.minX, rect.maxY)
+            var vertices = [
+                VertexPC(position: c0, color: color),
+                VertexPC(position: c1, color: color),
+                VertexPC(position: c1, color: color),
+                VertexPC(position: c2, color: color),
+                VertexPC(position: c2, color: color),
+                VertexPC(position: c3, color: color),
+                VertexPC(position: c3, color: color),
+                VertexPC(position: c0, color: color)
+            ]
+            encoder.pushDebugGroup("marquee")
+            encoder.setRenderPipelineState(linePipeline)
+            encoder.setDepthStencilState(overlayDepthState)
+            var identity = LineUniforms(mvp: matrix_identity_float4x4)
+            encoder.setVertexBytes(&identity, length: MemoryLayout<LineUniforms>.stride, index: 1)
+            encoder.setVertexBytes(
+                &vertices,
+                length: MemoryLayout<VertexPC>.stride * vertices.count,
+                index: 0
+            )
+            encoder.drawPrimitives(type: .line, vertexStart: 0, vertexCount: vertices.count)
+            encoder.popDebugGroup()
         }
 
         encoder.endEncoding()

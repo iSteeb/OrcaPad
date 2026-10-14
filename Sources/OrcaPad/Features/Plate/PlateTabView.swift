@@ -27,6 +27,7 @@ struct PlateTabView: View {
     @State private var renameText = ""
     @State private var deleteAllConfirmation = false
     @State private var aboutPresented = false
+    @State private var parameterTablePresented = false
 
     private var document: DocumentStore { environment.document }
 
@@ -68,7 +69,13 @@ struct PlateTabView: View {
                             instanceOrdinal: (object.instances.firstIndex { $0.id == selection.instanceID } ?? 0) + 1,
                             instanceCount: object.instances.count,
                             size: document.selectedSize ?? .zero,
-                            selectionCount: document.selectedGroup.count
+                            selectionCount: document.selectedGroup.count,
+                            volumeName: selection.volumeID.flatMap { volumeID in
+                                object.volumes.first { $0.id == volumeID }?.name
+                            },
+                            volumeRole: selection.volumeID.flatMap { volumeID in
+                                object.volumes.first { $0.id == volumeID }?.role
+                            }
                         ),
                         transform: transform,
                         meshSize: object.mesh.bounds.size,
@@ -85,7 +92,40 @@ struct PlateTabView: View {
                             resetRotation: {
                                 Task { await document.resetRotation() }
                             }
-                        )
+                        ),
+                        volume: selection.volumeID.flatMap { volumeID in
+                            object.volumes.first { $0.id == volumeID }.map { volume in
+                                SelectedVolumeInfo(
+                                    objectID: object.id,
+                                    volumeID: volume.id,
+                                    name: volume.name,
+                                    role: volume.role,
+                                    overrideCount: volume.overrideCount
+                                )
+                            }
+                        },
+                        volumeActions: selection.volumeID.map { volumeID in
+                            VolumeActions(
+                                editSettings: {
+                                    settingsTarget = SettingsTarget(
+                                        objectID: object.id, volumeID: volumeID,
+                                        title: object.volumes.first { $0.id == volumeID }?.name ?? "Part"
+                                    )
+                                },
+                                changeType: { role in
+                                    Task {
+                                        await document.setVolumeType(
+                                            role, volumeID: volumeID, objectID: object.id
+                                        )
+                                    }
+                                },
+                                delete: {
+                                    Task {
+                                        await document.deleteVolume(volumeID, objectID: object.id)
+                                    }
+                                }
+                            )
+                        }
                     )
                     .padding(.horizontal, 12)
                     .padding(.bottom, 8)
@@ -147,6 +187,7 @@ struct PlateTabView: View {
                     bed: bed,
                     selectedObjectID: document.selection?.objectID,
                     selectedInstanceID: document.selection?.instanceID,
+                    selectedVolumeID: document.selection?.volumeID,
                     highlightedInstanceIDs: Set(document.selectedGroup.map(\.instanceID)),
                     previewMatrices: document.previewMatrices,
                     presentationRevision: document.presentationRevision,
@@ -158,6 +199,20 @@ struct PlateTabView: View {
                 manipulation: CanvasManipulation(
                     onSelect: { document.select(objectID: $0, instanceID: $1) },
                     onToggleSelect: { document.toggleSelect(objectID: $0, instanceID: $1) },
+                    onSelectVolume: { objectID, instanceID, volumeID in
+                        document.selectVolume(
+                            objectID: objectID,
+                            instanceID: instanceID,
+                            volumeID: volumeID
+                        )
+                    },
+                    onRectangleSelect: { hits in
+                        document.setMultiSelection(
+                            hits.map { InstanceSelection(
+                                objectID: $0.objectID, instanceID: $0.instanceID
+                            )}
+                        )
+                    },
                     onMove: { document.moveSelected(by: $0) },
                     onBegin: { document.beginManipulation() },
                     onRotate: { document.previewRotation(axis: rotationAxis, deltaRadians: $0) },
@@ -268,6 +323,13 @@ struct PlateTabView: View {
                 .disabled(document.selection == nil)
                 .keyboardShortcut("c", modifiers: .command)
                 Button {
+                    Task { await document.cutSelected() }
+                } label: {
+                    Label("Cut", systemImage: "scissors")
+                }
+                .disabled(document.selection == nil)
+                .keyboardShortcut("x", modifiers: .command)
+                Button {
                     Task {
                         await document.pasteObject(bedCenter: bedCenter)
                     }
@@ -330,6 +392,11 @@ struct PlateTabView: View {
         }
         guard let selection = document.selection,
               let object = document.scene?.object(id: selection.objectID) else { return }
+        // A selected volume deletes the volume, not the object.
+        if let volumeID = selection.volumeID {
+            Task { await document.deleteVolume(volumeID, objectID: selection.objectID) }
+            return
+        }
         Task {
             if object.instances.count > 1 {
                 await document.deleteInstance(selection.instanceID, of: selection.objectID)
@@ -483,8 +550,12 @@ struct PlateTabView: View {
                 ObjectSettingsSheet(
                     objectID: target.objectID,
                     volumeID: target.volumeID,
-                    title: target.title
+                    title: target.title,
+                    preselectKey: target.preselectKey
                 )
+            }
+            .sheet(isPresented: $parameterTablePresented) {
+                ParameterTableView()
             }
             .confirmationDialog(
                 "Delete all objects?",
@@ -553,6 +624,9 @@ extension PlateTabView {
                 ForEach(object.volumes) { volume in
                     volumeRow(volume, objectID: object.id)
                 }
+            }
+            if object.overrideCount > 0 {
+                settingsRows(objectID: object.id, volumeID: nil)
             }
         }
         .contentShape(Rectangle())
@@ -694,6 +768,29 @@ extension PlateTabView {
                 Label("Edit process settings…", systemImage: "slider.horizontal.3")
             }
             Button {
+                Task {
+                    await document.copySettings(objectID: object.id, volumeID: nil)
+                }
+            } label: {
+                Label("Copy Process Settings", systemImage: "doc.on.doc")
+            }
+            Button {
+                Task {
+                    await document.pasteSettings(objectID: object.id, volumeID: nil)
+                }
+            } label: {
+                Label("Paste Process Settings", systemImage: "doc.on.clipboard")
+            }
+            .disabled(!document.canPasteSettings || document.settingsClipboardIsVolume)
+            frequentSettingsMenu(object: object, volumeID: nil)
+            if document.hasMultiSelection {
+                Button {
+                    parameterTablePresented = true
+                } label: {
+                    Label("Edit in Parameter Table", systemImage: "tablecells")
+                }
+            }
+            Button {
                 renameText = object.name
                 renameTarget = .object(object.id)
             } label: {
@@ -703,6 +800,29 @@ extension PlateTabView {
             Image(systemName: "ellipsis.circle")
         }
         .disabled(document.isBusy)
+    }
+
+    /// Desktop create_freq_settings_popupmenu: the upstream
+    /// OBJECT_CATEGORY_SETTINGS / PART_CATEGORY_SETTINGS quick menu.
+    private func frequentSettingsMenu(object: SceneObject, volumeID: VolumeID?) -> some View {
+        Menu {
+            ForEach(FrequentSettings.categories(forVolume: volumeID != nil), id: \.name) { category in
+                Menu(category.name) {
+                    ForEach(category.keys, id: \.self) { key in
+                        Button(FrequentSettings.label(for: key)) {
+                            settingsTarget = SettingsTarget(
+                                objectID: object.id, volumeID: volumeID,
+                                title: volumeID == nil ? object.name
+                                    : object.volumes.first { $0.id == volumeID }?.name ?? "Part",
+                                preselectKey: key
+                            )
+                        }
+                    }
+                }
+            }
+        } label: {
+            Label("Frequent settings…", systemImage: "star")
+        }
     }
 
     /// Desktop "Add Part / Modifier / Negative volume / Support blocker /
@@ -751,6 +871,7 @@ extension PlateTabView {
     }
 
     /// One volume row: role color, name, type and per-volume actions.
+    @ViewBuilder
     private func volumeRow(_ volume: SceneVolume, objectID: ObjectID) -> some View {
         HStack(spacing: 8) {
             Image(systemName: volume.role.symbol)
@@ -778,6 +899,24 @@ extension PlateTabView {
                     Label("Edit settings…", systemImage: "slider.horizontal.3")
                 }
                 .disabled(volume.role == .negative)
+                Button {
+                    Task {
+                        await document.copySettings(objectID: objectID, volumeID: volume.id)
+                    }
+                } label: {
+                    Label("Copy Process Settings", systemImage: "doc.on.doc")
+                }
+                Button {
+                    Task {
+                        await document.pasteSettings(objectID: objectID, volumeID: volume.id)
+                    }
+                } label: {
+                    Label("Paste Process Settings", systemImage: "doc.on.clipboard")
+                }
+                .disabled(!document.canPasteSettings || !document.settingsClipboardIsVolume)
+                if let object = document.scene?.object(id: objectID) {
+                    frequentSettingsMenu(object: object, volumeID: volume.id)
+                }
                 Button {
                     renameText = volume.name
                     renameTarget = .volume(objectID, volume.id)
@@ -813,6 +952,22 @@ extension PlateTabView {
             .disabled(document.isBusy)
         }
         .padding(.leading, 16)
+        if volume.overrideCount > 0 {
+            settingsRows(objectID: objectID, volumeID: volume.id)
+        }
+    }
+
+    /// Desktop object-list "Settings" child items: one row per override,
+    /// tap to edit or remove (reset) in the settings sheet.
+    @ViewBuilder
+    private func settingsRows(objectID: ObjectID, volumeID: VolumeID?) -> some View {
+        OverrideRows(objectID: objectID, volumeID: volumeID) { key in
+            settingsTarget = SettingsTarget(
+                objectID: objectID, volumeID: volumeID,
+                title: document.scene?.object(id: objectID)?.name ?? "Settings",
+                preselectKey: key
+            )
+        }
     }
 }
 
@@ -823,13 +978,77 @@ private struct CountPrompt {
     let objectID: ObjectID
 }
 
+/// One row per setting override (desktop object-list Settings child items).
+/// Reloads on every document revision; a failed read shows the error row.
+private struct OverrideRows: View {
+    let objectID: ObjectID
+    let volumeID: VolumeID?
+    let onPick: (String) -> Void
+
+    @Environment(AppEnvironment.self) private var environment
+    @State private var overrides: [String: String]?
+    @State private var failure: String?
+
+    var body: some View {
+        Group {
+            if let overrides {
+                ForEach(overrides.keys.sorted(), id: \.self) { key in
+                    Button {
+                        onPick(key)
+                    } label: {
+                        HStack {
+                            Image(systemName: "slider.horizontal.3")
+                                .font(.caption2)
+                                .foregroundStyle(Color.accentColor)
+                            Text(key)
+                                .font(.caption2.monospaced())
+                                .foregroundStyle(.secondary)
+                            Spacer()
+                            Text(overrides[key] ?? "")
+                                .font(.caption2.monospaced())
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                        }
+                    }
+                }
+            } else if let failure {
+                Label(failure, systemImage: "exclamationmark.triangle")
+                    .font(.caption2)
+                    .foregroundStyle(.red)
+            } else {
+                HStack(spacing: 6) {
+                    Image(systemName: "slider.horizontal.3")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    Text("Loading settings…")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+                .padding(.leading, 32)
+            }
+        }
+        .task(id: environment.document.scene?.revision) {
+            if let values = await environment.document.settings(
+                objectID: objectID, volumeID: volumeID
+            ) {
+                overrides = values
+                failure = nil
+            } else {
+                failure = "Could not read the overrides"
+            }
+        }
+    }
+}
+
 /// Settings sheet routing: an object (volumeID nil) or one of its volumes.
 private struct SettingsTarget: Identifiable {
     let objectID: ObjectID
     let volumeID: VolumeID?
     let title: String
+    /// A frequent-settings quick-menu pick: the sheet seeds this override.
+    var preselectKey: String?
 
-    var id: String { "\(objectID)-\(volumeID?.description ?? "object")" }
+    var id: String { "\(objectID)-\(volumeID?.description ?? "object")-\(preselectKey ?? "")" }
 }
 
 /// Rename routing: object or volume.
@@ -849,6 +1068,14 @@ private extension VolumeRole {
         case .supportEnforcer: return "hand.thumbsup.fill"
         }
     }
+
+    @MainActor
+    var tint: Color {
+        let c = Renderer.volumeColor(self)
+        return Color(
+            red: Double(c.x), green: Double(c.y), blue: Double(c.z), opacity: 1
+        )
+    }
 }
 
 // MARK: - Gizmo toolbar (left, desktop parity)
@@ -862,6 +1089,7 @@ private struct GizmoToolbar: View {
 
     var body: some View {
         VStack(spacing: 6) {
+            tool(.select, symbol: "rectangle.dashed", label: "Select")
             tool(.move, symbol: "arrow.up.and.down.and.arrow.left.and.right", label: "Move")
             tool(.rotate, symbol: "arrow.clockwise.circle", label: "Rotate")
             tool(.scale, symbol: "arrow.up.left.and.arrow.down.right", label: "Scale")
@@ -927,6 +1155,25 @@ private struct PanelHeader {
     let size: SIMD3<Float>
     /// Members of a multi-selection (1 = single).
     var selectionCount = 1
+    /// The selected volume (part selection), if any — replaces the object
+    /// name in the header.
+    var volumeName: String?
+    var volumeRole: VolumeRole?
+}
+
+/// The selected volume presented by the manipulation panel (part selection).
+private struct SelectedVolumeInfo {
+    let objectID: ObjectID
+    let volumeID: VolumeID
+    let name: String
+    let role: VolumeRole
+    let overrideCount: Int
+}
+
+private struct VolumeActions {
+    let editSettings: () -> Void
+    let changeType: (VolumeRole) -> Void
+    let delete: () -> Void
 }
 
 private struct ManipulationActions {
@@ -945,11 +1192,17 @@ private struct ManipulationPanel: View {
     @Binding var rotationAxis: EngineAxis
     let isBusy: Bool
     let actions: ManipulationActions
+    var volume: SelectedVolumeInfo?
+    var volumeActions: VolumeActions?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
-                Text(header.name)
+                if let role = header.volumeRole {
+                    Image(systemName: role.symbol)
+                        .foregroundStyle(role.tint)
+                }
+                Text(header.volumeName ?? header.name)
                     .font(.subheadline.weight(.semibold))
                     .lineLimit(1)
                 Text("instance \(header.instanceOrdinal)/\(header.instanceCount)")
@@ -976,11 +1229,66 @@ private struct ManipulationPanel: View {
                 )
                 .font(.caption)
                 .foregroundStyle(.secondary)
+            case .select:
+                Label(
+                    "Drag on the plate to select by rectangle. Long-press an object to add it to the selection.",
+                    systemImage: "rectangle.dashed"
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            }
+            if let volume, let volumeActions {
+                volumeRow(volume, actions: volumeActions)
             }
         }
         .padding(12)
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16))
         .disabled(isBusy)
+    }
+
+    /// Selected volume (part selection): role chip + per-volume actions.
+    private func volumeRow(
+        _ volume: SelectedVolumeInfo, actions: VolumeActions
+    ) -> some View {
+        HStack(spacing: 10) {
+            Text(volume.role.label)
+                .font(.caption.weight(.semibold))
+                .padding(.horizontal, 8)
+                .padding(.vertical, 3)
+                .background(volume.role.tint.opacity(0.18), in: Capsule())
+                .foregroundStyle(volume.role.tint)
+            if volume.overrideCount > 0 {
+                Label("\(volume.overrideCount)", systemImage: "slider.horizontal.3")
+                    .font(.caption2)
+                    .foregroundStyle(Color.accentColor)
+            }
+            Spacer()
+            Button {
+                actions.editSettings()
+            } label: {
+                Label("Settings", systemImage: "slider.horizontal.3")
+            }
+            .buttonStyle(.bordered)
+            .font(.caption)
+            if volume.role != .part {
+                Menu {
+                    ForEach(VolumeRole.allCases, id: \.self) { role in
+                        Button(role.label) { actions.changeType(role) }
+                    }
+                } label: {
+                    Label("Type", systemImage: "arrow.triangle.2.circlepath")
+                }
+                .buttonStyle(.bordered)
+                .font(.caption)
+            }
+            Button(role: .destructive) {
+                actions.delete()
+            } label: {
+                Label("Delete", systemImage: "trash")
+            }
+            .buttonStyle(.bordered)
+            .font(.caption)
+        }
     }
 
     // Move: X / Y on the bed plane + center (Z is engine-managed: rests on bed).

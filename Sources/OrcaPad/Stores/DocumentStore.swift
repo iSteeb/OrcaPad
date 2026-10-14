@@ -9,6 +9,15 @@ import simd
 struct InstanceSelection: Equatable, Sendable {
     let objectID: ObjectID
     let instanceID: InstanceID
+    /// The selected VOLUME inside the object (desktop part selection), nil
+    /// for a whole-object/instance selection.
+    var volumeID: VolumeID?
+
+    init(objectID: ObjectID, instanceID: InstanceID, volumeID: VolumeID? = nil) {
+        self.objectID = objectID
+        self.instanceID = instanceID
+        self.volumeID = volumeID
+    }
 }
 
 struct SliceInput: Sendable {
@@ -24,11 +33,6 @@ private struct DocumentBootstrap: Sendable {
 private struct ImportCommit: Sendable {
     let mutation: EnginePlater.MutationResult
     let status: String
-}
-
-private struct MultiDeleteExecution: Sendable {
-    let latestMutation: EnginePlater.MutationResult?
-    let failure: AppFailure?
 }
 
 @MainActor
@@ -342,28 +346,47 @@ final class DocumentStore {
 
     /// Desktop "Delete selected" for a multi-selection: whole objects when
     /// every instance is selected, otherwise the selected instances.
+    func deleteObjects(_ objectIDs: [ObjectID]) async {
+        guard !objectIDs.isEmpty else { return }
+        _ = await applyMutation(
+            .deleteObjects(objectIDs),
+            operation: "delete objects"
+        )
+    }
+
+    /// Desktop Selection::erase: the whole group in ONE undo step. An object
+    /// whose every instance is selected is removed entirely (engine-side
+    /// promotion), a partially selected object keeps its other instances.
     func deleteSelectedGroup() async {
-        guard let scene else { return }
         let group = selectedGroup
-        guard !group.isEmpty else { return }
+        guard !group.isEmpty, let scene else { return }
+        // Expand fully-selected objects to all their instances so the batch
+        // delete can promote them.
+        var members: [EnginePlater.GroupInstance] = []
         let byObject = Dictionary(grouping: group, by: \.objectID)
-        var objectsToDelete: [ObjectID] = []
-        var instancesToDelete: [InstanceSelection] = []
-        for (objectID, members) in byObject {
+        for (objectID, selected) in byObject {
             guard let object = scene.object(id: objectID) else { continue }
-            if members.count >= object.instances.count {
-                objectsToDelete.append(objectID)
+            if selected.count >= object.instances.count {
+                members.append(contentsOf: object.instances.map {
+                    EnginePlater.GroupInstance(
+                        objectID: objectID, instanceID: $0.id
+                    )
+                })
             } else {
-                instancesToDelete.append(contentsOf: members)
+                members.append(contentsOf: selected.map {
+                    EnginePlater.GroupInstance(
+                        objectID: $0.objectID, instanceID: $0.instanceID
+                    )
+                })
             }
         }
-        for member in instancesToDelete {
-            await deleteInstance(member.instanceID, of: member.objectID)
+        guard !members.isEmpty else { return }
+        if await applyMutation(
+            .deleteInstances(members),
+            operation: "delete selection"
+        ) != nil {
+            multiSelection = []
         }
-        if !objectsToDelete.isEmpty {
-            await deleteObjects(objectsToDelete)
-        }
-        multiSelection = []
     }
 
     // MARK: Per-object / per-part settings (desktop "Edit Process Settings")
@@ -505,30 +528,81 @@ final class DocumentStore {
     }
 
     func copySelected() async {
-        guard let selection else { return }
-        if await applyMutation(
-            .copyObject(objectID: selection.objectID),
-            operation: "copy object"
-        ) != nil {
-            status.report(.document, "object copied")
+        let ids = selectedObjectIDs
+        guard !ids.isEmpty else { return }
+        if await applyMutation(.copyObjects(ids), operation: "copy objects") != nil {
+            status.report(
+                .document,
+                ids.count == 1 ? "object copied" : "\(ids.count) objects copied"
+            )
         }
     }
 
-    /// Pastes the clipboard object beside the current selection (or at the
-    /// bed center) and selects it.
+    /// Desktop Cut: copy to the clipboard, then delete in one undo step.
+    func cutSelected() async {
+        let ids = selectedObjectIDs
+        guard !ids.isEmpty else { return }
+        guard await applyMutation(
+            .copyObjects(ids), operation: "cut objects"
+        ) != nil else { return }
+        if await applyMutation(.deleteObjects(ids), operation: "cut objects") != nil {
+            status.report(
+                .document,
+                ids.count == 1 ? "object cut" : "\(ids.count) objects cut"
+            )
+        }
+    }
+
+    /// Pastes the whole clipboard beside the current selection (or at the
+    /// bed center) and selects every pasted object.
     func pasteObject(bedCenter: SIMD2<Double>) async {
         var target = bedCenter
         if let selection, let instance = selectedInstance {
             target = SIMD2(instance.transform.offsetX + 15, instance.transform.offsetY + 15)
         }
         if let mutation = await applyMutation(
-            .pasteObject(bedCenter: target),
-            operation: "paste object"
-        ), let objectID = mutation.createdObjectID,
-            let instanceID = mutation.snapshot.object(id: objectID)?.instances.first?.id {
-            selection = InstanceSelection(objectID: objectID, instanceID: instanceID)
+            .pasteObjects(bedCenter: target),
+            operation: "paste objects"
+        ) {
+            // The pasted objects are the trailing `createdObjectCount`
+            // entries of the new snapshot (the engine appends).
+            let objects = mutation.snapshot.objects
+            let pasted = objects.suffix(max(mutation.createdObjectCount, 0))
+            guard pasted.count == mutation.createdObjectCount,
+                  pasted.first?.id == mutation.createdObjectID else {
+                status.report(.document, failure: .invariant(
+                    operation: "paste objects",
+                    diagnostic: "pasted object ids do not match the mutation result"
+                ))
+                return
+            }
+            let members = pasted.compactMap { object -> InstanceSelection? in
+                guard let instance = object.instances.first else { return nil }
+                return InstanceSelection(
+                    objectID: object.id, instanceID: instance.id
+                )
+            }
+            guard !members.isEmpty else { return }
+            if members.count == 1 {
+                selection = members.first
+                multiSelection = []
+            } else {
+                multiSelection = members
+                selection = members.first
+            }
             frameRequest += 1
         }
+    }
+
+    /// Unique object IDs of the current selection / multi-selection.
+    var selectedObjectIDs: [ObjectID] {
+        var seen: Set<ObjectID> = []
+        var ids: [ObjectID] = []
+        for member in selectedGroup where !seen.contains(member.objectID) {
+            seen.insert(member.objectID)
+            ids.append(member.objectID)
+        }
+        return ids
     }
 
     /// Applies a desktop camera view preset to the canvas camera.
@@ -557,47 +631,6 @@ final class DocumentStore {
             operation: "split to parts"
         ) {
             status.report(.document, "split into \(mutation.createdPartCount) parts")
-        }
-    }
-
-    func deleteObjects(_ objectIDs: [ObjectID]) async {
-        guard let plater, !isBusy else {
-            status.report(.document, "delete objects blocked: document is busy")
-            return
-        }
-        guard !objectIDs.isEmpty else { return }
-        isMutating = true
-        let result = await BackgroundWork.run(operation: "delete objects") {
-            var latest: EnginePlater.MutationResult?
-            for objectID in objectIDs {
-                do {
-                    latest = try plater.apply(.deleteObject(objectID))
-                } catch {
-                    return MultiDeleteExecution(
-                        latestMutation: latest,
-                        failure: AppFailure.wrap(
-                            error,
-                            operation: "delete object \(objectID)"
-                        )
-                    )
-                }
-            }
-            return MultiDeleteExecution(
-                latestMutation: latest,
-                failure: nil
-            )
-        }
-        isMutating = false
-        switch result {
-        case .success(let execution):
-            if let mutation = execution.latestMutation {
-                install(mutation.snapshot)
-            }
-            if let failure = execution.failure {
-                status.report(.document, failure: failure)
-            }
-        case .failure(let failure):
-            status.report(.document, failure: failure)
         }
     }
 
@@ -660,6 +693,94 @@ final class DocumentStore {
         guard !multiSelection.isEmpty else { return }
         multiSelection = selection.map { [$0] } ?? []
         clearPreview()
+    }
+
+    /// Desktop part selection: refines the selection to one volume of the
+    /// object (nil returns to the whole object). Single-selection only.
+    func selectVolume(objectID: ObjectID, instanceID: InstanceID, volumeID: VolumeID?) {
+        guard let object = scene?.object(id: objectID),
+              object.instances.contains(where: { $0.id == instanceID }) else { return }
+        if let volumeID,
+           !object.volumes.contains(where: { $0.id == volumeID }) {
+            status.report(.document, failure: .invariant(
+                operation: "select part",
+                diagnostic: "volume \(volumeID) is not part of object \(objectID)"
+            ))
+            return
+        }
+        var updated = InstanceSelection(objectID: objectID, instanceID: instanceID)
+        updated.volumeID = volumeID
+        selection = updated
+        multiSelection = []
+        clearPreview()
+    }
+
+    /// Desktop rectangle (marquee) selection: replaces the selection with
+    /// the instances whose screen footprint intersected the rectangle.
+    func setMultiSelection(_ members: [InstanceSelection]) {
+        guard let scene else { return }
+        let valid = members.filter {
+            scene.instance(objectID: $0.objectID, instanceID: $0.instanceID) != nil
+        }
+        guard !valid.isEmpty else {
+            multiSelection = []
+            selection = nil
+            clearPreview()
+            return
+        }
+        multiSelection = valid
+        selection = valid.first
+        clearPreview()
+    }
+
+    // MARK: Settings clipboard (desktop Copy / Paste Process Settings)
+
+    private(set) var settingsClipboard: [String: String]?
+    private(set) var settingsClipboardIsVolume = false
+
+    /// Copies the target's overrides (desktop copy_settings_to_clipboard).
+    func copySettings(objectID: ObjectID, volumeID: VolumeID?) async {
+        guard let values = await settings(objectID: objectID, volumeID: volumeID) else {
+            return
+        }
+        settingsClipboard = values
+        settingsClipboardIsVolume = volumeID != nil
+        status.report(
+            .document,
+            values.isEmpty
+                ? "no overrides to copy"
+                : "copied \(values.count) setting\(values.count == 1 ? "" : "s")"
+        )
+    }
+
+    /// Desktop paste_settings_into_list: object → object, part → part only;
+    /// the target's overrides are REPLACED in one undo step.
+    func pasteSettings(objectID: ObjectID, volumeID: VolumeID?) async {
+        guard let clipboard = settingsClipboard, !clipboard.isEmpty else {
+            status.report(.document, failure: .invariant(
+                operation: "paste process settings",
+                diagnostic: "the settings clipboard is empty"
+            ))
+            return
+        }
+        guard settingsClipboardIsVolume == (volumeID != nil) else {
+            status.report(.document, failure: .invariant(
+                operation: "paste process settings",
+                diagnostic: "settings paste between object and part is not supported (copy from the same kind)"
+            ))
+            return
+        }
+        if await applyMutation(
+            .applySettings(objectID: objectID, volumeID: volumeID, overrides: clipboard),
+            operation: "paste process settings"
+        ) != nil {
+            status.report(.document, "pasted \(clipboard.count) setting\(clipboard.count == 1 ? "" : "s")")
+        }
+    }
+
+    var canPasteSettings: Bool {
+        guard let clipboard = settingsClipboard else { return false }
+        return !clipboard.isEmpty
     }
 
     // MARK: Manipulation (gesture previews on the engine matrix → one
@@ -1006,6 +1127,13 @@ final class DocumentStore {
                instanceID: selection.instanceID
            ) == nil {
             self.selection = nil
+        }
+        // A selected volume may have been deleted/split: drop the refinement,
+        // keeping the object selected.
+        if let volumeID = selection?.volumeID,
+           let object = selection.flatMap({ authoritativeScene.object(id: $0.objectID) }),
+           !object.volumes.contains(where: { $0.id == volumeID }) {
+            selection?.volumeID = nil
         }
         multiSelection.removeAll { member in
             authoritativeScene.instance(

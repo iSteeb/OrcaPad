@@ -37,7 +37,9 @@
   (my comment TUs + its v25 objects) — NOT committed; next agent must
   rebuild/commit the archive for v25.
 - Parity source of truth: `Bridge/tools/parity-manifest.toml` → generated
-  PARITY.md "Remaining work" (551 desktop items, 152 features, 33% at v24).
+  PARITY.md "Remaining work" (551 desktop items, 152 features, 35% at v26;
+  next: plate.multi-plate (10), rotate/scale/lay-flat polish, then prepare
+  multi-filament and preview per-layer color).
 - [2026-10-07 USER] Order: Device printer web UI, then plate/object editing →
   prepare/presets → Files integration → preview. Deferred by user: STEP/SVG,
   Draco, Calibration menu, mesh boolean. User device verification of v8+
@@ -74,46 +76,21 @@
 
 ## PROGRESS
 
-- [2026-10-13 TOOL] release-0.1.1 run 38413247330 SUCCESS end to end:
-  license gate green after engine_fetch_deps fetched the full cache
-  closure (libnoise had no fetch; CI saw 277/312 TUs), 0.1.1 (4.1)
-  uploaded, What to Test set, external group 'External', Beta App
-  Review submitted; complete source published as the tag's GitHub
-  Release. Awaiting: review approval + on-device preset-fix check.
-- [2026-10-13 CODE][USER] ABI v25 select_machine: the TestFlight 0.1.0
-  fresh-install bug (picking a printer kept the default process ->
-  'process preset was not found', slicing defaults -> relative-E error;
-  reproduced on host with a probe) fixed with desktop semantics
-  (machine-declared defaults + update_compatible(Always), never a
-  default process left selected). PresetStore machine path reads back
-  the engine triple; load() ignores the fresh default names. Host tests
-  51,038 PASS; integrated with the Gate E licensing pass (SPDX,
-  license gate, source archive) from the adjacent agent.
-- [2026-10-13 TOOL] First release `release-0.1.0` (run 38395092119): Xcode
-  archive, App Store signing, export, altool validate + UPLOAD SUCCEEDED
-  for 0.1.0 (2.1) to app "OrcaPad Slicer" (ASC id 6822246784). Only the
-  external submission failed: no TestFlight group `External` yet (the UI
-  showed no External Testing section before the first build existed).
-- [2026-10-13 CODE][TOOL] CI rework: the first run (workflow_dispatch) hung
-  35 min in `xtool --version` on the runner and was cancelled. CI is now
-  release-tag-only and Xcode-only: Distribution/project.yml (XcodeGen),
-  release-testflight.sh (archive/sign/check/export/upload),
-  asc_testflight.py (external group + Beta App Review; JWT self-test
-  passed locally), PRIVACY.md. Environment `testflight` deploys only
-  `release*` tags. Scratch-branch dry run (no secrets): XcodeGen +
-  unsigned xcodebuild archive OK in ~1 min; Info.plist, icons, privacy
-  manifest, DT keys correct; Apple ld links the engine and SwiftUI (not
-  SwiftUICore). Signing/export/upload/submission UNCONFIRMED until the
-  first release tag.
-- [2026-10-13 CODE][TOOL] ABI v24 committed (per-layer custom G-code C ABI
-  + tests, 51,004 PASS; no client UI yet); Darwin-format engine archive;
-  Distribution/ icon + privacy manifest. Apple side by the user: App ID
-  ie.duz.OrcaPad, distribution cert, App Store profile, CI key 8XDBKRMA4V.
-- [2026-10-06/07 CODE][TOOL] (compressed) Gates A-C6, then ABI v8-v23:
-  presets/projects/import, slice jobs, arrange/orient, preview v14,
-  printers + upload + printer web UI, thumbnails, undo/redo, volumes,
-  transforms, per-object settings, object ops. Host tests 50,962 PASS at
-  v23; closure 225 upstream TUs; parity checker gates commits.
+- [2026-10-14 CODE] ABI v26 + C8 (selection/clipboard/part parity, 51,140
+  host checks PASS, archive rebuilt 312 TUs, build/audit/parity green,
+  parity 33%→35%, 42 done): marquee select + one-step group delete
+  (instances_delete promotes fully-selected objects), multi-object clipboard
+  + cut (objects_copy/paste keeps relative placement), canvas part selection
+  via snapshot merged-triangle ranges (raw_mesh() order, snapshot-invariant
+  guarded), Copy/Paste Process Settings (settings_apply = one-step replace),
+  parameter table, frequent-settings menu, object-list Settings rows.
+  UNCONFIRMED: on-device behavior (marquee drag, part tap, parameter table)
+  — user verification pending.
+- [2026-10-13/14, compressed] Gate E compliance landed (SPDX, license gate,
+  source archive, About view); release-0.1.1 shipped end to end (run
+  38413247330: external group + Beta App Review submitted; approval +
+  on-device preset-fix check pending). ABI v25 select_machine fixed the
+  fresh-install preset bug.
 
 ## DISCOVERIES
 
@@ -134,6 +111,9 @@
 
 ## OUTCOMES
 
+- [2026-10-14] C8 milestone complete (5 parity rows ✅, ABI v25→v26): tagged
+  release-0.2.0 — external TestFlight (Beta App Review + on-device check
+  pending).
 - [2026-10-06 USER] Gate B on device: builds and slices; rotate UX redone (C6).
 - [2026-10-03 USER] Phase 1 accepted: 483,772-triangle STL sliced on device.
 - [2026-10-02 USER] Phase 0/2 accepted: native Metal viewer, engine slicing.
