@@ -117,6 +117,12 @@
 
 ## OUTCOMES
 
+- [2026-10-14] C9 milestone complete (plates + open-in, ABI v26→v27,
+  files.open-in ✅, plate.multi-plate 🟡 major): release-0.3.0 run
+  38570936772 green end to end — build 0.3.0 (6.1) uploaded, external
+  group, Beta App Review submitted, source archive published. Awaiting:
+  approvals (0.2.0 + 0.3.0) + on-device checks (marquee/part tap/parameter
+  table; plate bar, plate slicing, open-in).
 - [2026-10-14] C8 milestone complete (5 parity rows ✅, ABI v25→v26):
   release-0.2.0 run 38526110136 green end to end — build 0.2.0 (5.1)
   uploaded, What to Test set, external group 'External', Beta App Review
