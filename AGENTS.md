@@ -128,6 +128,12 @@ contract test literal in the same commit)**
 - G-code preview: `orca_gcode_load` runs the upstream GCodeProcessor;
   `orca_gcode_toolpath` returns a compact owned segment/layer copy carrying
   the engine's own ExtrusionRole/EMoveType values (never libvgcode's).
+- Flatten planes (ABI v29, desktop `GLGizmoFlatten::update_planes`):
+  `orca_plater_flatten_planes` groups the selected instance's merged hull
+  facets into coplanar resting planes (BFS over face neighbors, desktop
+  epsilons/filters, 10% centroid shrink) in world coordinates, read-only;
+  the client draws them translucently, highlights the plane under the
+  finger and lays the instance on the picked plane's normal.
 
 **Swift facade (`Sources/OrcaBridge`)**
 - Raw ABI use (`OrcaBridgeCore`, `OpaquePointer`, `orca_*`, `Unmanaged`) is

@@ -81,6 +81,11 @@
 
 ## PROGRESS
 
+- [2026-10-14 CODE] ABI v29 + C9c (transform polish, parity 47 done 37%):
+  rotate snap zones (desktop GLGizmoRotate 45/5/free by drag distance) +
+  relative-angle entry; scale per-axis on-canvas handles; Flatten gizmo
+  hull planes (Bridge grouping + translucent rendering + touch-hover
+  highlight). UNCONFIRMED on device (TestFlight will carry it).
 - [2026-10-14 CODE] ABI v28 + C9b (slice-all, parity 44 done): engine
   plate context fixed on EVERY slice — upstream `Print::m_origin` is
   UNINITIALIZED (desktop always calls PartPlate::set_print; our Bridge

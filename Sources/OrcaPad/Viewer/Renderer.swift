@@ -77,6 +77,7 @@ final class Renderer: NSObject, MTKViewDelegate {
     private var litPipeline: MTLRenderPipelineState!
     private var litBlendPipeline: MTLRenderPipelineState!
     private var linePipeline: MTLRenderPipelineState!
+    private var pcBlendPipeline: MTLRenderPipelineState!
     private var depthState: MTLDepthStencilState!
     private var translucentDepthState: MTLDepthStencilState!
     private var overlayDepthState: MTLDepthStencilState!
@@ -117,6 +118,72 @@ final class Renderer: NSObject, MTKViewDelegate {
     /// Marquee rectangle in view POINTS (rectangle selection mode); drawn as
     /// a screen-space overlay each frame.
     private var marqueeRect: CGRect?
+
+    // Flatten-gizmo planes (desktop GLGizmoFlatten): viewer-space convex
+    // polygons + their engine-space normals; the highlighted index follows
+    // the finger before the tap applies.
+    private struct FlattenPlaneDraw {
+        let vertices: [SIMD3<Float>]
+        let engineNormal: SIMD3<Double>
+    }
+    private var flattenPlanes: [FlattenPlaneDraw] = []
+    private var flattenHighlightIndex: Int?
+
+    func setFlattenPlanes(_ planes: [EnginePlater.FlattenPlane]?) {
+        flattenPlanes = (planes ?? []).map { plane in
+            FlattenPlaneDraw(
+                vertices: plane.vertices.map { vertex in
+                    let viewer = CoordinateMapper.engineToViewer * SIMD4<Float>(vertex.x, vertex.y, vertex.z, 1)
+                    return SIMD3(viewer.x, viewer.y, viewer.z)
+                },
+                engineNormal: plane.normal
+            )
+        }
+        flattenHighlightIndex = nil
+    }
+
+    func setFlattenHighlight(_ index: Int?) {
+        flattenHighlightIndex = index
+    }
+
+    /// Ray vs one flatten plane (fan triangulation, convex polygons).
+    private func rayCastFlattenPlane(
+        _ ray: (origin: SIMD3<Float>, dir: SIMD3<Float>), plane: FlattenPlaneDraw
+    ) -> Float? {
+        guard plane.vertices.count >= 3 else { return nil }
+        var best: Float?
+        for triangle in 1..<(plane.vertices.count - 1) {
+            let a = plane.vertices[0], b = plane.vertices[triangle], c = plane.vertices[triangle + 1]
+            let edge1 = b - a, edge2 = c - a
+            let p = simd_cross(ray.dir, edge2)
+            let determinant = simd_dot(edge1, p)
+            guard abs(determinant) > 1e-9 else { continue }
+            let inverse = 1 / determinant
+            let t = ray.origin - a
+            let u = inverse * simd_dot(t, p)
+            guard u >= 0, u <= 1 else { continue }
+            let q = simd_cross(t, edge1)
+            let v = inverse * simd_dot(ray.dir, q)
+            guard v >= 0, u + v <= 1 else { continue }
+            let distance = inverse * simd_dot(edge2, q)
+            if distance > 1e-4 { best = min(best ?? .infinity, distance) }
+        }
+        return best
+    }
+
+    /// Desktop Flatten-gizmo picking: the plane under the touch wins (the
+    /// whole coplanar hull region, not a single mesh facet).
+    func pickFlattenPlane(at point: CGPoint, in view: MTKView)
+        -> (engineNormal: SIMD3<Double>, index: Int)? {
+        let ray = screenRay(at: point, in: view)
+        var best: (index: Int, t: Float)?
+        for (index, plane) in flattenPlanes.enumerated() {
+            guard let t = rayCastFlattenPlane(ray, plane: plane) else { continue }
+            if best == nil || t < best!.t { best = (index, t) }
+        }
+        guard let best else { return nil }
+        return (flattenPlanes[best.index].engineNormal, best.index)
+    }
 
     private static let objectColor = SIMD4<Float>(0.96, 0.52, 0.11, 1)
     private static let selectedColor = SIMD4<Float>(0.16, 0.80, 0.95, 1)
@@ -221,6 +288,18 @@ final class Renderer: NSObject, MTKViewDelegate {
         litBlendPipeline = try device.makeRenderPipelineState(descriptor: blendDesc)
 
         linePipeline = try device.makeRenderPipelineState(descriptor: lineDesc)
+
+        // Flat-color triangles with blending (Flatten-gizmo planes and other
+        // translucent overlays): same vertexFlat/fragmentFlat pair, blended.
+        let pcBlendDesc = lineDesc.copy() as! MTLRenderPipelineDescriptor
+        pcBlendDesc.label = "flat-blend"
+        pcBlendDesc.colorAttachments[0].isBlendingEnabled = true
+        pcBlendDesc.colorAttachments[0].rgbBlendOperation = .add
+        pcBlendDesc.colorAttachments[0].sourceRGBBlendFactor = .sourceAlpha
+        pcBlendDesc.colorAttachments[0].destinationRGBBlendFactor = .oneMinusSourceAlpha
+        pcBlendDesc.colorAttachments[0].sourceAlphaBlendFactor = .one
+        pcBlendDesc.colorAttachments[0].destinationAlphaBlendFactor = .oneMinusSourceAlpha
+        pcBlendPipeline = try device.makeRenderPipelineState(descriptor: pcBlendDesc)
 
         let depthDesc = MTLDepthStencilDescriptor()
         depthDesc.depthCompareFunction = .less
@@ -1218,6 +1297,47 @@ final class Renderer: NSObject, MTKViewDelegate {
             }
         }
         encoder.popDebugGroup()
+
+        // Flatten planes (desktop GLGizmoFlatten): translucent fills under
+        // the line overlays; desktop colors FLATTEN / FLATTEN_HOVER.
+        if gizmoMode == .layFlat, !flattenPlanes.isEmpty {
+            encoder.pushDebugGroup("flatten-planes")
+            var fill: [VertexPC] = []
+            var outline: [VertexPC] = []
+            for (index, plane) in flattenPlanes.enumerated() {
+                let highlighted = index == flattenHighlightIndex
+                let color = highlighted
+                    ? SIMD4<Float>(1.0, 0.4, 0.4, 0.75)   // hover: clearly visible on touch
+                    : SIMD4<Float>(0.96, 0.93, 0.93, 0.5)
+                guard plane.vertices.count >= 3 else { continue }
+                for triangle in 1..<(plane.vertices.count - 1) {
+                    fill.append(VertexPC(position: plane.vertices[0], color: color))
+                    fill.append(VertexPC(position: plane.vertices[triangle], color: color))
+                    fill.append(VertexPC(position: plane.vertices[triangle + 1], color: color))
+                }
+                for vertex in plane.vertices {
+                    outline.append(VertexPC(position: vertex, color: color))
+                }
+                outline.append(VertexPC(position: plane.vertices[0], color: color))
+            }
+            if !fill.isEmpty {
+                encoder.setRenderPipelineState(pcBlendPipeline)
+                encoder.setDepthStencilState(translucentDepthState)
+                var gizmoUniforms = LineUniforms(mvp: viewProj)
+                encoder.setVertexBytes(&gizmoUniforms, length: MemoryLayout<LineUniforms>.stride, index: 1)
+                encoder.setVertexBytes(&fill, length: MemoryLayout<VertexPC>.stride * fill.count, index: 0)
+                encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: fill.count)
+            }
+            if outline.count >= 2 {
+                encoder.setRenderPipelineState(linePipeline)
+                encoder.setDepthStencilState(overlayDepthState)
+                var gizmoUniforms = LineUniforms(mvp: viewProj)
+                encoder.setVertexBytes(&gizmoUniforms, length: MemoryLayout<LineUniforms>.stride, index: 1)
+                encoder.setVertexBytes(&outline, length: MemoryLayout<VertexPC>.stride * outline.count, index: 0)
+                encoder.drawPrimitives(type: .lineStrip, vertexStart: 0, vertexCount: outline.count)
+            }
+            encoder.popDebugGroup()
+        }
 
         // Gizmo overlay: always on top so it stays readable inside meshes.
         if let gizmo = selectedGizmo() {

@@ -896,6 +896,51 @@ final class DocumentStore {
         presentationRevision += 1
     }
 
+    // MARK: Flatten planes (desktop GLGizmoFlatten hull grouping, ABI v29)
+
+    private(set) var flattenPlanes: [EnginePlater.FlattenPlane]?
+    private(set) var flattenHighlight: Int?
+    private var flattenPlanesKey: (revision: DocumentRevision, instanceID: InstanceID)?
+
+    /// Loads (and caches per revision + instance) the resting planes of the
+    /// selected instance for the lay-flat mode. Failure clears the planes and
+    /// surfaces loudly — the facet-tap fallback keeps working.
+    func loadFlattenPlanes() async {
+        guard let plater, let scene, let selection, !isBusy else {
+            flattenPlanes = nil
+            flattenPlanesKey = nil
+            return
+        }
+        let key = (revision: scene.revision, instanceID: selection.instanceID)
+        if let flattenPlanesKey,
+           flattenPlanesKey.revision == key.revision,
+           flattenPlanesKey.instanceID == key.instanceID { return }
+        flattenPlanesKey = key
+        flattenHighlight = nil
+        let objectID = selection.objectID
+        let instanceID = selection.instanceID
+        let result = await BackgroundWork.run(operation: "load flatten planes") {
+            try plater.flattenPlanes(objectID: objectID, instanceID: instanceID)
+        }
+        switch result {
+        case .success(let planes):
+            flattenPlanes = planes
+        case .failure(let failure):
+            flattenPlanes = nil
+            status.report(.document, failure: failure)
+        }
+    }
+
+    func clearFlattenPlanes() {
+        flattenPlanes = nil
+        flattenPlanesKey = nil
+        flattenHighlight = nil
+    }
+
+    func setFlattenHighlight(_ index: Int?) {
+        flattenHighlight = index
+    }
+
     func commitSelectedTransform() async {
         let gesture = pending
         pending = nil

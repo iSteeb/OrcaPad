@@ -127,6 +127,7 @@ void orca_result_dispose(orca_result *result) {
 
 #include "libslic3r/GCode/GCodeProcessor.hpp"
 #include "libslic3r/Model.hpp"
+#include "libslic3r/Geometry/ConvexHull.hpp"
 #include "libslic3r/Print.hpp"
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/AppConfig.hpp"
@@ -5529,6 +5530,210 @@ orca_result orca_plater_instance_lay_flat(orca_plater *plater,
         object->ensure_on_bed();
 
         *out_revision = mutation.commit();
+        return orcapad_ok();
+    });
+}
+
+// --- flatten planes (desktop GLGizmoFlatten::update_planes, ABI v29) ------
+
+void orca_flatten_planes_dispose(orca_flatten_planes *planes) {
+    if (!planes) return;
+    for (uint32_t i = 0; i < planes->plane_count && planes->planes; ++i)
+        std::free(planes->planes[i].vertices);
+    std::free(planes->planes);
+    *planes = orca_flatten_planes{};
+}
+
+orca_result orca_plater_flatten_planes(orca_plater *plater,
+                                       orca_object_id object_id,
+                                       orca_instance_id instance_id,
+                                       orca_flatten_planes *out) {
+    constexpr const char *operation = "orca_plater_flatten_planes";
+    if (out) *out = orca_flatten_planes{};
+    if (!plater)
+        return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation, "plater handle is null");
+    if (!out)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation, "output pointer is null");
+    return orcapad_guard(operation, [&]() -> orca_result {
+        Slic3r::ModelObject *object = plater_obj(plater, object_id);
+        if (!object)
+            return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation, "object was not found");
+        Slic3r::ModelInstance *instance = plater_instance(object, instance_id);
+        if (!instance)
+            return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation, "instance was not found");
+
+        // 1) merged convex hull of the parts (desktop update_planes)
+        Slic3r::TriangleMesh ch;
+        for (const Slic3r::ModelVolume *volume : object->volumes) {
+            if (volume->type() != Slic3r::ModelVolumeType::MODEL_PART) continue;
+            Slic3r::TriangleMesh volume_hull = volume->get_convex_hull();
+            volume_hull.transform(volume->get_matrix());
+            ch.merge(volume_hull);
+        }
+        ch = ch.convex_hull_3d();
+
+        // 2) BFS over hull facets, grouping by normal (desktop epsilons).
+        const float minimal_area = 5.0f;    // mm^2
+        const float minimal_side = 1.0f;    // mm
+        const float minimal_angle = 1.0f;   // degrees
+        const int facet_count = ch.facets_count();
+        if (facet_count == 0)
+            return orcapad_fail(ORCA_STATUS_INVALID_MODEL, operation,
+                                "object has no hull facets");
+        const std::vector<Slic3r::Vec3f> face_normals = Slic3r::its_face_normals(ch.its);
+        const std::vector<Slic3r::Vec3i32> face_neighbors = Slic3r::its_face_neighbors(ch.its);
+        std::vector<int> facet_queue(facet_count, 0);
+        std::vector<bool> facet_visited(facet_count, false);
+        int queue_count = 0;
+        int facet_index = 0;
+        struct Plane {
+            Slic3r::Vec3d normal;
+            Slic3r::Pointf3s vertices;
+        };
+        std::vector<Plane> planes;
+        while (true) {
+            for (; facet_index < facet_count; ++facet_index)
+                if (!facet_visited[facet_index]) {
+                    facet_queue[queue_count++] = facet_index;
+                    facet_visited[facet_index] = true;
+                    planes.emplace_back();
+                    break;
+                }
+            if (facet_index == facet_count) break;
+            const Slic3r::Vec3f &seed_normal = face_normals[facet_index];
+            while (queue_count > 0) {
+                const int current = facet_queue[--queue_count];
+                const Slic3r::Vec3f &this_normal = face_normals[current];
+                if (std::abs(this_normal.x() - seed_normal.x()) < 0.001f &&
+                    std::abs(this_normal.y() - seed_normal.y()) < 0.001f &&
+                    std::abs(this_normal.z() - seed_normal.z()) < 0.001f) {
+                    const Slic3r::Vec3i32 face = ch.its.indices[current];
+                    for (int j = 0; j < 3; ++j)
+                        planes.back().vertices.emplace_back(
+                            ch.its.vertices[face[j]].cast<double>());
+                    facet_visited[current] = true;
+                    for (int j = 0; j < 3; ++j)
+                        if (const int neighbor = face_neighbors[current][j];
+                            neighbor >= 0 && !facet_visited[neighbor])
+                            facet_queue[queue_count++] = neighbor;
+                }
+            }
+            planes.back().normal = seed_normal.cast<double>();
+            // whole-group vertices — drop tiny three-vertex slivers early
+            if (planes.back().vertices.size() == 3) {
+                const auto &v = planes.back().vertices;
+                if ((v[0] - v[1]).norm() < minimal_side ||
+                    (v[0] - v[2]).norm() < minimal_side ||
+                    (v[1] - v[2]).norm() < minimal_side)
+                    planes.pop_back();
+            }
+        }
+
+        // 3) world transform, per-plane 2D hull + filters (desktop order).
+        const Slic3r::Transform3d world = instance->get_matrix();
+        const Slic3r::Matrix3d world_linear = world.matrix().block(0, 0, 3, 3);
+        struct OutPlane {
+            Slic3r::Pointf3s vertices;
+            Slic3r::Vec3d normal;
+            float area;
+        };
+        std::vector<OutPlane> kept;
+        for (Plane &plane : planes) {
+            Slic3r::Pointf3s polygon;
+            polygon.reserve(plane.vertices.size());
+            for (const Slic3r::Vec3d &vertex : plane.vertices)
+                polygon.push_back(world * vertex);
+            const Slic3r::Vec3d normal_world = (world_linear * plane.normal).normalized();
+
+            // rotate the plane flat (normal → +Z) so the 2D hull applies
+            Slic3r::Matrix3d flatten = Slic3r::Matrix3d::Identity();
+            {
+                Slic3r::Vec3d axis;
+                double angle = 0.0;
+                Slic3r::Geometry::rotation_from_two_vectors(
+                    normal_world, Slic3r::Vec3d::UnitZ(), axis, angle, &flatten);
+            }
+            auto transform_polygon = [&](const Slic3r::Matrix3d &matrix) {
+                for (Slic3r::Vec3d &vertex : polygon) vertex = matrix * vertex;
+            };
+            transform_polygon(flatten);
+
+            // rescale to avoid fixed-point overflow, hull, rescale back
+            Slic3r::Vec3d bb_size = Slic3r::BoundingBoxf3(polygon).size();
+            const double scale_x = bb_size.x() > 0 ? 1.0 / bb_size.x() : 1.0;
+            const double scale_y = bb_size.y() > 0 ? 1.0 / bb_size.y() : 1.0;
+            const float sf = std::min(float(scale_x), float(scale_y));
+            const Slic3r::Matrix3d shrink = Slic3r::Matrix3d::Identity() * sf;
+            const Slic3r::Matrix3d grow = Slic3r::Matrix3d::Identity() / sf;
+            transform_polygon(shrink);
+            polygon = Slic3r::Geometry::convex_hull(polygon);
+            transform_polygon(grow);
+
+            // shoelace area
+            float area = 0.0f;
+            for (size_t i = 0; i < polygon.size(); ++i) {
+                const Slic3r::Vec3d &a = polygon[i];
+                const Slic3r::Vec3d &b = polygon[(i + 1 < polygon.size()) ? i + 1 : 0];
+                area += float(a.x() * b.y() - b.x() * a.y());
+            }
+            area = 0.5f * std::abs(area);
+            if (area < minimal_area) continue;
+
+            // discard slivers: edges nearly collinear (>179 degrees)
+            const double angle_threshold = std::cos(minimal_angle * M_PI / 180.0);
+            bool discard = false;
+            for (size_t i = 0; i < polygon.size() && !discard; ++i) {
+                const Slic3r::Vec3d &prec = polygon[(i == 0) ? polygon.size() - 1 : i - 1];
+                const Slic3r::Vec3d &curr = polygon[i];
+                const Slic3r::Vec3d &next = polygon[(i == polygon.size() - 1) ? 0 : i + 1];
+                if ((prec - curr).normalized().dot((next - curr).normalized()) > angle_threshold)
+                    discard = true;
+            }
+            if (discard) continue;
+
+            // back to world orientation, then shrink 10% toward the centroid
+            // (desktop margin so the highlight does not touch the edges)
+            transform_polygon(flatten.transpose());
+            Slic3r::Vec3d centroid = Slic3r::Vec3d::Zero();
+            for (const Slic3r::Vec3d &vertex : polygon) centroid += vertex;
+            centroid /= double(polygon.size());
+            for (Slic3r::Vec3d &vertex : polygon)
+                vertex = 0.9 * vertex + 0.1 * centroid;
+            kept.push_back(OutPlane{polygon, normal_world, area});
+        }
+        if (kept.empty())
+            return orcapad_fail(ORCA_STATUS_INVALID_MODEL, operation,
+                                "no resting plane passed the filters");
+
+        // 4) ABI copy
+        orca_flatten_planes result{};
+        result.plane_count = static_cast<uint32_t>(kept.size());
+        result.planes = static_cast<orca_flatten_plane *>(
+            std::calloc(kept.size(), sizeof(orca_flatten_plane)));
+        if (!result.planes)
+            return orcapad_fail(ORCA_STATUS_OUT_OF_MEMORY, operation,
+                                "could not allocate flatten planes");
+        for (size_t i = 0; i < kept.size(); ++i) {
+            orca_flatten_plane &slot = result.planes[i];
+            slot.vertex_count = static_cast<int32_t>(kept[i].vertices.size());
+            slot.vertices = static_cast<float(*)[3]>(
+                std::calloc(kept[i].vertices.size(), sizeof(float[3])));
+            if (!slot.vertices) {
+                orca_flatten_planes_dispose(&result);
+                return orcapad_fail(ORCA_STATUS_OUT_OF_MEMORY, operation,
+                                    "could not allocate a flatten polygon");
+            }
+            for (size_t v = 0; v < kept[i].vertices.size(); ++v) {
+                slot.vertices[v][0] = static_cast<float>(kept[i].vertices[v].x());
+                slot.vertices[v][1] = static_cast<float>(kept[i].vertices[v].y());
+                slot.vertices[v][2] = static_cast<float>(kept[i].vertices[v].z());
+            }
+            slot.normal[0] = kept[i].normal.x();
+            slot.normal[1] = kept[i].normal.y();
+            slot.normal[2] = kept[i].normal.z();
+            slot.area = kept[i].area;
+        }
+        *out = result;
         return orcapad_ok();
     });
 }

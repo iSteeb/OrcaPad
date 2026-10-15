@@ -25,6 +25,11 @@ struct SceneSync {
     var cameraRequest: (id: UInt64, preset: CameraViewPreset)
     var gizmoMode: GizmoMode
     var rotationAxis: EngineAxis
+    /// Flatten-gizmo planes of the selected instance (desktop hull grouping);
+    /// nil = unavailable (facet-tap fallback) or not in lay-flat mode.
+    var flattenPlanes: [EnginePlater.FlattenPlane]? = nil
+    /// Index of the plane highlighted under the finger (touch hover).
+    var flattenHighlight: Int? = nil
 }
 
 /// Manipulation callbacks from the canvas gestures (engine-space units).
@@ -48,8 +53,11 @@ struct CanvasManipulation {
     let onScaleAxis: (EngineAxis, Double) -> Void
     /// Total uniform scale factor since gesture start.
     let onScale: (Double) -> Void
-    /// Lay flat: engine-frame normal of the tapped facet.
+    /// Lay flat: engine-frame normal of the tapped facet — or of the picked
+    /// hull plane when planes are available (desktop behavior).
     let onLayFlat: (SIMD3<Double>) -> Void
+    /// Touch-hover highlight of the flatten plane under the finger.
+    let onHighlightFlattenPlane: (Int?) -> Void
     let onEnd: () -> Void
 }
 
@@ -95,6 +103,8 @@ struct MetalCanvas: UIViewRepresentable {
         coordinator.manipulation = manipulation
         coordinator.lastVolumeOfSelection = scene.selectedVolumeID
         coordinator.renderer?.setGizmo(mode: scene.gizmoMode, rotationAxis: scene.rotationAxis)
+        coordinator.renderer?.setFlattenPlanes(scene.flattenPlanes)
+        coordinator.renderer?.setFlattenHighlight(scene.flattenHighlight)
         let needsSceneApply =
             scene.snapshot.documentID != coordinator.lastDocumentID ||
             scene.snapshot.revision != coordinator.lastDocumentRevision ||
@@ -162,6 +172,7 @@ struct MetalCanvas: UIViewRepresentable {
             case rotate(center: CGPoint, startAngle: Double, ringRadius: CGFloat)
             case scale(startY: CGFloat)
             case scaleAxis(axis: EngineAxis, center: CGPoint, direction: SIMD2<Float>, startLength: CGFloat)
+            case layFlatPlane
             /// Rectangle selection: one-finger drag draws the marquee.
             case marquee(start: CGPoint)
         }
@@ -215,11 +226,21 @@ struct MetalCanvas: UIViewRepresentable {
         @objc private func onTap(_ gesture: UITapGestureRecognizer) {
             guard let view = gesture.view as? MTKView, let renderer else { return }
             let location = gesture.location(in: view)
-            if renderer.gizmoMode == .layFlat,
-               let face = renderer.pickFace(at: location, in: view) {
-                // Lay flat: the tapped facet decides the resting face.
-                manipulation?.onSelect(face.objectID, face.instanceID)
-                manipulation?.onLayFlat(face.engineNormal)
+            if renderer.gizmoMode == .layFlat {
+                // Desktop Flatten gizmo: the hull plane under the touch wins
+                // (whole coplanar region); the raw facet remains the fallback
+                // when planes are unavailable.
+                if let plane = renderer.pickFlattenPlane(at: location, in: view) {
+                    manipulation?.onHighlightFlattenPlane(nil)
+                    manipulation?.onLayFlat(plane.engineNormal)
+                    return
+                }
+                if let face = renderer.pickFace(at: location, in: view) {
+                    // Lay flat: the tapped facet decides the resting face.
+                    manipulation?.onSelect(face.objectID, face.instanceID)
+                    manipulation?.onLayFlat(face.engineNormal)
+                    return
+                }
             } else if let hit = renderer.pickInstance(at: location, in: view) {
                 // Desktop part selection: tapping the already-selected
                 // instance refines the selection to the tapped volume; the
@@ -311,6 +332,12 @@ struct MetalCanvas: UIViewRepresentable {
                     manipulation?.onScale(exp(Double(startY - location.y) / 220))
                 case .marquee(let start):
                     renderer.setMarquee(Self.normalizedRect(from: start, to: location))
+                case .layFlatPlane:
+                    if let plane = renderer.pickFlattenPlane(at: location, in: view) {
+                        manipulation?.onHighlightFlattenPlane(plane.index)
+                    } else {
+                        manipulation?.onHighlightFlattenPlane(nil)
+                    }
                 case .orbit, .none:
                     let translation = gesture.translation(in: gesture.view)
                     renderer.camera.orbit(dx: Float(translation.x), dy: Float(translation.y))
@@ -318,6 +345,11 @@ struct MetalCanvas: UIViewRepresentable {
                 }
             case .ended, .cancelled, .failed:
                 switch dragState {
+                case .layFlatPlane:
+                    if let plane = renderer.pickFlattenPlane(at: location, in: view) {
+                        manipulation?.onLayFlat(plane.engineNormal)
+                    }
+                    manipulation?.onHighlightFlattenPlane(nil)
                 case .move, .rotate, .scale, .scaleAxis:
                     manipulation?.onEnd()
                 case .marquee(let start):
@@ -429,8 +461,14 @@ struct MetalCanvas: UIViewRepresentable {
                 manipulation?.onSelect(hit.objectID, hit.instanceID)
             }
             switch mode {
-            case .select, .layFlat:
-                // layFlat is tap-only; select never reaches here (above).
+            case .layFlat:
+                // Touch-hover: dragging across the object highlights the
+                // plane under the finger (desktop hover); release applies it.
+                if let plane = renderer.pickFlattenPlane(at: location, in: view) {
+                    manipulation?.onHighlightFlattenPlane(plane.index)
+                    return .layFlatPlane
+                }
+                manipulation?.onHighlightFlattenPlane(nil)
                 return .orbit
             case .move:
                 guard let bed = renderer.bedPlaneHit(at: location, in: view) else { return .orbit }
@@ -457,6 +495,8 @@ struct MetalCanvas: UIViewRepresentable {
             case .scale:
                 manipulation?.onBegin()
                 return .scale(startY: location.y)
+            case .select:
+                return .orbit
             }
         }
 

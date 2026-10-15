@@ -7,7 +7,7 @@ extern "C" {
 #endif
 
 /// Version of the C ABI contract in this header. Callers verify it at runtime.
-#define ORCA_BRIDGE_ABI_VERSION ((uint32_t)28)
+#define ORCA_BRIDGE_ABI_VERSION ((uint32_t)29)
 
 typedef int32_t orca_status_code;
 #define ORCA_STATUS_OK                     ((orca_status_code)0)
@@ -699,14 +699,41 @@ orca_result orca_plater_orient(orca_plater *plater, orca_presets *presets,
 
 /// Desktop "Lay flat" (Flatten gizmo): rotates the instance so the given
 /// face normal (ENGINE z-up world space, from a tapped facet) points down,
-/// then rests the object on the bed. Unlike the desktop gizmo there is no
-/// convex-hull plane highlighting — the caller passes any facet normal.
-/// One mutation: revision +1.
+/// then rests the object on the bed. One mutation: revision +1.
 orca_result orca_plater_instance_lay_flat(orca_plater *plater,
                                           orca_object_id object_id,
                                           orca_instance_id instance_id,
                                           double nx, double ny, double nz,
                                           orca_revision *out_revision);
+
+/// One candidate resting plane of the desktop Flatten gizmo: a convex
+/// polygon on the instance's hull (world/engine coordinates, shrunk 10%
+/// toward its centroid like desktop), its OUTWARD world normal and its
+/// area in square millimetres.
+typedef struct {
+    int32_t vertex_count;
+    float (*vertices)[3];
+    double normal[3];
+    float area;
+} orca_flatten_plane;
+
+typedef struct {
+    uint32_t plane_count;
+    orca_flatten_plane *planes;
+} orca_flatten_planes;
+
+void orca_flatten_planes_dispose(orca_flatten_planes *planes);
+
+/// Desktop GLGizmoFlatten::update_planes (ABI v29): merged convex hull of
+/// the object's parts, hull facets grouped into coplanar planes (BFS over
+/// face neighbors, normal epsilon 0.001), discarding slivers (< 1 mm
+/// side), planes under 5 mm^2 and angles over 179 degrees. Read-only; not
+/// a mutation. Empty result (no plane passes the filters) is a typed
+/// ORCA_STATUS_INVALID_MODEL.
+orca_result orca_plater_flatten_planes(orca_plater *plater,
+                                       orca_object_id object_id,
+                                       orca_instance_id instance_id,
+                                       orca_flatten_planes *out);
 
 /// Desktop "Arrange" (ArrangeJob/CLI flow: update_arrange_params →
 /// inflation → get_shrink_bedpts → arrangement::arrange → apply). Arranges

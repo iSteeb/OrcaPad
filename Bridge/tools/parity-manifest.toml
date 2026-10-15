@@ -151,12 +151,13 @@ evidence = ["abi:orca_plater_scale_to_fit", 'client:func scaleToFit\(']
 id = "plate.lay-flat"
 area = "plate"
 title = "Lay on face (Flatten)"
-status = "partial"
+status = "done"
 desktop = ["gizmo:Flatten"]
-evidence = ["abi:orca_plater_instance_lay_flat", 'client:func layFlatSelected\(']
-gap = "taps any facet; no convex-hull plane grouping/highlighting"
+evidence = ["abi:orca_plater_instance_lay_flat", 'client:func layFlatSelected\(',
+            "abi:orca_plater_flatten_planes", "client:func pickFlattenPlane",
+            "client:func setFlattenPlanes"]
 work = "Bridge + UI"
-priority = 13
+note = "Desktop GLGizmoFlatten parity (ABI v29): orca_plater_flatten_planes groups the merged-hull facets into coplanar planes (BFS over face neighbors, desktop epsilons and sliver/area/angle filters, 10% centroid shrink) in world coords; the renderer draws the translucent plane polygons and touch-hover highlights the plane under the finger (drag previews, release applies; tap picks the plane directly, facet-tap remains the fallback when planes are unavailable); laying flat rotates the picked plane normal down and rests on the bed"
 
 [[feature]]
 id = "plate.arrange"

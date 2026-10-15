@@ -40,6 +40,15 @@ struct PlateTabView: View {
     var body: some View {
         ZStack {
             canvas.ignoresSafeArea()
+                .task(id: "\(gizmoMode.rawValue)-\(document.scene?.revision.rawValue ?? 0)-\(document.selection?.instanceID.rawValue ?? 0)") {
+                    // Desktop Flatten gizmo loads its hull planes when the
+                    // gizmo activates (and whenever the instance transforms).
+                    if gizmoMode == .layFlat {
+                        await document.loadFlattenPlanes()
+                    } else {
+                        document.clearFlattenPlanes()
+                    }
+                }
 
             HStack(alignment: .center) {
                 GizmoToolbar(
@@ -220,7 +229,9 @@ struct PlateTabView: View {
                     frameRequest: document.frameRequest,
                     cameraRequest: (document.cameraRequestID, document.cameraPreset),
                     gizmoMode: gizmoMode,
-                    rotationAxis: rotationAxis
+                    rotationAxis: rotationAxis,
+                    flattenPlanes: gizmoMode == .layFlat ? document.flattenPlanes : nil,
+                    flattenHighlight: document.flattenHighlight
                 ),
                 manipulation: CanvasManipulation(
                     onSelect: { document.select(objectID: $0, instanceID: $1) },
@@ -257,6 +268,7 @@ struct PlateTabView: View {
                     }
                     Task { await document.layFlatSelected(normal: normal, presets: engine) }
                 },
+                onHighlightFlattenPlane: { document.setFlattenHighlight($0) },
                 onEnd: { Task { await document.commitSelectedTransform() } }
                 )
             )

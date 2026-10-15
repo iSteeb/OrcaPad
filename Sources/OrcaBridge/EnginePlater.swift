@@ -968,6 +968,61 @@ public final class EnginePlater: @unchecked Sendable {
         }
     }
 
+    /// Desktop Flatten-gizmo candidate planes for one instance (ABI v29):
+    /// convex polygons on the object's hull in world/engine coordinates,
+    /// with outward normals and areas. Read-only (no mutation).
+    public struct FlattenPlane: Sendable, Equatable {
+        public let vertices: [SIMD3<Float>]
+        public let normal: SIMD3<Double>
+        public let area: Float
+    }
+
+    public func flattenPlanes(
+        objectID: ObjectID,
+        instanceID: InstanceID
+    ) throws -> [FlattenPlane] {
+        try lock.withLock {
+            var raw = orca_flatten_planes()
+            try BridgeResult.consume(
+                orca_plater_flatten_planes(
+                    handle, objectID.rawValue, instanceID.rawValue, &raw),
+                operation: "flatten planes"
+            )
+            defer { orca_flatten_planes_dispose(&raw) }
+            guard raw.plane_count > 0, raw.planes != nil else {
+                throw BridgeError.local(
+                    .internalInvariant,
+                    operation: "flatten planes",
+                    diagnostic: "Bridge returned success with no planes"
+                )
+            }
+            var planes: [FlattenPlane] = []
+            planes.reserveCapacity(Int(raw.plane_count))
+            for index in 0..<Int(raw.plane_count) {
+                let plane = raw.planes[index]
+                guard plane.vertex_count > 0, plane.vertices != nil else {
+                    throw BridgeError.local(
+                        .internalInvariant,
+                        operation: "flatten planes",
+                        diagnostic: "Bridge returned a plane without vertices"
+                    )
+                }
+                var vertices: [SIMD3<Float>] = []
+                vertices.reserveCapacity(Int(plane.vertex_count))
+                for vertex in 0..<Int(plane.vertex_count) {
+                    let point = plane.vertices[vertex]
+                    vertices.append(SIMD3(point.0, point.1, point.2))
+                }
+                planes.append(FlattenPlane(
+                    vertices: vertices,
+                    normal: SIMD3(plane.normal.0, plane.normal.1, plane.normal.2),
+                    area: plane.area
+                ))
+            }
+            return planes
+        }
+    }
+
     /// Desktop "Open project": replaces the document (new document id) and
     /// the preset session atomically; returns the new authoritative scene.
     public func openProject(

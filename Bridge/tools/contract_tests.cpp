@@ -276,7 +276,7 @@ static void test_md5_shim() {
 
 static void test_abi_version() {
     CHECK_EQ(orca_bridge_abi_version(), ORCA_BRIDGE_ABI_VERSION);
-    CHECK_EQ(ORCA_BRIDGE_ABI_VERSION, 28);
+    CHECK_EQ(ORCA_BRIDGE_ABI_VERSION, 29);
 }
 
 struct ProgressRecord {
@@ -3137,6 +3137,41 @@ static void test_arrange_orient(const std::string &dir, const std::string &data_
     }
     GUARD(f3, orca_plater_instance_lay_flat(plater, flat_object, flat_instance, 0.0, 0.0, 0.0, &revision));
     expect_code(f3, ORCA_STATUS_INVALID_ARGUMENT, "lay flat degenerate normal");
+
+    // flatten planes (desktop GLGizmoFlatten::update_planes): the upright
+    // 10 mm cube hull carries exactly 6 resting planes, one per face.
+    {
+        orca_flatten_planes planes;
+        GUARD(fp0, orca_plater_flatten_planes(plater, flat_object, flat_instance, &planes));
+        expect_ok(fp0, "flatten planes");
+        CHECK_EQ(planes.plane_count, 6u);
+        bool seen[6] = {false, false, false, false, false, false};
+        for (uint32_t p = 0; p < planes.plane_count; ++p) {
+            const orca_flatten_plane &plane = planes.planes[p];
+            CHECK(plane.vertex_count == 4);  // convex-hulled quad
+            CHECK_NEAR(plane.area, 400.0f, 2.0f);
+            const double nx = plane.normal[0], ny = plane.normal[1], nz = plane.normal[2];
+            const double magnitude = std::sqrt(nx * nx + ny * ny + nz * nz);
+            CHECK_NEAR(magnitude, 1.0, 1e-6);
+            int slot = -1;
+            if (nx > 0.9) slot = 0; else if (nx < -0.9) slot = 1;
+            else if (ny > 0.9) slot = 2; else if (ny < -0.9) slot = 3;
+            else if (nz > 0.9) slot = 4; else if (nz < -0.9) slot = 5;
+            CHECK(slot >= 0);
+            if (slot >= 0) { CHECK(!seen[slot]); seen[slot] = true; }
+        }
+        bool all = true;
+        for (bool s : seen) all = all && s;
+        CHECK(all);
+        orca_flatten_planes_dispose(&planes);
+        CHECK(planes.plane_count == 0 && planes.planes == nullptr);
+    }
+    orca_flatten_planes_dispose(nullptr);
+    {
+        orca_flatten_planes planes;
+        GUARD(fp1, orca_plater_flatten_planes(plater, 12345, flat_instance, &planes));
+        expect_code(fp1, ORCA_STATUS_NOT_FOUND, "flatten planes missing object");
+    }
 
     // typed rejections
     GUARD(e2, orca_plater_orient(plater, presets, 12345, 1, &revision));

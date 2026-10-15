@@ -149,6 +149,13 @@ Device, each tab a clean feature module over the same stores.
 - [x] Programmatic parity checker (`Bridge/tools/parity-check.py`): desktop
       surface extracted from upstream (551 items, 14 surfaces), manifest
       evidence verified, PARITY.md generated + commit-gated
+- [x] C9c: transform polish (ABI v29) — rotate gizmo desktop snap zones
+      (45° coarse near center, 5° fine on the ring, free elsewhere) +
+      free-angle relative entry; scale gizmo on-canvas per-axis handles
+      beside the uniform drag; Flatten gizmo hull-plane grouping
+      (`orca_plater_flatten_planes`), translucent plane rendering with
+      touch-hover highlight and plane-pick laying (facet fallback kept).
+      plate.rotate, plate.scale, plate.lay-flat ✅ (47 done, 37%).
 - [ ] Parity backlog: generated PARITY.md "Remaining work" (priority order)
 - [x] Device tab: printer web UI (user-allowed 2026-10-07, scoped AGENTS.md
       exception): selected physical printer's own page in a WKWebView,
