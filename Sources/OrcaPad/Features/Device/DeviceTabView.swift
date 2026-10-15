@@ -13,6 +13,7 @@ import SwiftUI
 struct DeviceTabView: View {
     @Environment(AppEnvironment.self) private var environment
     @Environment(\.openURL) private var openURL
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @State private var session = PrinterWebSession()
     @State private var editorTarget: EditorTarget?
     @State private var managePresented = false
@@ -33,7 +34,7 @@ struct DeviceTabView: View {
 
     var body: some View {
         NavigationStack {
-            content
+            deviceLayout
                 .navigationTitle(selected?.name ?? "Device")
                 .navigationBarTitleDisplayMode(.inline)
                 .toolbar { toolbar }
@@ -58,6 +59,50 @@ struct DeviceTabView: View {
                     }
                 }
                 .task(id: environment.presets.isReady) { await reload() }
+                // Desktop device list: probe every printer's reachability
+                // while the tab is open, not just the selected one.
+                .task {
+                    while !Task.isCancelled {
+                        await store.refreshStatuses()
+                        do {
+                            try await Task.sleep(for: .seconds(10))
+                        } catch {
+                            break  // cancellation: the tab went away
+                        }
+                    }
+                }
+        }
+    }
+
+    /// All-printers support (desktop device page): a leading list of every
+    /// configured printer with live status on regular widths; compact
+    /// widths get a horizontal chip bar.
+    @ViewBuilder
+    private var deviceLayout: some View {
+        if store.printers.isEmpty {
+            content
+        } else if horizontalSizeClass == .regular {
+            HStack(spacing: 0) {
+                PrinterSidebar(
+                    printers: store.printers,
+                    selectedName: selected?.name,
+                    phases: store.phases,
+                    onSelect: { store.select($0) },
+                    onAdd: { editorTarget = .add }
+                )
+                Divider()
+                content
+            }
+        } else {
+            VStack(spacing: 0) {
+                PrinterChipBar(
+                    printers: store.printers,
+                    selectedName: selected?.name,
+                    phases: store.phases,
+                    onSelect: { store.select($0) }
+                )
+                content
+            }
         }
     }
 
@@ -221,6 +266,130 @@ private enum EditorTarget: Identifiable {
     var record: PrinterStore.Record? {
         if case .edit(let record) = self { return record }
         return nil
+    }
+}
+
+/// All-printers sidebar (desktop device page): every configured printer
+/// with live reachability, one tap to switch, add at the bottom.
+private struct PrinterSidebar: View {
+    let printers: [PrinterStore.Record]
+    let selectedName: String?
+    let phases: [String: PrinterStore.PrinterPhase]
+    let onSelect: (String) -> Void
+    let onAdd: () -> Void
+
+    var body: some View {
+        List {
+            Section {
+                ForEach(printers, id: \.name) { printer in
+                    Button {
+                        onSelect(printer.name)
+                    } label: {
+                        HStack(spacing: 10) {
+                            Image(systemName: PrinterHostKind.symbol(printer.hostType))
+                                .foregroundStyle(Color.accentColor)
+                                .frame(width: 24)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(printer.name)
+                                    .font(.callout.weight(
+                                        printer.name == selectedName ? .semibold : .regular
+                                    ))
+                                    .lineLimit(1)
+                                Text(PrinterHostKind.label(printer.hostType))
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            StatusDot(phase: phases[printer.name] ?? .checking)
+                        }
+                    }
+                    .buttonStyle(.plain)
+                    .listRowBackground(
+                        printer.name == selectedName
+                            ? Color.accentColor.opacity(0.12)
+                            : Color.clear
+                    )
+                }
+            } header: {
+                Text("Printers")
+            }
+            Section {
+                Button {
+                    onAdd()
+                } label: {
+                    Label("Add printer…", systemImage: "plus")
+                }
+            }
+        }
+        .listStyle(.sidebar)
+        .frame(width: 264)
+        .safeAreaInset(edge: .bottom) {
+            if printers.isEmpty {
+                Text("No printers")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+}
+
+/// Compact-width all-printers bar: horizontal chips with status dots.
+private struct PrinterChipBar: View {
+    let printers: [PrinterStore.Record]
+    let selectedName: String?
+    let phases: [String: PrinterStore.PrinterPhase]
+    let onSelect: (String) -> Void
+
+    var body: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                ForEach(printers, id: \.name) { printer in
+                    Button {
+                        onSelect(printer.name)
+                    } label: {
+                        HStack(spacing: 6) {
+                            StatusDot(phase: phases[printer.name] ?? .checking)
+                            Text(printer.name)
+                                .font(.callout.weight(
+                                    printer.name == selectedName ? .semibold : .regular
+                                ))
+                                .lineLimit(1)
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 7)
+                        .background(
+                            printer.name == selectedName
+                                ? Color.accentColor.opacity(0.18)
+                                : Color(.secondarySystemBackground),
+                            in: Capsule()
+                        )
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.horizontal)
+            .padding(.vertical, 6)
+        }
+        .background(.ultraThinMaterial)
+    }
+}
+
+/// Reachability indicator (desktop device list online/offline dot).
+private struct StatusDot: View {
+    let phase: PrinterStore.PrinterPhase
+
+    var body: some View {
+        Circle()
+            .fill(color)
+            .frame(width: 8, height: 8)
+    }
+
+    private var color: Color {
+        switch phase {
+        case .checking: return .secondary.opacity(0.6)
+        case .online: return .green
+        case .offline: return .red
+        }
     }
 }
 

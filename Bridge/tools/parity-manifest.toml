@@ -1077,8 +1077,9 @@ title = "Printer web UI in the Device tab (Mainsail / Fluidd / OctoPrint)"
 status = "done"
 source = "src/slic3r/GUI/PrinterWebView.hpp:class PrinterWebView"
 evidence = ["client:final class PrinterWebSession", 'client:func webUIURL\(for', "bridge:print_host_webui",
-            "abi:orca_physical_printer_list"]
-note = "scoped AGENTS.md exception (user, 2026-10-07); device UI URL = print_host_webui (ABI v17)"
+            "abi:orca_physical_printer_list", "client:struct PrinterSidebar",
+            "client:func refreshStatuses"]
+note = "scoped AGENTS.md exception (user, 2026-10-07); device UI URL = print_host_webui (ABI v17). All-printers support (desktop device page): PrinterSidebar lists EVERY configured printer with live reachability (4 s probes, 10 s polling) and one-tap switching; compact widths get a chip bar"
 
 [[feature]]
 id = "device.upload"

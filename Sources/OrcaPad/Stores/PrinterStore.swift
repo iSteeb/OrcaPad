@@ -121,6 +121,55 @@ final class PrinterStore {
         }
     }
 
+    // MARK: Live status (desktop device list: every printer, not just the
+    // selected one)
+
+    enum PrinterPhase: Equatable, Sendable {
+        case checking
+        case online
+        case offline
+    }
+
+    /// Per-printer reachability, keyed by name; probed from the Device tab.
+    private(set) var phases: [String: PrinterPhase] = [:]
+    private let probeSession: URLSession = {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = 4
+        configuration.timeoutIntervalForResource = 6
+        return URLSession(configuration: configuration)
+    }()
+
+    /// Probes EVERY printer's web UI concurrently (short-timeout HEAD;
+    /// any HTTP answer — even 404 — proves the host is up).
+    func refreshStatuses() async {
+        guard !printers.isEmpty else { return }
+        for printer in printers where phases[printer.name] != .online {
+            phases[printer.name] = .checking
+        }
+        await withTaskGroup(of: (String, Bool).self) { group in
+            for printer in printers {
+                guard case .success(let url) = Self.webUIURL(for: printer) else {
+                    phases[printer.name] = .offline
+                    continue
+                }
+                let request = Self.webUIRequest(for: printer, url: url)
+                group.addTask { [probeSession] in
+                    let reachable: Bool
+                    do {
+                        let (_, response) = try await probeSession.data(for: request)
+                        reachable = (response as? HTTPURLResponse) != nil
+                    } catch {
+                        reachable = false
+                    }
+                    return (printer.name, reachable)
+                }
+            }
+            for await (name, reachable) in group {
+                phases[name] = reachable ? .online : .offline
+            }
+        }
+    }
+
     /// Desktop `PrintHost::get_print_host_webui`: the device UI address when
     /// set, else the host address; a missing scheme means http.
     static func webUIURL(for printer: Record) -> Result<URL, WebUIError> {

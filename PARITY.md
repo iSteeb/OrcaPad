@@ -259,7 +259,7 @@ Status: ✅ done · 🟡 partial · ❌ missing · ⏸️ deferred · ➖ na. Pa
 
 | Feature | Status | Desktop | OrcaPad evidence | Notes |
 |---|---|---|---|---|
-| Printer web UI in the Device tab (Mainsail / Fluidd / OctoPrint) | ✅ | `src/slic3r/GUI/PrinterWebView.hpp` | `client:final class PrinterWebSession`, `client:func webUIURL\(for`, `bridge:print_host_webui`, `abi:orca_physical_printer_list` | scoped AGENTS.md exception (user, 2026-10-07); device UI URL = print_host_webui (ABI v17) |
+| Printer web UI in the Device tab (Mainsail / Fluidd / OctoPrint) | ✅ | `src/slic3r/GUI/PrinterWebView.hpp` | `client:final class PrinterWebSession`, `client:func webUIURL\(for`, `bridge:print_host_webui`, `abi:orca_physical_printer_list`, `client:struct PrinterSidebar`, `client:func refreshStatuses` | scoped AGENTS.md exception (user, 2026-10-07); device UI URL = print_host_webui (ABI v17). All-printers support (desktop device page): PrinterSidebar lists EVERY configured printer with live reachability (4 s probes, 10 s polling) and one-tap switching; compact widths get a chip bar |
 | Send G-code to OctoPrint / Moonraker (upload + start) | ✅ | **host**: htOctoPrint, htMoonraker; **dialog**: PrintHostSendDialog | `client:case "octoprint"`, `client:case "moonraker"`, `client:func upload\(` | — |
 | 3DPrinterOS host | ❌ | **host**: ht3DPrinterOS | — | Work: Client-reimpl |
 | AstroBox host | ❌ | **host**: htAstroBox | — | Work: Client-reimpl |
