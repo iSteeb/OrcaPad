@@ -302,6 +302,13 @@ in ~/xtool-cheatsheet.md — link, don't duplicate.)
   never-dereferenced function argument!). `set_plate_origin(index)`+
   `set_plate_name` are now mandatory in every Bridge slice path; per-plate
   G-code is plate-relative and the client preview shifts it back.
+- Desktop GUI-job engine quirks transfer verbatim: FillBedJob marks
+  clone arrange-polys with bed_idx = MAX_PLATES_COUNT (256) so the nester
+  places them into bed 0 — `arrangement::UNARRANGED` (-1) means "leave
+  alone" and produces zero clones. Read the desktop job's setter, not just
+  its count formula. Failed C calls zero their out-params (out_revision=0),
+  so tests must re-sync expected revisions from a snapshot after
+  expect_code paths.
 - Release tags do NOT wait for a local iPoke install [USER 2026-10-14]:
   tag after the local gates are green; iPoke receives the build through
   TestFlight (external group) — device verification happens there, after

@@ -347,10 +347,11 @@ evidence = ["abi:orca_plater_instance_to_object", 'client:func separateInstance\
 id = "plate.fill-bed"
 area = "plate"
 title = "Fill bed with copies / instances"
-status = "missing"
+status = "done"
 desktop = ["context:Fill bed with copies", "context:Fill bed with instances"]
+evidence = ["abi:orca_plater_fill_bed", 'client:func fillBed\(']
 work = "Bridge + UI"
-priority = 23
+note = "Desktop FillBedJob parity (ABI v30): needed = (plate_area - fixed_area) / template_area (desktop formula), clones marked bed_idx=MAX_PLATES_COUNT like desktop's setter, arranged with the engine nester around fixed obstacles (other objects on the plate), overflow dropped; clones are instances of the same object (fill_bed_with_instances); one mutation 'Fill bed', undo restores; Plate tab Fill bed button on the selected object"
 
 [[feature]]
 id = "plate.flush-options"

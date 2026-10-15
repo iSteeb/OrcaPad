@@ -81,6 +81,12 @@
 
 ## PROGRESS
 
+- [2026-10-14 CODE] ABI v30 + C9d (fill bed, parity 48 done 38%):
+  orca_plater_fill_bed (desktop FillBedJob formula; clones marked
+  bed_idx=256 — UNARRANGED skips them), instances variant, overflow
+  dropped, one undo step; Plate tab Fill bed button. Plus Device tab
+  all-printers sidebar with live reachability probes. UNCONFIRMED on
+  device.
 - [2026-10-14 CODE] ABI v29 + C9c (transform polish, parity 47 done 37%):
   rotate snap zones (desktop GLGizmoRotate 45/5/free by drag distance) +
   relative-angle entry; scale per-axis on-canvas handles; Flatten gizmo

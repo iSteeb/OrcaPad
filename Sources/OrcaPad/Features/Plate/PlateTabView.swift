@@ -403,6 +403,19 @@ struct PlateTabView: View {
                 guard let engine = environment.presets.engineForSlicing else { return }
                 Task { await document.arrangeAll(presets: engine, allowRotations: false) }
             }
+            if let selection = document.selection {
+                PlateActionButton(
+                    symbol: "square.stack.3d.up.fill", label: "Fill bed",
+                    disabled: document.isMutating
+                ) {
+                    guard let engine = environment.presets.engineForSlicing else { return }
+                    Task {
+                        await document.fillBed(
+                            objectID: selection.objectID, presets: engine, allowRotations: false
+                        )
+                    }
+                }
+            }
             PlateActionButton(
                 symbol: "location.north.circle", label: "Orient",
                 disabled: document.scene?.objects.isEmpty != false || document.isMutating

@@ -7,7 +7,7 @@ extern "C" {
 #endif
 
 /// Version of the C ABI contract in this header. Callers verify it at runtime.
-#define ORCA_BRIDGE_ABI_VERSION ((uint32_t)29)
+#define ORCA_BRIDGE_ABI_VERSION ((uint32_t)30)
 
 typedef int32_t orca_status_code;
 #define ORCA_STATUS_OK                     ((orca_status_code)0)
@@ -744,6 +744,20 @@ orca_result orca_plater_arrange(orca_plater *plater, orca_presets *presets,
                                 uint8_t allow_rotations,
                                 uint32_t *out_unprintable,
                                 orca_revision *out_revision);
+
+/// Desktop "Fill bed" (FillBedJob, ABI v30): fills the SELECTED plate with
+/// as many clones of the template instance as fit (needed = (plate_area -
+/// fixed_area) / template_area, desktop formula), re-arranging the template
+/// object's existing instances around the other objects already on the
+/// plate (fixed obstacles). Clones are INSTANCES of the same object
+/// (desktop `fill_bed_with_instances`); overflow beyond the plate is
+/// dropped, not new plates. One mutation: revision +1, `out_added` counts
+/// the instances created.
+orca_result orca_plater_fill_bed(orca_plater *plater, orca_presets *presets,
+                                 orca_object_id object_id,
+                                 uint8_t allow_rotations,
+                                 uint32_t *out_added,
+                                 orca_revision *out_revision);
 
 /// Desktop "Save project": writes the document as a single-plate Orca 3MF
 /// (`store_bbs_3mf`) with the session's secure full config

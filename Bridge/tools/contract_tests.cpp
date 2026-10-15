@@ -276,7 +276,7 @@ static void test_md5_shim() {
 
 static void test_abi_version() {
     CHECK_EQ(orca_bridge_abi_version(), ORCA_BRIDGE_ABI_VERSION);
-    CHECK_EQ(ORCA_BRIDGE_ABI_VERSION, 29);
+    CHECK_EQ(ORCA_BRIDGE_ABI_VERSION, 30);
 }
 
 struct ProgressRecord {
@@ -3171,6 +3171,47 @@ static void test_arrange_orient(const std::string &dir, const std::string &data_
         orca_flatten_planes planes;
         GUARD(fp1, orca_plater_flatten_planes(plater, 12345, flat_instance, &planes));
         expect_code(fp1, ORCA_STATUS_NOT_FOUND, "flatten planes missing object");
+    }
+
+    // fill bed: clones of the flat cube fill the plate around the arranged
+    // stack (desktop FillBedJob); one mutation, one undo step back.
+    {
+        uint32_t added = 0;
+        const orca_revision before = snapshot_revision(plater);
+        GUARD(fb0, orca_plater_fill_bed(plater, presets, flat_object, 1, &added, &revision));
+        expect_ok(fb0, "fill bed");
+        CHECK(added >= 15);  // 200x200 bed, 20 mm cube + 6 mm spacing
+        CHECK(revision == before + 1);
+        int32_t instances_after = -1;
+        {
+            orca_scene_snapshot snap = take_snapshot(plater);
+            const orca_scene_object *obj = find_object(snap, flat_object);
+            CHECK(obj != nullptr);
+            if (obj) {
+                instances_after = obj->instance_count;
+                CHECK_EQ(instances_after, int32_t(1 + added));
+                // every clone stays on plate 0 (overflow is dropped)
+                for (int32_t i = 0; i < obj->instance_count; ++i)
+                    CHECK_EQ(obj->instances[i].plate, 0);
+                CHECK(snapshot_label(snap.undo_label) == "Fill bed");
+            }
+            orca_scene_snapshot_dispose(&snap);
+        }
+        GUARD(fb1, orca_plater_undo(plater, &revision));
+        expect_ok(fb1, "undo fill bed");
+        {
+            orca_scene_snapshot snap = take_snapshot(plater);
+            const orca_scene_object *obj = find_object(snap, flat_object);
+            CHECK(obj != nullptr);
+            if (obj) CHECK_EQ(obj->instance_count, 1);
+            orca_scene_snapshot_dispose(&snap);
+        }
+        (void)instances_after;
+    }
+    {
+        uint32_t added = 0;
+        GUARD(fb2, orca_plater_fill_bed(plater, presets, 12345, 1, &added, &revision));
+        expect_code(fb2, ORCA_STATUS_NOT_FOUND, "fill bed missing object");
     }
 
     // typed rejections

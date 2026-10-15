@@ -134,6 +134,11 @@ contract test literal in the same commit)**
   epsilons/filters, 10% centroid shrink) in world coordinates, read-only;
   the client draws them translucently, highlights the plane under the
   finger and lays the instance on the picked plane's normal.
+- Fill bed (ABI v30, desktop `FillBedJob`): `orca_plater_fill_bed` clones
+  the template instance (needed = (plate_area − fixed_area)/template_area,
+  desktop formula; clone markers `bed_idx` = 256 like the desktop setter —
+  `UNARRANGED` would skip them) around the plate's fixed obstacles, adds
+  instances on the current plate only (overflow dropped), one mutation.
 
 **Swift facade (`Sources/OrcaBridge`)**
 - Raw ABI use (`OrcaBridgeCore`, `OpaquePointer`, `orca_*`, `Unmanaged`) is

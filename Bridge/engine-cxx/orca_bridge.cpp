@@ -128,6 +128,7 @@ void orca_result_dispose(orca_result *result) {
 #include "libslic3r/GCode/GCodeProcessor.hpp"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/Geometry/ConvexHull.hpp"
+#include "libslic3r/ClipperUtils.hpp"
 #include "libslic3r/Print.hpp"
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/AppConfig.hpp"
@@ -5863,6 +5864,156 @@ orca_result orca_plater_arrange(orca_plater *plater, orca_presets *presets,
 
         *out_revision = mutation.commit();
         *out_unprintable = unprintable;
+        return orcapad_ok();
+    });
+}
+
+// --- fill bed (desktop FillBedJob, ABI v30) ---------------------------------
+
+orca_result orca_plater_fill_bed(orca_plater *plater, orca_presets *presets,
+                                 orca_object_id object_id,
+                                 uint8_t allow_rotations,
+                                 uint32_t *out_added,
+                                 orca_revision *out_revision) {
+    constexpr const char *operation = "orca_plater_fill_bed";
+    if (out_added) *out_added = 0;
+    if (out_revision) *out_revision = 0;
+    if (!plater)
+        return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation, "plater handle is null");
+    if (!out_added || !out_revision)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "output pointer is null");
+
+    return orcapad_guard(operation, [&]() -> orca_result {
+        Slic3r::ModelObject *object = plater_obj(plater, object_id);
+        if (!object)
+            return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation, "object was not found");
+        if (object->instances.empty())
+            return orcapad_fail(ORCA_STATUS_INVALID_MODEL, operation,
+                                "object has no instance");
+        if (!orcapad_revision_available(*plater))
+            return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
+                                "document revision is exhausted");
+
+        OrcapadMutation mutation(*plater, "Fill bed");
+        const Slic3r::DynamicPrintConfig config = orcapad_arrange_config(presets);
+
+        // Split the printable instances: the template object's instances on
+        // the current plate arrange; other objects there are fixed obstacles
+        // (desktop FillBedJob::prepare); everything else stays untouched.
+        Slic3r::ModelInstancePtrs instances;
+        Slic3r::arrangement::ArrangePolygons input =
+            Slic3r::get_arrange_polys(plater->model, instances);
+        Slic3r::arrangement::ArrangePolygons selected, fixed;
+        Slic3r::ModelInstancePtrs selected_instances;
+        for (size_t i = 0; i < input.size(); ++i) {
+            const Slic3r::ModelInstance *instance = instances[i];
+            const orca_object_id owner =
+                static_cast<orca_object_id>(instance->get_object()->id().id);
+            const int plate = orcapad_instance_plate(
+                *plater, owner,
+                static_cast<orca_instance_id>(instance->id().id),
+                orcapad_instance_box(*instance));
+            if (plate != plater->current_plate) continue;
+            if (owner == object_id && instance->printable) {
+                selected.push_back(input[i]);
+                selected_instances.push_back(instances[i]);
+            } else {
+                fixed.push_back(input[i]);
+            }
+        }
+        if (selected.empty())
+            return orcapad_fail(ORCA_STATUS_INVALID_MODEL, operation,
+                                "the object has no printable instance on the selected plate");
+
+        Slic3r::arrangement::ArrangeParams params;
+        params.allow_rotations = allow_rotations != 0;
+        params.printable_height = config.opt_float("printable_height");
+        params.clearance_height_to_rod =
+            config.opt_float("extruder_clearance_height_to_rod");
+        params.clearance_height_to_lid =
+            config.opt_float("extruder_clearance_height_to_lid");
+        params.clearance_radius = config.opt_float("extruder_clearance_radius");
+        if (const auto *nozzle = config.option<Slic3r::ConfigOptionFloats>("nozzle_diameter"))
+            if (!nozzle->values.empty())
+                params.nozzle_height = nozzle->values.front();
+        params.min_obj_distance =
+            Slic3r::scaled(6.0); // desktop default arrange distance
+        Slic3r::arrangement::update_arrange_params(params, &config, selected);
+        Slic3r::arrangement::update_selected_items_inflation(selected, &config, params);
+        Slic3r::arrangement::update_selected_items_axis_align(selected, &config, params);
+
+        // The bed is the CURRENT PLATE box in scaled world coordinates
+        // (desktop FillBedJob uses plate->get_bounding_box_crd()).
+        const Slic3r::BoundingBoxf3 plate_box =
+            orcapad_plate_box(*plater, plater->current_plate);
+        const Slic3r::Points bed = {
+            Slic3r::Point(Slic3r::scaled(plate_box.min.x()), Slic3r::scaled(plate_box.min.y())),
+            Slic3r::Point(Slic3r::scaled(plate_box.max.x()), Slic3r::scaled(plate_box.min.y())),
+            Slic3r::Point(Slic3r::scaled(plate_box.max.x()), Slic3r::scaled(plate_box.max.y())),
+            Slic3r::Point(Slic3r::scaled(plate_box.min.x()), Slic3r::scaled(plate_box.max.y())),
+        };
+
+        // Desktop count: (bed_area - fixed_area - selected_count*template_area)
+        // / template_area — the maximum, the real number is close but less.
+        const double sc = Slic3r::scaled<double>(1.) * Slic3r::scaled(1.);
+        auto template_polys = Slic3r::offset_ex(selected.front().poly, params.min_obj_distance / 2);
+        const Slic3r::ExPolygon template_poly =
+            template_polys.empty() ? selected.front().poly : template_polys.front();
+        const double template_area = template_poly.area() / sc;
+        if (template_area <= 0.0)
+            return orcapad_fail(ORCA_STATUS_INVALID_MODEL, operation,
+                                "template instance has no footprint");
+        double fixed_area = 0.0;
+        for (const auto &polygon : fixed) fixed_area += polygon.poly.area() / sc;
+        const double bed_area = Slic3r::Polygon(bed).area() / sc;
+        const size_t existing_count = selected.size();
+        const int needed_items = std::max(
+            0, static_cast<int>((bed_area - fixed_area - double(existing_count) * template_area)
+                                    / template_area));
+
+        // Clones are arrange-only polygons (no instance yet); bed boxes map
+        // to the single current plate, so overflow (bed_idx != 0) is dropped.
+        const Slic3r::arrangement::ArrangePolygon template_ap = selected.front();
+        for (int i = 0; i < needed_items; ++i) {
+            Slic3r::arrangement::ArrangePolygon clone = template_ap;
+            // desktop setter marker: MAX_PLATES_COUNT (a far-away bed) means
+            // "unplaced, arrange me into bed 0" — UNARRANGED would skip it.
+            clone.bed_idx = 256;
+            clone.itemid = -1;
+            selected.push_back(clone);
+        }
+
+        Slic3r::arrangement::arrange(selected, fixed, bed, params);
+
+        uint32_t added = 0;
+        for (size_t i = 0; i < selected.size(); ++i) {
+            if (selected[i].bed_idx < 0) continue; // not placed at all
+            if (i < existing_count) {
+                selected_instances[i]->apply_arrange_result(
+                    selected[i].translation.cast<double>(), selected[i].rotation);
+            } else if (selected[i].bed_idx == 0) {
+                // desktop setter: add_instance with the template transform,
+                // then the arranged placement (fill_bed_with_instances)
+                const Slic3r::ModelInstance *template_instance = selected_instances.front();
+                Slic3r::ModelInstance *clone = object->add_instance(
+                    template_instance->get_offset(),
+                    template_instance->get_scaling_factor(),
+                    template_instance->get_rotation(),
+                    template_instance->get_mirror());
+                if (!clone)
+                    return orcapad_fail(ORCA_STATUS_ENGINE_FAILURE, operation,
+                                        "engine refused to add an instance");
+                clone->apply_arrange_result(
+                    selected[i].translation.cast<double>(), selected[i].rotation);
+                ++added;
+            }
+        }
+        object->invalidate_bounding_box();
+        object->ensure_on_bed();
+
+        *out_revision = mutation.commit();
+        *out_added = added;
         return orcapad_ok();
     });
 }

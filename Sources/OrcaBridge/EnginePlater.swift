@@ -33,6 +33,9 @@ public final class EnginePlater: @unchecked Sendable {
         )
         case orientAll
         case arrange(allowRotations: Bool)
+        /// Desktop "Fill bed" (FillBedJob): clones the object's template
+        /// instance to fill the selected plate; returns the instance count.
+        case fillBed(objectID: ObjectID, allowRotations: Bool)
         case ensureOnBed
         /// Desktop Edit > Undo / Redo (one history step).
         case undo
@@ -137,6 +140,9 @@ public final class EnginePlater: @unchecked Sendable {
         /// Instances that did not fit the bed after `arrange` (0 otherwise).
         public let unprintableCount: Int
 
+        /// Instances created by `fillBed` (0 otherwise).
+        public let fillBedAddedInstances: Int
+
         fileprivate init(
             snapshot: SceneSnapshot,
             createdObjectID: ObjectID? = nil,
@@ -145,7 +151,8 @@ public final class EnginePlater: @unchecked Sendable {
             unprintableCount: Int = 0,
             createdVolumeID: VolumeID? = nil,
             createdPartCount: Int = 0,
-            createdPlateID: PlateID? = nil
+            createdPlateID: PlateID? = nil,
+            fillBedAddedInstances: Int = 0
         ) {
             self.snapshot = snapshot
             self.createdObjectID = createdObjectID
@@ -155,6 +162,7 @@ public final class EnginePlater: @unchecked Sendable {
             self.createdVolumeID = createdVolumeID
             self.createdPartCount = createdPartCount
             self.createdPlateID = createdPlateID
+            self.fillBedAddedInstances = fillBedAddedInstances
         }
     }
 
@@ -264,6 +272,7 @@ public final class EnginePlater: @unchecked Sendable {
             var createdInstanceID: InstanceID?
             var createdObjectCount = 0
             var arrangeUnprintableCount = 0
+            var fillBedAddedInstances = 0
             var createdVolumeID: VolumeID?
             var createdPartCount = 0
             var createdPlateID: PlateID?
@@ -392,6 +401,21 @@ public final class EnginePlater: @unchecked Sendable {
                     operation: "arrange plate"
                 )
                 arrangeUnprintableCount = Int(unprintable)
+
+            case .fillBed(let objectID, let allowRotations):
+                var added: UInt32 = 0
+                try BridgeResult.consume(
+                    orca_plater_fill_bed(
+                        handle,
+                        presetHandle,
+                        objectID.rawValue,
+                        allowRotations ? 1 : 0,
+                        &added,
+                        &mutationRevision
+                    ),
+                    operation: "fill bed"
+                )
+                fillBedAddedInstances = Int(added)
 
             case .rotate(let objectID, let instanceID, let axis, let radians):
                 try BridgeResult.consume(
@@ -876,7 +900,8 @@ public final class EnginePlater: @unchecked Sendable {
                 unprintableCount: arrangeUnprintableCount,
                 createdVolumeID: createdVolumeID,
                 createdPartCount: createdPartCount,
-                createdPlateID: createdPlateID
+                createdPlateID: createdPlateID,
+                fillBedAddedInstances: fillBedAddedInstances
             )
         }
     }

@@ -1114,6 +1114,37 @@ final class DocumentStore {
 
     // MARK: Arrange / orient / lay flat (desktop toolbar parity)
 
+    /// Desktop "Fill bed" (FillBedJob): fills the current plate with clones
+    /// of the selected object's template instance (instances variant — same
+    /// object, desktop `fill_bed_with_instances` semantics).
+    func fillBed(objectID: ObjectID, presets: EnginePresets, allowRotations: Bool) async {
+        guard let plater, !isBusy else {
+            status.report(.document, "fill bed blocked: document is busy")
+            return
+        }
+        isMutating = true
+        let result = await BackgroundWork.run(operation: "fill bed") {
+            try plater.apply(.fillBed(objectID: objectID, allowRotations: allowRotations), presets: presets)
+        }
+        isMutating = false
+        switch result {
+        case .success(let mutation):
+            install(mutation.snapshot)
+            frameRequest += 1
+            if mutation.fillBedAddedInstances > 0 {
+                status.report(
+                    .document,
+                    "plate filled: \(mutation.fillBedAddedInstances) cop" +
+                        (mutation.fillBedAddedInstances == 1 ? "y" : "ies") + " added"
+                )
+            } else {
+                status.report(.document, "plate is already full")
+            }
+        case .failure(let failure):
+            status.report(.document, failure: failure)
+        }
+    }
+
     func arrangeAll(presets: EnginePresets, allowRotations: Bool) async {
         guard let plater, !isBusy else {
             status.report(.document, "arrange blocked: document is busy")

@@ -156,6 +156,10 @@ Device, each tab a clean feature module over the same stores.
       (`orca_plater_flatten_planes`), translucent plane rendering with
       touch-hover highlight and plane-pick laying (facet fallback kept).
       plate.rotate, plate.scale, plate.lay-flat ✅ (47 done, 37%).
+- [x] C9d: fill bed (ABI v30) — desktop FillBedJob formula + engine
+      nester, instances variant, one undo step, Plate tab button on the
+      selected object. plate.fill-bed ✅ (48 done, 38%). Plus: all-printers
+      sidebar with live reachability in the Device tab.
 - [ ] Parity backlog: generated PARITY.md "Remaining work" (priority order)
 - [x] Device tab: printer web UI (user-allowed 2026-10-07, scoped AGENTS.md
       exception): selected physical printer's own page in a WKWebView,
