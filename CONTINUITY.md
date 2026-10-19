@@ -158,6 +158,14 @@
 
 ## OUTCOMES
 
+- [2026-10-19] Verification + UI pass: VERIFICATION.md records the
+  feature-by-feature desktop-equivalence audit (62 features). 3 real
+  divergences fixed (arrange distance default 0 brim-aware, fill-bed same,
+  orient per-object threshold precedence); UI chrome unified (ChromeTool
+  tokens across action bar + gizmo toolbar, About into File menu, Rotate
+  panel adaptive for narrow widths, filament chips bounded). 51,473 host
+  checks PASS.
+
 - [2026-10-19] C10 milestone complete (multi-filament + polish, ABI v30->31,
   parity 38%->40%, 51 done): release-0.5.0 run 39243764031 green end to
   end - both jobs green, external group + Beta App Review submitted.

@@ -453,17 +453,16 @@ struct PlateTabView: View {
                 }
                 .disabled(document.isBusy)
                 .keyboardShortcut("v", modifiers: .command)
-            } label: {
-                VStack(spacing: 2) {
-                    Image(systemName: "doc.badge.plus")
-                        .font(.system(size: 17, weight: .medium))
-                    Text("File")
-                        .font(.system(size: 9))
+                Divider()
+                Button {
+                    aboutPresented = true
+                } label: {
+                    Label("About OrcaPad", systemImage: "info.circle")
                 }
-                .frame(minWidth: 52, minHeight: 40)
-                .contentShape(Rectangle())
+            } label: {
+                ChromeToolLabel(symbol: "doc.badge.plus", label: "File")
             }
-            .foregroundStyle(document.isBusy ? .secondary : .primary)
+            .opacity(document.isBusy ? 0.35 : 1)
             .disabled(document.isBusy)
             PlateActionButton(
                 symbol: "list.bullet",
@@ -499,10 +498,6 @@ struct PlateTabView: View {
                 guard let engine = environment.presets.engineForSlicing else { return }
                 Task { await document.orientAll(presets: engine) }
             }
-            PlateActionButton(
-                symbol: "info.circle", label: "About",
-                action: { aboutPresented = true }
-            )
         }
         .padding(6)
         .background(.ultraThinMaterial, in: Capsule())
@@ -1291,6 +1286,7 @@ private struct FilamentBar: View {
                         }
                         .padding(.horizontal, 10)
                         .padding(.vertical, 6)
+                        .frame(maxWidth: 220)
                         .background(Color(.secondarySystemBackground), in: Capsule())
                     }
                     .disabled(isBusy)
@@ -1658,14 +1654,7 @@ private struct GizmoToolbar: View {
     }
 
     private func toolLabel(symbol: String, label: String) -> some View {
-        VStack(spacing: 2) {
-            Image(systemName: symbol)
-                .font(.system(size: 18, weight: .medium))
-            Text(label)
-                .font(.system(size: 9))
-        }
-        .frame(width: 52, height: 44)
-        .contentShape(Rectangle())
+        ChromeToolLabel(symbol: symbol, label: label)
     }
 }
 
@@ -1891,67 +1880,96 @@ private struct RotatePanel: View {
     @FocusState private var relativeFocused: Bool
 
     var body: some View {
-        HStack(alignment: .center, spacing: 16) {
-            AxisGlyph(selected: axis)
-                .frame(width: 70, height: 70)
-            VStack(alignment: .leading, spacing: 8) {
-                HStack(spacing: 6) {
-                    ForEach(EngineAxis.allCases, id: \.self) { candidate in
-                        Button {
-                            axis = candidate
-                        } label: {
-                            Text(candidate.label)
-                                .font(.callout.weight(.semibold))
-                                .frame(width: 40, height: 30)
-                                .foregroundStyle(axis == candidate ? Color.white : candidate.color)
-                                .background(
-                                    axis == candidate ? candidate.color : candidate.color.opacity(0.15),
-                                    in: RoundedRectangle(cornerRadius: 8)
-                                )
-                        }
-                        .buttonStyle(.plain)
-                    }
+        ViewThatFits(in: .horizontal) {
+            panelLayout(compact: false)
+            panelLayout(compact: true)
+        }
+    }
+
+    /// `compact` stacks the controls vertically (Split View / narrow widths);
+    /// the default row matches the desktop Object-manipulation panel.
+    private func panelLayout(compact: Bool) -> some View {
+        let axes = HStack(spacing: 6) {
+            ForEach(EngineAxis.allCases, id: \.self) { candidate in
+                Button {
+                    axis = candidate
+                } label: {
+                    Text(candidate.label)
+                        .font(.callout.weight(.semibold))
+                        .frame(width: 40, height: 30)
+                        .foregroundStyle(axis == candidate ? Color.white : candidate.color)
+                        .background(
+                            axis == candidate ? candidate.color : candidate.color.opacity(0.15),
+                            in: RoundedRectangle(cornerRadius: 8)
+                        )
                 }
-                HStack(spacing: 10) {
-                    ForEach(EngineAxis.allCases, id: \.self) { candidate in
-                        Text("\(candidate.label) \(Self.degrees(transform.rotation[Int(candidate.rawValue)]))°")
-                            .font(.caption.monospaced())
-                            .foregroundStyle(candidate == axis ? candidate.color : Color.secondary)
-                    }
+                .buttonStyle(.plain)
+            }
+        }
+        let readouts = HStack(spacing: 10) {
+            ForEach(EngineAxis.allCases, id: \.self) { candidate in
+                Text("\(candidate.label) \(Self.degrees(transform.rotation[Int(candidate.rawValue)]))°")
+                    .font(.caption.monospaced())
+                    .foregroundStyle(candidate == axis ? candidate.color : Color.secondary)
+            }
+        }
+        let controls = VStack(spacing: 6) {
+            HStack(spacing: 6) {
+                Button { actions.rotate(axis, -Self.step) } label: {
+                    Label("−15°", systemImage: "arrow.counterclockwise")
+                }
+                Button { actions.rotate(axis, Self.step) } label: {
+                    Label("+15°", systemImage: "arrow.clockwise")
                 }
             }
-            Spacer()
-            VStack(spacing: 6) {
-                HStack(spacing: 6) {
-                    Button { actions.rotate(axis, -Self.step) } label: {
-                        Label("−15°", systemImage: "arrow.counterclockwise")
-                    }
-                    Button { actions.rotate(axis, Self.step) } label: {
-                        Label("+15°", systemImage: "arrow.clockwise")
-                    }
-                }
-                .buttonStyle(.borderedProminent)
-                .tint(axis.color)
-                // Desktop rotate input window: type ANY relative angle.
-                HStack(spacing: 4) {
-                    TextField("angle", text: $relativeDegrees)
-                        .keyboardType(.numbersAndPunctuation)
-                        .focused($relativeFocused)
-                        .frame(width: 68)
-                        .textFieldStyle(.roundedBorder)
-                        .onSubmit(applyRelative)
-                    Text("°")
-                        .foregroundStyle(Color.secondary)
-                    Button("Rotate", action: applyRelative)
-                        .buttonStyle(.bordered)
-                        .font(.caption)
-                }
-                Button("Reset rotation", action: actions.resetRotation)
+            .buttonStyle(.borderedProminent)
+            .tint(axis.color)
+            // Desktop rotate input window: type ANY relative angle.
+            HStack(spacing: 4) {
+                TextField("angle", text: $relativeDegrees)
+                    .keyboardType(.numbersAndPunctuation)
+                    .focused($relativeFocused)
+                    .frame(width: 68)
+                    .textFieldStyle(.roundedBorder)
+                Text("°")
+                    .foregroundStyle(Color.secondary)
+                Button("Rotate", action: applyRelative)
                     .buttonStyle(.bordered)
                     .font(.caption)
             }
+            Button("Reset rotation", action: actions.resetRotation)
+                .buttonStyle(.bordered)
+                .font(.caption)
         }
+        if compact {
+            return AnyView(
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack(spacing: 12) {
+                        AxisGlyph(selected: axis)
+                            .frame(width: 56, height: 56)
+                        VStack(alignment: .leading, spacing: 6) {
+                            axes
+                            readouts
+                        }
+                    }
+                    controls
+                }
+            )
+        }
+        return AnyView(
+            HStack(alignment: .center, spacing: 16) {
+                AxisGlyph(selected: axis)
+                    .frame(width: 70, height: 70)
+                VStack(alignment: .leading, spacing: 8) {
+                    axes
+                    readouts
+                }
+                Spacer()
+                controls
+            }
+        )
     }
+
 
     private func applyRelative() {
         guard let degrees = Double(relativeDegrees.trimmingCharacters(in: .whitespaces)),
@@ -2190,17 +2208,31 @@ private struct PlateActionButton: View {
 
     var body: some View {
         Button(action: action) {
-            VStack(spacing: 2) {
-                Image(systemName: symbol)
-                    .font(.system(size: 17, weight: .medium))
-                Text(label)
-                    .font(.system(size: 9))
-            }
-            .frame(minWidth: 52, minHeight: 40)
-            .contentShape(Rectangle())
+            ChromeToolLabel(symbol: symbol, label: label)
         }
         .buttonStyle(.plain)
-        .foregroundStyle(disabled ? .secondary : .primary)
+        .opacity(disabled ? 0.35 : 1)
         .disabled(disabled)
+    }
+}
+
+/// The Plate tab's shared button vocabulary: every icon+label control in the
+/// canvas chrome (action bar, gizmo toolbar, menu labels) renders through
+/// these tokens so the design language stays identical everywhere.
+struct ChromeToolLabel: View {
+    let symbol: String
+    let label: String
+
+    var body: some View {
+        VStack(spacing: 2) {
+            Image(systemName: symbol)
+                .font(.system(size: 17, weight: .medium))
+            Text(label)
+                .font(.system(size: 9))
+                .lineLimit(1)
+                .minimumScaleFactor(0.8)
+        }
+        .frame(minWidth: 52, minHeight: 40)
+        .contentShape(Rectangle())
     }
 }

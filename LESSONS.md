@@ -368,3 +368,12 @@ in ~/xtool-cheatsheet.md — link, don't duplicate.)
   poisoning is observable. Engine receives only desktop-grade configs.
 - Never "catch" engine SIGSEGVs at the ABI boundary (signal handlers):
   post-segfault engine state is untrustworthy and it hides real bugs.
+
+### Desktop-default verification findings (2026-10-19 audit)
+- Desktop `ArrangeSettings.distance` defaults to 0 — arrange spacing comes
+  from per-item brim inflation (`update_selected_items_inflation`), NOT a
+  fixed 6 mm. Hardcoding 6 diverged from every default arrange on desktop.
+- Desktop OrientJob reads `support_threshold_angle` PER OBJECT first, then
+  the bundle config, then 60° — bundle-only reads miss per-object overrides.
+- When porting a desktop job, port its PARAMETER INITIALIZATION verbatim
+  (init_arrange_params / OrientJob::prepare), not just the engine call.

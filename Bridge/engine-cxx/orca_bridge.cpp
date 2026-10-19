@@ -5717,18 +5717,20 @@ orca_result orca_plater_orient(orca_plater *plater, orca_presets *presets,
 
         OrcapadMutation mutation(*plater, "Orient");
         const Slic3r::DynamicPrintConfig config = orcapad_arrange_config(presets);
-        const int overhang = config.has("support_threshold_angle")
-                                 ? config.opt_int("support_threshold_angle")
-                                 : 60;
 
-        // desktop OrientJob::get_orient_mesh (min_area default on)
+        // desktop OrientJob::get_orient_mesh: per-object threshold first,
+        // then the bundle config, else the 60 degree default
         Slic3r::orientation::OrientMeshs selected, unselected;
         for (Slic3r::ModelInstance *instance : targets) {
             Slic3r::ModelObject *obj = instance->get_object();
             Slic3r::orientation::OrientMesh om;
             om.name = obj->name;
             om.mesh = obj->mesh();
-            om.overhang_angle = overhang;
+            om.overhang_angle = obj->config.has("support_threshold_angle")
+                ? obj->config.opt_int("support_threshold_angle")
+                : (config.has("support_threshold_angle")
+                       ? config.opt_int("support_threshold_angle")
+                       : 60);
             om.setter = [instance](const Slic3r::orientation::OrientMesh &p) {
                 instance->rotate(p.rotation_matrix);
                 instance->get_object()->invalidate_bounding_box();
@@ -6083,8 +6085,9 @@ orca_result orca_plater_arrange(orca_plater *plater, orca_presets *presets,
         if (const auto *nozzle = config.option<Slic3r::ConfigOptionFloats>("nozzle_diameter"))
             if (!nozzle->values.empty())
                 params.nozzle_height = nozzle->values.front();
-        params.min_obj_distance =
-            Slic3r::scaled(6.0); // desktop default arrange distance
+        // Desktop ArrangeSettings.distance default is 0: update_selected_
+        // items_inflation then derives spacing from each item's brim width.
+        params.min_obj_distance = Slic3r::scaled(0.0);
         // desktop ArrangeJob::process step 2 (engine helpers)
         Slic3r::arrangement::update_arrange_params(params, &config, input);
         Slic3r::arrangement::update_selected_items_inflation(input, &config, params);
@@ -6203,8 +6206,8 @@ orca_result orca_plater_fill_bed(orca_plater *plater, orca_presets *presets,
         if (const auto *nozzle = config.option<Slic3r::ConfigOptionFloats>("nozzle_diameter"))
             if (!nozzle->values.empty())
                 params.nozzle_height = nozzle->values.front();
-        params.min_obj_distance =
-            Slic3r::scaled(6.0); // desktop default arrange distance
+        // Desktop ArrangeSettings.distance default is 0 (brim-aware).
+        params.min_obj_distance = Slic3r::scaled(0.0);
         Slic3r::arrangement::update_arrange_params(params, &config, selected);
         Slic3r::arrangement::update_selected_items_inflation(selected, &config, params);
         Slic3r::arrangement::update_selected_items_axis_align(selected, &config, params);
