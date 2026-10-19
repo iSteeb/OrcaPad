@@ -613,6 +613,21 @@ final class Renderer: NSObject, MTKViewDelegate {
                 }
             }
         }
+        // Desktop frames the CURRENT plate's content, never other plates';
+        // an EMPTY plate still frames — the plate box itself (the bed grid
+        // already anchors to the current plate's origin).
+        if !any, bed.maxX > bed.minX, bed.maxY > bed.minY {
+            let center = bed.center
+            func corner(_ x: Float, _ y: Float) -> SIMD3<Float> {
+                CoordinateMapper.viewerPoint(fromEngine: SIMD3(x, y, 0), bedCenter: center)
+            }
+            for point in [corner(bed.minX, bed.minY), corner(bed.maxX, bed.minY),
+                          corner(bed.maxX, bed.maxY), corner(bed.minX, bed.maxY)] {
+                bbMin = simd_min(bbMin, point)
+                bbMax = simd_max(bbMax, point)
+                any = true
+            }
+        }
         guard any else { return }
         let size = bbMax - bbMin
         let maxDim = max(size.x, max(size.y, size.z))
