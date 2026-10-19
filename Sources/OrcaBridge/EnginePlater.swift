@@ -1281,7 +1281,8 @@ public final class EnginePlater: @unchecked Sendable {
                         ),
                         objectID: objectID
                     ),
-                    overrideCount: Int(rawObject.override_count)
+                    overrideCount: Int(rawObject.override_count),
+                    extruder: Int(rawObject.extruder)
                 ))
             }
         }

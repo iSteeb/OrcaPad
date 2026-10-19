@@ -7,7 +7,7 @@ extern "C" {
 #endif
 
 /// Version of the C ABI contract in this header. Callers verify it at runtime.
-#define ORCA_BRIDGE_ABI_VERSION ((uint32_t)30)
+#define ORCA_BRIDGE_ABI_VERSION ((uint32_t)31)
 
 typedef int32_t orca_status_code;
 #define ORCA_STATUS_OK                     ((orca_status_code)0)
@@ -150,6 +150,9 @@ typedef struct {
     orca_scene_volume *volumes;   // >= 1, document order
     int32_t volume_count;
     uint32_t override_count;      // per-object setting overrides
+    /// Object-level extruder assignment (1-based; 0 = default/first).
+    /// Drives multi-filament coloring and slicing tool mapping.
+    int32_t extruder;
 } orca_scene_object;
 
 typedef struct {
@@ -659,6 +662,44 @@ orca_result orca_presets_reset_kind(orca_presets *presets, int32_t kind);
 orca_result orca_presets_config_dump(orca_presets *presets, int32_t kind,
                                     uint8_t edited,
                                     orca_owned_string *out_json);
+
+// --- multi-filament (desktop Sidebar::on_filament_count_change, ABI v31) ---
+
+#define ORCA_FILAMENT_MAX 16
+
+typedef struct {
+    uint32_t count;
+    orca_owned_string *preset_names;  // one per slot ("" never happens)
+    orca_owned_string *colours;       // "#rrggbb" per slot
+} orca_filament_slots;
+
+void orca_filament_slots_dispose(orca_filament_slots *slots);
+
+/// The current filament slot list (desktop left-panel filament list):
+/// selected preset name + color per slot. Colors come from the bundle's
+/// project config (`filament_colour`), preset names from
+/// `PresetBundle::filament_presets`.
+orca_result orca_presets_filament_slots(orca_presets *presets,
+                                        orca_filament_slots *out);
+
+/// Desktop add/remove filament (PresetBundle::set_num_filaments): new
+/// slots duplicate the LAST filament preset (desktop rule) with
+/// `new_colour` ("#rrggbb" or null for the bundle default); shrinking
+/// drops the tail slots. Count is clamped 1..ORCA_FILAMENT_MAX.
+orca_result orca_presets_set_filament_count(orca_presets *presets,
+                                            uint32_t count,
+                                            const char *new_colour);
+
+/// Desktop per-slot filament combo: assigns a different filament preset to
+/// one slot. Typed NOT_FOUND for an unknown preset or slot.
+orca_result orca_presets_select_filament(orca_presets *presets,
+                                         uint32_t slot,
+                                         const char *preset_name);
+
+/// Desktop per-slot color swatch edit: sets `filament_colour[slot]`.
+orca_result orca_presets_set_filament_colour(orca_presets *presets,
+                                             uint32_t slot,
+                                             const char *colour);
 
 /// Desktop "Open project": loads a 3MF project (model + embedded presets +
 /// project settings, `PresetBundle::load_config_model`) and REPLACES the

@@ -977,6 +977,138 @@ orca_result orca_presets_config_dump(orca_presets *presets, int32_t kind,
     });
 }
 
+// --- multi-filament (desktop Sidebar filament list, ABI v31) ---------------
+
+void orca_filament_slots_dispose(orca_filament_slots *slots) {
+    if (!slots) return;
+    if (slots->preset_names)
+        for (uint32_t i = 0; i < slots->count; ++i)
+            orca_owned_string_dispose(&slots->preset_names[i]);
+    if (slots->colours)
+        for (uint32_t i = 0; i < slots->count; ++i)
+            orca_owned_string_dispose(&slots->colours[i]);
+    std::free(slots->preset_names);
+    std::free(slots->colours);
+    *slots = orca_filament_slots{};
+}
+
+orca_result orca_presets_filament_slots(orca_presets *presets,
+                                        orca_filament_slots *out) {
+    constexpr const char *operation = "orca_presets_filament_slots";
+    if (out) *out = orca_filament_slots{};
+    if (!presets)
+        return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation,
+                            "presets handle is null");
+    if (!out)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "output pointer is null");
+    return orcapad_guard(operation, [&]() -> orca_result {
+        const std::vector<std::string> &names = presets->bundle->filament_presets;
+        if (names.empty())
+            return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
+                                "preset bundle has no filament slot");
+        const auto *colours =
+            presets->bundle->project_config.option<Slic3r::ConfigOptionStrings>("filament_colour");
+        const size_t count = names.size();
+        orca_filament_slots result{};
+        result.count = static_cast<uint32_t>(count);
+        result.preset_names = static_cast<orca_owned_string *>(
+            std::calloc(count, sizeof(orca_owned_string)));
+        result.colours = static_cast<orca_owned_string *>(
+            std::calloc(count, sizeof(orca_owned_string)));
+        if (!result.preset_names || !result.colours) {
+            orca_filament_slots_dispose(&result);
+            return orcapad_fail(ORCA_STATUS_OUT_OF_MEMORY, operation,
+                                "could not allocate filament slots");
+        }
+        for (size_t i = 0; i < count; ++i) {
+            const std::string &colour =
+                colours && i < colours->values.size() ? colours->values[i] : "";
+            if (!orcapad_copy_string(names[i].c_str(), &result.preset_names[i]) ||
+                !orcapad_copy_string(colour.c_str(), &result.colours[i])) {
+                orca_filament_slots_dispose(&result);
+                return orcapad_fail(ORCA_STATUS_OUT_OF_MEMORY, operation,
+                                    "could not allocate a filament slot string");
+            }
+        }
+        *out = result;
+        return orcapad_ok();
+    });
+}
+
+static bool orcapad_valid_filament_colour(const char *colour) {
+    if (!colour || colour[0] != '#' || strlen(colour) != 7) return false;
+    for (const char *c = colour + 1; *c; ++c)
+        if (!isxdigit(static_cast<unsigned char>(*c))) return false;
+    return true;
+}
+
+orca_result orca_presets_set_filament_count(orca_presets *presets,
+                                            uint32_t count,
+                                            const char *new_colour) {
+    constexpr const char *operation = "orca_presets_set_filament_count";
+    if (!presets)
+        return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation,
+                            "presets handle is null");
+    if (count < 1 || count > ORCA_FILAMENT_MAX)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "filament count is out of range");
+    if (new_colour && !orcapad_valid_filament_colour(new_colour))
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "new colour must be #rrggbb");
+    return orcapad_guard(operation, [&]() -> orca_result {
+        // Desktop rule (PresetBundle::set_num_filaments): new slots
+        // duplicate the last filament preset; colors from the arg.
+        presets->bundle->set_num_filaments(
+            count, new_colour ? std::string(new_colour) : std::string());
+        return orcapad_ok();
+    });
+}
+
+orca_result orca_presets_select_filament(orca_presets *presets,
+                                         uint32_t slot,
+                                         const char *preset_name) {
+    constexpr const char *operation = "orca_presets_select_filament";
+    if (!presets)
+        return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation,
+                            "presets handle is null");
+    if (!preset_name || !preset_name[0])
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "preset name is empty");
+    return orcapad_guard(operation, [&]() -> orca_result {
+        if (slot >= presets->bundle->filament_presets.size())
+            return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation,
+                                "filament slot is out of range");
+        const Slic3r::Preset *preset =
+            presets->bundle->filaments.find_preset(preset_name);
+        if (!preset)
+            return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation,
+                                "filament preset was not found");
+        presets->bundle->filament_presets[slot] = preset_name;
+        return orcapad_ok();
+    });
+}
+
+orca_result orca_presets_set_filament_colour(orca_presets *presets,
+                                             uint32_t slot,
+                                             const char *colour) {
+    constexpr const char *operation = "orca_presets_set_filament_colour";
+    if (!presets)
+        return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation,
+                            "presets handle is null");
+    if (!orcapad_valid_filament_colour(colour))
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "colour must be #rrggbb");
+    return orcapad_guard(operation, [&]() -> orca_result {
+        auto *colours = presets->bundle->project_config.option<Slic3r::ConfigOptionStrings>("filament_colour");
+        if (!colours || slot >= colours->values.size())
+            return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation,
+                                "filament slot is out of range");
+        colours->values[slot] = colour;
+        return orcapad_ok();
+    });
+}
+
 // --- plater session ------------------------------------------------------
 
 /// One undo/redo step: the whole document as it was (Model copies share
@@ -3774,6 +3906,12 @@ orca_result orca_plater_snapshot(orca_plater *plater,
             object.mesh_revision = mesh_revision->second;
             object.override_count = static_cast<uint32_t>(
                 orcapad_override_count(model_object->config.get()));
+            const Slic3r::DynamicPrintConfig &object_config = model_object->config.get();
+            if (const auto *extruder =
+                    object_config.option<Slic3r::ConfigOptionInt>("extruder"))
+                object.extruder = static_cast<int32_t>(extruder->value);
+            else
+                object.extruder = 0;
             if (!orcapad_copy_string(model_object->name.c_str(), &object.name))
                 return fail_snapshot(ORCA_STATUS_OUT_OF_MEMORY,
                                      "could not allocate object name");

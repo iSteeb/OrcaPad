@@ -4,6 +4,7 @@
 import OrcaBridge
 import SwiftUI
 import UniformTypeIdentifiers
+import UIKit
 
 /// Plate tab: the pre-slice 3D view (desktop parity). A left gizmo toolbar
 /// picks the one-finger manipulation (Move / Rotate / Scale), the selected
@@ -107,6 +108,19 @@ struct PlateTabView: View {
                     }
                 )
                 .frame(maxWidth: .infinity, alignment: .leading)
+                FilamentBar(
+                    slots: environment.presets.filamentSlots,
+                    isBusy: environment.presets.isSelecting,
+                    onAdd: { Task { await environment.presets.addFilament() } },
+                    onRemove: { slot in Task { await environment.presets.removeFilament(slot: slot) } },
+                    onSelectPreset: { slot, name in
+                        Task { await environment.presets.selectFilamentPreset(slot: slot, name: name) }
+                    },
+                    onSetColour: { slot, colour in
+                        Task { await environment.presets.setFilamentColour(slot: slot, colour: colour) }
+                    },
+                    filamentPresets: environment.presets.filaments
+                )
                 if let selection = document.selection,
                    let object = document.scene?.object(id: selection.objectID),
                    let transform = document.selectedDisplayTransform {
@@ -130,6 +144,25 @@ struct PlateTabView: View {
                         bedCenter: SIMD2(Double(bed.center.x), Double(bed.center.y)),
                         rotationAxis: $rotationAxis,
                         isBusy: document.isBusy,
+                        extruder: object.extruder,
+                        filamentSlots: environment.presets.filamentSlots,
+                        onSetExtruder: { extruder in
+                            let target: VolumeID? = selection.volumeID
+                            Task {
+                                // Desktop Set-extruder: 0 = default. On a part
+                                // it sets the VOLUME extruder, else the object's.
+                                if extruder == 0 {
+                                    await document.eraseSetting(
+                                        objectID: object.id, volumeID: target, key: "extruder"
+                                    )
+                                } else {
+                                    await document.setSetting(
+                                        objectID: object.id, volumeID: target,
+                                        key: "extruder", value: String(extruder)
+                                    )
+                                }
+                            }
+                        },
                         actions: ManipulationActions(
                             setTransform: { newTransform, label in
                                 Task { await document.setSelectedTransform(newTransform, label: label) }
@@ -244,7 +277,14 @@ struct PlateTabView: View {
                     gizmoMode: gizmoMode,
                     rotationAxis: rotationAxis,
                     flattenPlanes: gizmoMode == .layFlat ? document.flattenPlanes : nil,
-                    flattenHighlight: document.flattenHighlight
+                    flattenHighlight: document.flattenHighlight,
+                    filamentColors: environment.presets.filamentSlots
+                        .compactMap { slot in Color(hex: slot.colour).map { UIColor($0) } }
+                        .map { ui in
+                            var red: CGFloat = 0, green: CGFloat = 0, blue: CGFloat = 0, alpha: CGFloat = 0
+                            ui.getRed(&red, green: &green, blue: &blue, alpha: &alpha)
+                            return SIMD4<Float>(Float(red), Float(green), Float(blue), 1)
+                        }
                 ),
                 manipulation: CanvasManipulation(
                     onSelect: { document.select(objectID: $0, instanceID: $1) },
@@ -1164,6 +1204,154 @@ private extension VolumeRole {
 /// Desktop plate selector: chips for the plates in order, tap to select
 /// (import target + slice source), long-press for the plate menu (rename,
 /// lock, duplicate, move to front, delete). Presentation only.
+/// Desktop left-panel filament list (touch-adapted): one chip per slot with
+/// its color swatch + preset name; add / remove; tap a chip for its preset
+/// menu and a color edit. Drives the multi-filament config (extruder count,
+/// per-slot filament presets and colors).
+private struct FilamentBar: View {
+    let slots: [EnginePresets.FilamentSlot]
+    let isBusy: Bool
+    let onAdd: () -> Void
+    let onRemove: (Int) -> Void
+    let onSelectPreset: (Int, String) -> Void
+    let onSetColour: (Int, String) -> Void
+    let filamentPresets: [PresetEntry]
+
+    @State private var colourTarget: Int?
+
+    var body: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                ForEach(Array(slots.enumerated()), id: \.offset) { index, slot in
+                    Menu {
+                        ForEach(filamentPresets, id: \.name) { preset in
+                            Button {
+                                onSelectPreset(index, preset.name)
+                            } label: {
+                                if preset.name == slot.presetName {
+                                    Label(preset.name, systemImage: "checkmark")
+                                } else {
+                                    Text(preset.name)
+                                }
+                            }
+                        }
+                        Divider()
+                        Button {
+                            colourTarget = index
+                        } label: {
+                            Label("Edit colour…", systemImage: "paintpalette")
+                        }
+                        if slots.count > 1 {
+                            Button(role: .destructive) {
+                                onRemove(index)
+                            } label: {
+                                Label("Remove filament", systemImage: "minus.circle")
+                            }
+                        }
+                    } label: {
+                        HStack(spacing: 6) {
+                            Circle()
+                                .fill(Color(hex: slot.colour) ?? .gray)
+                                .frame(width: 16, height: 16)
+                                .overlay(Circle().strokeBorder(.secondary.opacity(0.5)))
+                            Text("\(index + 1) · \(shortName(slot.presetName))")
+                                .font(.caption)
+                                .lineLimit(1)
+                        }
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 6)
+                        .background(Color(.secondarySystemBackground), in: Capsule())
+                    }
+                    .disabled(isBusy)
+                }
+                Button(action: onAdd) {
+                    Image(systemName: "plus.circle.fill")
+                        .font(.title3)
+                }
+                .disabled(isBusy || slots.count >= 16)
+                .accessibilityLabel("Add filament")
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+        }
+        .sheet(item: Binding(
+            get: { colourTarget.map { FilamentColourTarget(slot: $0) } },
+            set: { colourTarget = $0?.slot }
+        )) { target in
+            FilamentColourPicker(
+                initial: slots[target.slot].colour
+            ) { colour in
+                onSetColour(target.slot, colour)
+            }
+            .presentationDetents([.height(320)])
+        }
+    }
+
+    private func shortName(_ name: String) -> String {
+        name.replacingOccurrences(of: " @", with: "@")
+    }
+
+    private struct FilamentColourTarget: Identifiable {
+        let slot: Int
+        var id: Int { slot }
+    }
+}
+
+/// #rrggbb hex color parsing/formatting for filament swatches.
+extension Color {
+    init?(hex: String) {
+        var value = hex.hasPrefix("#") ? String(hex.dropFirst()) : hex
+        guard value.count == 6, let rgb = UInt64(value, radix: 16) else { return nil }
+        value = ""
+        self.init(
+            .sRGB,
+            red: Double((rgb >> 16) & 0xFF) / 255,
+            green: Double((rgb >> 8) & 0xFF) / 255,
+            blue: Double(rgb & 0xFF) / 255
+        )
+    }
+
+    static func hexString(_ color: Color) -> String {
+        let ui = UIColor(color)
+        var red: CGFloat = 0, green: CGFloat = 0, blue: CGFloat = 0, alpha: CGFloat = 0
+        ui.getRed(&red, green: &green, blue: &blue, alpha: &alpha)
+        return String(
+            format: "#%02X%02X%02X",
+            Int(red * 255), Int(green * 255), Int(blue * 255)
+        )
+    }
+}
+
+private struct FilamentColourPicker: View {
+    let initial: String
+    let onApply: (String) -> Void
+
+    @State private var colour = Color.gray
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            ColorPicker("Filament colour", selection: $colour, supportsOpacity: false)
+                .font(.callout)
+                .padding(24)
+                .navigationTitle("Slot colour")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button("Apply") {
+                            onApply(Color.hexString(colour))
+                            dismiss()
+                        }
+                    }
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("Cancel") { dismiss() }
+                    }
+                }
+        }
+        .onAppear { colour = Color(hex: initial) ?? .gray }
+    }
+}
+
 private struct PlateBar: View {
     let plates: [ScenePlate]
     let currentID: PlateID?
@@ -1382,9 +1570,19 @@ private struct ManipulationPanel: View {
     let bedCenter: SIMD2<Double>
     @Binding var rotationAxis: EngineAxis
     let isBusy: Bool
+    /// Object-level extruder (0 = default) + filament slots; the header
+    /// shows the Set-extruder menu when more than one filament is loaded
+    /// (desktop ObjectList extruder assignment).
+    var extruder: Int = 0
+    var filamentSlots: [EnginePresets.FilamentSlot] = []
+    var onSetExtruder: ((Int) -> Void)? = nil
     let actions: ManipulationActions
     var volume: SelectedVolumeInfo?
     var volumeActions: VolumeActions?
+
+    private var showsExtruderMenu: Bool {
+        filamentSlots.count > 1 && onSetExtruder != nil
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -1408,6 +1606,35 @@ private struct ManipulationPanel: View {
                 Text(String(format: "%.1f × %.1f × %.1f mm", header.size.x, header.size.y, header.size.z))
                     .font(.caption.monospaced())
                     .foregroundStyle(.secondary)
+                if showsExtruderMenu {
+                    Menu {
+                        Button {
+                            onSetExtruder?(0)
+                        } label: {
+                            Label("Default", systemImage: extruder == 0 ? "checkmark" : "")
+                        }
+                        ForEach(Array(filamentSlots.enumerated()), id: \.offset) { index, slot in
+                            Button {
+                                onSetExtruder?(index + 1)
+                            } label: {
+                                HStack {
+                                    Text("Slot \(index + 1) · \(slot.presetName)")
+                                    if extruder == index + 1 {
+                                        Image(systemName: "checkmark")
+                                    }
+                                }
+                            }
+                        }
+                    } label: {
+                        Label(
+                            extruder == 0 ? "Extruder: default"
+                                : "Extruder \(extruder)",
+                            systemImage: "paintbrush.pointed"
+                        )
+                        .font(.caption)
+                    }
+                    .disabled(isBusy)
+                }
             }
             switch mode {
             case .move: movePanel

@@ -162,6 +162,83 @@ public final class EnginePresets: @unchecked Sendable {
         return .success(names)
     }
 
+    // MARK: Multi-filament (desktop Sidebar filament list, ABI v31)
+
+    public struct FilamentSlot: Sendable, Equatable {
+        public let presetName: String
+        public let colour: String
+    }
+
+    public func filamentSlots() -> Result<[FilamentSlot], BridgeError> {
+        let operation = "EnginePresets.filamentSlots"
+        lock.lock(); defer { lock.unlock() }
+        guard let handle else { return .failure(invalidHandle(operation)) }
+        var raw = orca_filament_slots()
+        if let error = bridgeFailure(operation: operation, call: {
+            orca_presets_filament_slots(handle, &raw)
+        }) { return .failure(error) }
+        defer { orca_filament_slots_dispose(&raw) }
+        guard raw.count > 0, raw.preset_names != nil, raw.colours != nil else {
+            return .failure(BridgeError.local(
+                .internalInvariant, operation: operation,
+                diagnostic: "Bridge returned no filament slots"
+            ))
+        }
+        var slots: [FilamentSlot] = []
+        slots.reserveCapacity(Int(raw.count))
+        for index in 0..<Int(raw.count) {
+            slots.append(FilamentSlot(
+                presetName: String(cString: raw.preset_names[index].data),
+                colour: String(cString: raw.colours[index].data)
+            ))
+        }
+        return .success(slots)
+    }
+
+    public func setFilamentCount(
+        _ count: Int,
+        newColour: String? = nil
+    ) -> Result<Void, BridgeError> {
+        let operation = "EnginePresets.setFilamentCount"
+        lock.lock(); defer { lock.unlock() }
+        guard let handle else { return .failure(invalidHandle(operation)) }
+        if let error = bridgeFailure(operation: operation, call: {
+            orca_presets_set_filament_count(
+                handle, UInt32(count), newColour)
+        }) { return .failure(error) }
+        return .success(())
+    }
+
+    public func selectFilament(
+        slot: Int,
+        presetName: String
+    ) -> Result<Void, BridgeError> {
+        let operation = "EnginePresets.selectFilament"
+        lock.lock(); defer { lock.unlock() }
+        guard let handle else { return .failure(invalidHandle(operation)) }
+        if let error = bridgeFailure(operation: operation, call: {
+            presetName.withCString { name in
+                orca_presets_select_filament(handle, UInt32(slot), name)
+            }
+        }) { return .failure(error) }
+        return .success(())
+    }
+
+    public func setFilamentColour(
+        slot: Int,
+        colour: String
+    ) -> Result<Void, BridgeError> {
+        let operation = "EnginePresets.setFilamentColour"
+        lock.lock(); defer { lock.unlock() }
+        guard let handle else { return .failure(invalidHandle(operation)) }
+        if let error = bridgeFailure(operation: operation, call: {
+            colour.withCString { value in
+                orca_presets_set_filament_colour(handle, UInt32(slot), value)
+            }
+        }) { return .failure(error) }
+        return .success(())
+    }
+
     public func select(
         machine: String,
         filament: String,

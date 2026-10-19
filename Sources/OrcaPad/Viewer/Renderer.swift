@@ -30,6 +30,8 @@ private struct InstanceDraw {
     let printable: Bool
     /// Plate assignment (index; -1 = off every plate).
     let plate: Int
+    /// Object-level extruder assignment (1-based; 0 = default).
+    let extruder: Int
 }
 
 /// A part volume's triangle range inside the object's merged mesh (ABI v26):
@@ -118,6 +120,15 @@ final class Renderer: NSObject, MTKViewDelegate {
     /// Marquee rectangle in view POINTS (rectangle selection mode); drawn as
     /// a screen-space overlay each frame.
     private var marqueeRect: CGRect?
+
+    /// Filament slot colors (multi-filament): instances with an extruder
+    /// assignment draw in their slot color (desktop colors objects by
+    /// extruder). Empty / single = default object color.
+    private var filamentColors: [SIMD4<Float>] = []
+
+    func setFilamentColors(_ colors: [SIMD4<Float>]) {
+        filamentColors = colors
+    }
 
     // Flatten-gizmo planes (desktop GLGizmoFlatten): viewer-space convex
     // polygons + their engine-space normals; the highlighted index follows
@@ -426,7 +437,8 @@ final class Renderer: NSObject, MTKViewDelegate {
                         highlightedInstanceIDs.contains(instance.id),
                     mirrored: instance.mirrored,
                     printable: instance.printable,
-                    plate: instance.plate
+                    plate: instance.plate,
+                    extruder: sceneObject.extruder
                 )
             }
 
@@ -1269,6 +1281,10 @@ final class Renderer: NSObject, MTKViewDelegate {
                 cubeUniforms.model = model
                 cubeUniforms.color = inst.selected ? Renderer.selectedColor
                     : (inst.printable ? Renderer.objectColor : Renderer.unprintableColor)
+                if !inst.selected, inst.printable,
+                   inst.extruder >= 1, inst.extruder <= filamentColors.count {
+                    cubeUniforms.color = filamentColors[inst.extruder - 1]
+                }
                 cubeUniforms.normalSign = inst.mirrored ? -1 : 1
                 var cu = cubeUniforms
                 encoder.setVertexBytes(&cu, length: MemoryLayout<CubeUniforms>.stride, index: 1)

@@ -31,6 +31,7 @@ private struct PresetLoadPayload: Sendable {
     let bedType: BedTypeState
     let editedConfigs: [PresetKind: [String: String]]
     let systemConfigs: [PresetKind: [String: String]]
+    let filamentSlots: [EnginePresets.FilamentSlot]
     let warning: AppFailure?
     /// Non-failure, UI-visible note from the load (e.g. a stored selection
     /// that is no longer listed was replaced by the engine defaults).
@@ -41,6 +42,7 @@ private struct PresetLoadPayload: Sendable {
          printVolume: PrintVolume, bedType: BedTypeState,
          editedConfigs: [PresetKind: [String: String]],
          systemConfigs: [PresetKind: [String: String]],
+         filamentSlots: [EnginePresets.FilamentSlot] = [],
          warning: AppFailure?, notice: String? = nil) {
         self.engine = engine
         self.machines = machines
@@ -51,6 +53,7 @@ private struct PresetLoadPayload: Sendable {
         self.bedType = bedType
         self.editedConfigs = editedConfigs
         self.systemConfigs = systemConfigs
+        self.filamentSlots = filamentSlots
         self.warning = warning
         self.notice = notice
     }
@@ -376,6 +379,106 @@ final class PresetStore {
         }
     }
 
+    // MARK: Multi-filament (desktop Sidebar filament list, ABI v31)
+
+    private(set) var filamentSlots: [EnginePresets.FilamentSlot] = []
+
+    var filamentCount: Int { filamentSlots.count }
+
+    private func refreshFilamentSlots() async {
+        guard let engine else {
+            filamentSlots = []
+            return
+        }
+        let result = await BackgroundWork.run(operation: "load filament slots") {
+            try engine.filamentSlots().get()
+        }
+        switch result {
+        case .success(let slots): filamentSlots = slots
+        case .failure: filamentSlots = []
+        }
+    }
+
+    func addFilament() async {
+        guard let engine, isReady, !isSelecting else {
+            status.report(.presets, "add filament blocked: presets are busy")
+            return
+        }
+        isSelecting = true
+        defer { isSelecting = false }
+        let targetCount = filamentSlots.count + 1
+        let result = await BackgroundWork.run(operation: "add filament") {
+            try engine.setFilamentCount(targetCount).get()
+        }
+        switch result {
+        case .success:
+            await refreshFilamentSlots()
+            status.report(.presets, "filament added (slot \(filamentSlots.count))")
+        case .failure(let failure):
+            status.report(.presets, failure: failure)
+        }
+    }
+
+    func removeFilament(slot: Int) async {
+        guard let engine, isReady, !isSelecting, filamentSlots.count > 1,
+              slot >= 0, slot < filamentSlots.count else {
+            status.report(.presets, "remove filament blocked")
+            return
+        }
+        isSelecting = true
+        defer { isSelecting = false }
+        let targetCount = filamentSlots.count - 1
+        let result = await BackgroundWork.run(operation: "remove filament") {
+            try engine.setFilamentCount(targetCount).get()
+        }
+        switch result {
+        case .success:
+            await refreshFilamentSlots()
+            status.report(.presets, "filament removed (slot \(slot + 1))")
+        case .failure(let failure):
+            status.report(.presets, failure: failure)
+        }
+    }
+
+    func selectFilamentPreset(slot: Int, name: String) async {
+        guard let engine, isReady, !isSelecting,
+              slot >= 0, slot < filamentSlots.count else {
+            status.report(.presets, "filament preset change blocked")
+            return
+        }
+        isSelecting = true
+        defer { isSelecting = false }
+        let result = await BackgroundWork.run(operation: "select filament preset") {
+            try engine.selectFilament(slot: slot, presetName: name).get()
+        }
+        switch result {
+        case .success:
+            await refreshFilamentSlots()
+            status.report(.presets, "slot \(slot + 1): \(name)")
+        case .failure(let failure):
+            status.report(.presets, failure: failure)
+        }
+    }
+
+    func setFilamentColour(slot: Int, colour: String) async {
+        guard let engine, isReady, !isSelecting,
+              slot >= 0, slot < filamentSlots.count else {
+            status.report(.presets, "filament colour change blocked")
+            return
+        }
+        isSelecting = true
+        defer { isSelecting = false }
+        let result = await BackgroundWork.run(operation: "set filament colour") {
+            try engine.setFilamentColour(slot: slot, colour: colour).get()
+        }
+        switch result {
+        case .success:
+            await refreshFilamentSlots()
+        case .failure(let failure):
+            status.report(.presets, failure: failure)
+        }
+    }
+
     // MARK: User presets (desktop Save / Delete preset)
 
     func origin(of kind: PresetKind) -> PresetOrigin? {
@@ -447,6 +550,7 @@ final class PresetStore {
                 edited[kind] = try engine.configDump(kind: kind, edited: true).get()
                 system[kind] = try engine.configDump(kind: kind, edited: false).get()
             }
+            let slots = try engine.filamentSlots().get()
             return PresetLoadPayload(
                 engine: engine,
                 machines: machines,
@@ -457,6 +561,7 @@ final class PresetStore {
                 bedType: try engine.bedType().get(),
                 editedConfigs: edited,
                 systemConfigs: system,
+                filamentSlots: slots,
                 warning: nil
             )
         }
@@ -470,6 +575,7 @@ final class PresetStore {
             bedType = payload.bedType
             editedConfigs = payload.editedConfigs
             systemConfigs = payload.systemConfigs
+            filamentSlots = payload.filamentSlots
             // Project/external presets are session-only: persist a selection
             // only when every preset survives a relaunch.
             let pairs: [([PresetEntry], String)] = [

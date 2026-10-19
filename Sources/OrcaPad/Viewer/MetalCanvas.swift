@@ -30,6 +30,8 @@ struct SceneSync {
     var flattenPlanes: [EnginePlater.FlattenPlane]? = nil
     /// Index of the plane highlighted under the finger (touch hover).
     var flattenHighlight: Int? = nil
+    /// Filament slot colors (multi-filament extruder tinting).
+    var filamentColors: [SIMD4<Float>] = []
 }
 
 /// Manipulation callbacks from the canvas gestures (engine-space units).
@@ -105,6 +107,7 @@ struct MetalCanvas: UIViewRepresentable {
         coordinator.renderer?.setGizmo(mode: scene.gizmoMode, rotationAxis: scene.rotationAxis)
         coordinator.renderer?.setFlattenPlanes(scene.flattenPlanes)
         coordinator.renderer?.setFlattenHighlight(scene.flattenHighlight)
+        coordinator.renderer?.setFilamentColors(scene.filamentColors)
         let needsSceneApply =
             scene.snapshot.documentID != coordinator.lastDocumentID ||
             scene.snapshot.revision != coordinator.lastDocumentRevision ||

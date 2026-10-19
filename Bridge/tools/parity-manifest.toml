@@ -312,13 +312,14 @@ note = "paste REPLACES the target's overrides in one undo step (desktop paste_se
 id = "plate.object-filament"
 area = "plate"
 title = "Assign filament to object / part"
-status = "missing"
+status = "done"
 desktop = ["context:Change filament", "context:Change Filament",
            "context:{item_name}@append_menu_item_change_extruder",
            "context:{item_name}@append_menu_item_change_filament"]
+evidence = ['client:func setSetting\(objectID', "client:var extruder: Int",
+            "client:var onSetExtruder"]
 work = "Bridge + UI"
-priority = 25
-note = "needs prepare.multi-filament"
+note = "Desktop Set-extruder parity through the existing per-object/part settings contract: the manipulation-panel extruder menu writes the object's (or selected part's) extruder option (0 = default erases the override); the scene snapshot carries the object-level extruder and the viewer tints instances by filament slot color when multiple filaments are loaded"
 
 [[feature]]
 id = "plate.printable"
@@ -774,13 +775,19 @@ priority = 112
 id = "prepare.multi-filament"
 area = "prepare"
 title = "Multiple filaments / extruders (sidebar list, edit, merge)"
-status = "missing"
+status = "partial"
 desktop = ["context:Edit", "context:Merge with", "context:{item_name}@create_filament_action_menu",
            "pref:Optimize filaments area height for...", "pref:Remove mixed temperature restriction",
            "dialog:FilamentPickerDialog"]
 source = "src/slic3r/GUI/Plater.cpp:on_filament_count_change|add_filament"
+evidence = ["abi:orca_presets_set_filament_count", "abi:orca_presets_filament_slots",
+            "client:struct FilamentBar", 'client:func addFilament\(',
+            "abi:orca_presets_select_filament", "client:struct FilamentColourPicker",
+            "client:func setFilamentColour"]
+gap = "no merge-with (combining two filament presets into one user preset) yet; per-slot preset edit opens the filament settings pages instead of a slot-scoped editor"
 work = "Bridge + UI"
-priority = 100
+priority = 30
+note = "ABI v31: PresetBundle set_num_filaments semantics (new slots duplicate the last preset), per-slot preset swap + color; FilamentBar chips with color swatch, add/remove (1..16), per-slot preset menu and ColorPicker; objects/parts assign extruders via the manipulation-panel extruder menu and instances tint by slot color; multi-filament slicing carries the flush matrix through config finalization"
 
 [[feature]]
 id = "prepare.flushing-volumes"

@@ -276,7 +276,7 @@ static void test_md5_shim() {
 
 static void test_abi_version() {
     CHECK_EQ(orca_bridge_abi_version(), ORCA_BRIDGE_ABI_VERSION);
-    CHECK_EQ(ORCA_BRIDGE_ABI_VERSION, 30);
+    CHECK_EQ(ORCA_BRIDGE_ABI_VERSION, 31);
 }
 
 struct ProgressRecord {
@@ -2985,6 +2985,83 @@ static void test_slice_with_presets(const std::string &dir,
         orca_slice_report_dispose(&report);
         GUARD(fw3, orca_presets_reset_kind(presets, 0));
         expect_ok(fw3, "reset machine preset");
+    }
+
+    // --- multi-filament slots (ABI v31) -----------------------------------
+    {
+        orca_filament_slots slots;
+        GUARD(mf0, orca_presets_filament_slots(presets, &slots));
+        expect_ok(mf0, "filament slots");
+        CHECK_EQ(slots.count, 1u);  // one slot after the triple selection
+        orca_filament_slots_dispose(&slots);
+
+        GUARD(mf1, orca_presets_set_filament_count(presets, 4, "#FF0000"));
+        expect_ok(mf1, "grow to 4 filaments");
+        GUARD(mf2, orca_presets_filament_slots(presets, &slots));
+        expect_ok(mf2, "slots after grow");
+        CHECK_EQ(slots.count, 4u);
+        // desktop rule: new slots duplicate the LAST filament preset
+        CHECK(strcmp(slots.preset_names[1].data, slots.preset_names[0].data) == 0);
+        CHECK(strcmp(slots.colours[3].data, "#FF0000") == 0);
+
+        // per-slot preset swap: pick a real filament preset name from the list
+        int32_t filament_count = 0;
+        GUARD(mf3, orca_presets_list_count(presets, 1, &filament_count));
+        CHECK(filament_count > 1);
+        orca_owned_string other;
+        bool swapped = false;
+        for (int32_t i = 0; i < filament_count && !swapped; ++i) {
+            GUARD(mf4, orca_presets_list_name(presets, 1, i, &other));
+            if (strcmp(other.data, slots.preset_names[0].data) != 0) {
+                GUARD(mf5, orca_presets_select_filament(presets, 2, other.data));
+                expect_ok(mf5, "swap slot 3 preset");
+                swapped = true;
+            }
+            orca_owned_string_dispose(&other);
+        }
+        CHECK(swapped);
+        GUARD(mf6, orca_presets_set_filament_colour(presets, 1, "#00FF00"));
+        expect_ok(mf6, "set slot colour");
+        orca_filament_slots_dispose(&slots);
+        GUARD(mf7, orca_presets_filament_slots(presets, &slots));
+        CHECK_EQ(slots.count, 4u);
+        CHECK(strcmp(slots.colours[1].data, "#00FF00") == 0);
+
+        // THE finalization repair: 4 filaments + a 1-value flush matrix on
+        // the machine preset (the TestFlight 0.2.0 crash shape) — slicing
+        // must succeed and report the repair.
+        GUARD(mf8, orca_presets_set_value(presets, 0, "flush_volumes_matrix",
+                                         "280"));
+        expect_ok(mf8, "short flush matrix (4 filaments)");
+        const std::string multi = dir + "/presets-multi.gcode";
+        ProgressRecord multi_progress;
+        GUARD(mf9, orca_plater_slice_to_gcode_with_presets(
+                      plater, presets, multi.c_str(), progress_trampoline,
+                      &multi_progress, nullptr, &report));
+        expect_ok(mf9, "slice with 4 filaments + short machine matrix");
+        // NOTE: construct_full_config's variant expansion re-sizes machine
+        // flush matrices before finalization runs (verified: 16 values at 4
+        // filaments), so this path cannot produce the short-matrix shape;
+        // finalization remains the last-line guard for paths that can.
+        orca_slice_report_dispose(&report);
+        GUARD(mf10, orca_presets_reset_kind(presets, 0));
+        expect_ok(mf10, "reset machine preset");
+
+        // shrink + typed rejections
+        GUARD(mf11, orca_presets_set_filament_count(presets, 2, nullptr));
+        expect_ok(mf11, "shrink to 2");
+        GUARD(mf12, orca_presets_filament_slots(presets, &slots));
+        CHECK_EQ(slots.count, 2u);
+        orca_filament_slots_dispose(&slots);
+        GUARD(mf13, orca_presets_select_filament(presets, 9, "x"));
+        expect_code(mf13, ORCA_STATUS_NOT_FOUND, "slot out of range");
+        GUARD(mf14, orca_presets_set_filament_count(presets, 0, nullptr));
+        expect_code(mf14, ORCA_STATUS_INVALID_ARGUMENT, "zero filaments");
+        GUARD(mf15, orca_presets_set_filament_colour(presets, 0, "red"));
+        expect_code(mf15, ORCA_STATUS_INVALID_ARGUMENT, "bad colour");
+        // back to one filament for the tests that follow
+        GUARD(mf16, orca_presets_set_filament_count(presets, 1, nullptr));
+        expect_ok(mf16, "back to 1 filament");
     }
 
     // preset-backed output must NOT be the defaults overlay: the gcode

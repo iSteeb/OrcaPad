@@ -272,6 +272,8 @@ public struct SceneObject: Identifiable, Sendable {
     public let volumes: [SceneVolume]
     /// Per-object setting overrides (desktop object-list settings badge).
     public let overrideCount: Int
+    /// Object-level extruder assignment (1-based; 0 = default/first).
+    public let extruder: Int
 
     public init(
         id: ObjectID,
@@ -279,7 +281,8 @@ public struct SceneObject: Identifiable, Sendable {
         mesh: SceneMesh,
         instances: [SceneInstance],
         volumes: [SceneVolume],
-        overrideCount: Int
+        overrideCount: Int,
+        extruder: Int = 0
     ) {
         self.id = id
         self.name = name
@@ -287,6 +290,7 @@ public struct SceneObject: Identifiable, Sendable {
         self.instances = instances
         self.volumes = volumes
         self.overrideCount = overrideCount
+        self.extruder = extruder
     }
 
     public var modelParts: [SceneVolume] {
