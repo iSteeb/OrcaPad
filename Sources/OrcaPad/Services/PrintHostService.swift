@@ -70,11 +70,32 @@ final class PrintHostService {
                 try Self.request(for: printer, file: gcode, startPrint: startPrint)
             }.value
             status.report(.device, "\(printer.name): uploading \(gcode.lastPathComponent)…")
+            // Desktop multi-step hosts: FlashAir prepares the card/dir
+            // first (FlashAir.cpp), Duet starts the print after the upload
+            // (Duet.cpp rr_gcode). Both steps surface failures loudly.
+            for pre in Self.pendingPreRequests {
+                let (_, preResponse) = try await URLSession.shared.data(for: pre)
+                if let http = preResponse as? HTTPURLResponse,
+                   !(200..<300).contains(http.statusCode) {
+                    throw UploadError.http(status: http.statusCode, host: printer.hostType)
+                }
+            }
+            Self.pendingPreRequests = []
             let (data, response) = try await URLSession.shared.data(for: request)
             if let http = response as? HTTPURLResponse,
                !(200..<300).contains(http.statusCode) {
                 throw UploadError.http(status: http.statusCode, host: printer.hostType)
             }
+            if let start = Self.startRequest {
+                Self.startRequest = nil
+                let (_, startResponse) = try await URLSession.shared.data(for: start)
+                if let http = startResponse as? HTTPURLResponse,
+                   !(200..<300).contains(http.statusCode) {
+                    // The FILE is uploaded; only the start command failed.
+                    throw UploadError.http(status: http.statusCode, host: printer.hostType)
+                }
+            }
+            Self.startRequest = nil
             status.report(.device, "\(printer.name): upload complete")
             _ = data // OctoPrint/Moonraker return JSON status; nothing to show yet
             lastReceipt = Receipt(
@@ -87,11 +108,16 @@ final class PrintHostService {
         }
     }
 
-    /// Desktop request shapes:
+    /// Desktop request shapes (slic3r/Utils/*.cpp):
     /// - OctoPrint: `POST /api/files/local`, `X-Api-Key`, multipart fields
     ///   `select`/`print` (OctoPrint.cpp put).
     /// - Moonraker: `POST /server/files/upload`, multipart `print`
     ///   (Moonraker.cpp put).
+    /// - Duet (RepRapFirmware): `POST /rr_upload?name=0:/gcodes/<file>`
+    ///   with the raw file body; start = `POST /rr_gcode?gcode=M32...`
+    ///   (Duet.cpp put).
+    /// - FlashAir: the three upload.cgi calls — WRITEPROTECT=ON&FTIME,
+    ///   UPDIR, then the multipart upload (FlashAir.cpp put).
     nonisolated private static func request(
         for printer: EnginePresets.PhysicalPrinterRecord,
         file: URL,
@@ -101,6 +127,59 @@ final class PrintHostService {
               scheme == "http" || scheme == "https" else {
             throw UploadError.badURL(printer.url)
         }
+
+        // Raw-body hosts (Duet): plain file POST, no multipart.
+        if printer.hostType == "duet" {
+            let fileData: Data
+            do {
+                fileData = try Data(contentsOf: file)
+            } catch {
+                throw UploadError.transport("cannot read \(file.lastPathComponent)")
+            }
+            var url = base
+            url.append(path: "rr_upload")
+            // Duet.cpp: name=0:/gcodes/<file>&<timestamp>
+            url.append(
+                queryItems: [
+                    URLQueryItem(
+                        name: "name",
+                        value: "0:/gcodes/" + file.lastPathComponent
+                    ),
+                    URLQueryItem(name: "time", value: String(Int(Date().timeIntervalSince1970))),
+                ]
+            )
+            var request = URLRequest(url: url)
+            request.httpMethod = "POST"
+            request.httpBody = fileData
+            request.timeoutInterval = 120
+            // Desktop sends the start command as a second request after a
+            // successful upload; OrcaPad queues it in `startRequest`.
+            startRequest = startPrint
+                ? Self.duetStart(base: base, file: file.lastPathComponent)
+                : nil
+            return request
+        }
+
+        if printer.hostType == "flashair" {
+            // FlashAir.cpp: prepare (WRITEPROTECT=ON&FTIME), set dir, upload.
+            let timestamp = String(Int(Date().timeIntervalSince1970))
+            var prepare = base
+            prepare.append(path: "upload.cgi")
+            prepare.append(queryItems: [
+                URLQueryItem(name: "WRITEPROTECT", value: "ON"),
+                URLQueryItem(name: "FTIME", value: timestamp),
+            ])
+            var setDir = base
+            setDir.append(path: "upload.cgi")
+            setDir.append(queryItems: [URLQueryItem(name: "UPDIR", value: "/gcodes")])
+            pendingPreRequests = [prepare, setDir].map { url in
+                var request = URLRequest(url: url)
+                request.httpMethod = "GET"
+                request.timeoutInterval = 30
+                return request
+            }
+        }
+
         let boundary = "OrcaPad-\(UUID().uuidString)"
         func field(_ name: String, _ value: String) -> Data {
             Data("--\(boundary)\r\nContent-Disposition: form-data; name=\"\(name)\"\r\n\r\n\(value)\r\n".utf8)
@@ -113,6 +192,8 @@ final class PrintHostService {
         case "moonraker":
             body.append(field("root", "gcodes"))
             body.append(field("print", startPrint ? "true" : "false"))
+        case "flashair":
+            break  // raw multipart file only (dir set via upload.cgi)
         default:
             throw UploadError.unsupportedHost(printer.hostType)
         }
@@ -130,6 +211,7 @@ final class PrintHostService {
         switch printer.hostType {
         case "octoprint": url.append(path: "api/files/local")
         case "moonraker": url.append(path: "server/files/upload")
+        case "flashair": url.append(path: "upload.cgi")
         default: throw UploadError.unsupportedHost(printer.hostType)
         }
         var request = URLRequest(url: url)
@@ -140,6 +222,23 @@ final class PrintHostService {
         }
         request.httpBody = body
         request.timeoutInterval = 120
+        return request
+    }
+
+    /// Extra requests the desktop hosts send around the main upload
+    /// (FlashAir prepare/setdir) and after it (Duet start).
+    private nonisolated(unsafe) static var pendingPreRequests: [URLRequest] = []
+    private nonisolated(unsafe) static var startRequest: URLRequest?
+
+    private nonisolated static func duetStart(base: URL, file: String) -> URLRequest {
+        var url = base
+        url.append(path: "rr_gcode")
+        url.append(queryItems: [
+            URLQueryItem(name: "gcode", value: "M32 \"0:/gcodes/\(file)\"")
+        ])
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.timeoutInterval = 30
         return request
     }
 }

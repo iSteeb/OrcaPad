@@ -399,6 +399,8 @@ enum PrinterHostKind {
     static let supported: [(value: String, label: String)] = [
         ("moonraker", "Moonraker (Klipper)"),
         ("octoprint", "OctoPrint"),
+        ("duet", "Duet / RepRapFirmware"),
+        ("flashair", "FlashAir SD card"),
     ]
 
     static func label(_ hostType: String) -> String {
@@ -409,6 +411,8 @@ enum PrinterHostKind {
         switch hostType {
         case "moonraker": return "antenna.radiowaves.left.and.right"
         case "octoprint": return "server.rack"
+        case "duet": return "cpu"
+        case "flashair": return "sdcard"
         default: return "printer"
         }
     }

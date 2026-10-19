@@ -92,13 +92,65 @@ enum CameraViewPreset: String, CaseIterable, Identifiable, Sendable {
 // MARK: - Orbit ("turntable") camera
 
 /// Spherical camera around a target point — the classic slicer view.
-/// One-finger drag orbits, pinch zooms, two-finger drag pans.
+/// One-finger drag orbits, pinch zooms, two-finger drag pans. Automated
+/// moves (framing, view presets) ANIMATE smoothly toward a goal instead
+/// of teleporting (frame-rate-independent exponential damping).
 final class OrbitCamera {
     /// Bed centre, slightly raised so the default view frames the object.
     var target = simd_float3(0, 15, 0)
     var yaw: Float = -0.65     // radians; 0 looks down -Z... (eye azimuth)
     var pitch: Float = 0.42    // radians above horizon
     var distance: Float = 330
+
+    private struct Goal {
+        var target = simd_float3(0, 15, 0)
+        var yaw: Float = -0.65
+        var pitch: Float = 0.42
+        var distance: Float = 330
+    }
+
+    private var goal = Goal()
+    private var animating = false
+    /// Yaw wraps: animate along the SHORT arc.
+    private var yawGoal: Float = -0.65
+
+    /// Starts a smooth move (call from automation: framing, view presets).
+    func animate(target: simd_float3, distance: Float, yaw: Float, pitch: Float) {
+        goal = Goal(target: target, yaw: yaw, pitch: pitch, distance: distance)
+        // shortest angular path
+        var delta = (yaw - self.yaw).truncatingRemainder(dividingBy: 2 * .pi)
+        if delta > .pi { delta -= 2 * .pi }
+        if delta < -.pi { delta += 2 * .pi }
+        yawGoal = self.yaw + delta
+        animating = true
+    }
+
+    /// Per-frame advance; call from the render loop with the frame delta.
+    func tick(deltaTime: Float) {
+        guard animating else { return }
+        // ~0.25 s settling time; frame-rate independent.
+        let blend = 1 - exp(-deltaTime * 9)
+        target += (goal.target - target) * blend
+        distance += (goal.distance - distance) * blend
+        pitch += (goal.pitch - pitch) * blend
+        yaw += (yawGoal - yaw) * blend
+        let settled = simd_length(goal.target - target) < 0.05
+            && abs(goal.distance - distance) < 0.4
+            && abs(goal.pitch - pitch) < 0.001
+            && abs(yawGoal - yaw) < 0.001
+        if settled {
+            target = goal.target
+            distance = goal.distance
+            pitch = goal.pitch
+            yaw = yawGoal
+            animating = false
+        }
+    }
+
+    /// Any manual gesture cancels a running animation and adopts the values.
+    private func cancelAnimation() {
+        animating = false
+    }
 
     let fovY = Float.pi / 4
     let near: Float = 1
@@ -122,6 +174,7 @@ final class OrbitCamera {
     }
 
     func orbit(dx: Float, dy: Float) {
+        cancelAnimation()
         yaw += dx * 0.008
         pitch = min(max(pitch + dy * 0.006, Self.minPitch), Self.maxPitch)
     }
@@ -129,19 +182,26 @@ final class OrbitCamera {
     static let maxPitch = Float.pi / 2 - 0.04
     static let minPitch = -(Float.pi / 2 - 0.04)
 
-    /// Applies a desktop camera view preset (keeps target and distance).
+    /// Applies a desktop camera view preset (keeps target and distance),
+    /// animated like the desktop transitions.
     func apply(_ preset: CameraViewPreset) {
         let angles = preset.angles
-        yaw = angles.yaw
-        pitch = angles.pitch
+        animate(
+            target: target,
+            distance: distance,
+            yaw: angles.yaw,
+            pitch: angles.pitch
+        )
     }
 
     func zoom(by scale: Float) {
+        cancelAnimation()
         distance = min(max(distance / max(scale, 0.05), 70), 1400)
     }
 
     /// Two-finger drag: translate the target in the camera's screen plane.
     func pan(dx: Float, dy: Float) {
+        cancelAnimation()
         let k = distance * 0.0016
         let delta = -right * (dx * k) + upAxis * (dy * k)
         target += delta

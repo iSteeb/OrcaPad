@@ -90,6 +90,7 @@ final class Renderer: NSObject, MTKViewDelegate {
     /// Outlines of the non-current plates (ABI v27): dimmed rectangles in
     /// viewer space, rebuilt on every scene apply (cheap: <= 36 rects).
     private var plateOutlineVertices: [VertexPC] = []
+    private var lastFrameTime: Float?
     /// Index of the selected plate (for framing + outline dimming).
     private var currentPlateIndex = 0
 
@@ -554,36 +555,11 @@ final class Renderer: NSObject, MTKViewDelegate {
         appliedRevision = scene.revision
         primaryObjectID = selectedObjectID
         primaryInstanceID = selectedInstanceID
-        // Inactive plates: dimmed outlines in viewer space (the current
-        // plate IS the rendered bed grid).
+        // Desktop shows ONLY the current plate (no ghost outlines of the
+        // other plates, no off-plate objects — they confused the 3D view;
+        // plate chips carry the per-plate object counts instead).
         currentPlateIndex = scene.currentPlate
         plateOutlineVertices = []
-        let dim = SIMD4<Float>(0.35, 0.38, 0.45, 1)
-        for plate in scene.plates where plate.index != scene.currentPlate {
-            let a = CoordinateMapper.viewerPoint(
-                fromEngine: SIMD3(
-                    plate.origin.x, plate.origin.y, 0
-                ),
-                bedCenter: bed.center
-            )
-            let b = CoordinateMapper.viewerPoint(
-                fromEngine: SIMD3(
-                    plate.origin.x + plate.size.x,
-                    plate.origin.y + plate.size.y, 0
-                ),
-                bedCenter: bed.center
-            )
-            let lo = SIMD3(min(a.x, b.x), 0.2, min(a.z, b.z))
-            let hi = SIMD3(max(a.x, b.x), 0.2, max(a.z, b.z))
-            let p00 = SIMD3(lo.x, lo.y, lo.z)
-            let p10 = SIMD3(hi.x, lo.y, lo.z)
-            let p11 = SIMD3(hi.x, lo.y, hi.z)
-            let p01 = SIMD3(lo.x, lo.y, hi.z)
-            for edge in [(p00, p10), (p10, p11), (p11, p01), (p01, p00)] {
-                plateOutlineVertices.append(VertexPC(position: edge.0, color: dim))
-                plateOutlineVertices.append(VertexPC(position: edge.1, color: dim))
-            }
-        }
         selectedInstanceIDs = rebuilt.flatMap { object in
             object.instances.filter(\.selected).map {
                 (objectID: object.objectID, instanceID: $0.instanceID)
@@ -602,6 +578,8 @@ final class Renderer: NSObject, MTKViewDelegate {
     /// Frames the camera on the combined scene bbox (call after import).
     /// Desktop view reset: fit the focused BED (current plate) on screen —
     /// not a tight zoom on the objects.
+    /// Desktop view reset: fit the focused BED (current plate) on screen —
+    /// not a tight zoom on the objects. Animated by OrbitCamera.tick.
     func frameBed() {
         guard bed.maxX > bed.minX, bed.maxY > bed.minY else { return }
         let center = bed.center
@@ -617,17 +595,31 @@ final class Renderer: NSObject, MTKViewDelegate {
             bbMax = simd_max(bbMax, point)
         }
         let maxDim = max(bbMax.x - bbMin.x, bbMax.y - bbMin.y, bbMax.z - bbMin.z)
-        camera.target = SIMD3((bbMin.x + bbMax.x) * 0.5, 0, (bbMin.z + bbMax.z) * 0.5)
-        camera.distance = min(max(maxDim * 1.6, 110), 1400)
-        camera.pitch = 0.42
-        camera.yaw = -0.65
+        camera.animate(
+            target: SIMD3((bbMin.x + bbMax.x) * 0.5, 0, (bbMin.z + bbMax.z) * 0.5),
+            distance: min(max(maxDim * 1.6, 110), 1400),
+            yaw: -0.65,
+            pitch: 0.42
+        )
     }
 
     func frameScene() {
+        // Desktop framing: the FULL PLATE is the floor (never a tight
+        // content zoom — that jarred the camera on every action); content
+        // outside the bed is unioned in so nothing vanishes.
         var bbMin = SIMD3<Float>(repeating: .infinity)
         var bbMax = SIMD3<Float>(repeating: -.infinity)
-        var any = false
-        // Desktop frames the CURRENT plate's content, never other plates'.
+        if bed.maxX > bed.minX, bed.maxY > bed.minY {
+            let center = bed.center
+            func corner(_ x: Float, _ y: Float) -> SIMD3<Float> {
+                CoordinateMapper.viewerPoint(fromEngine: SIMD3(x, y, 0), bedCenter: center)
+            }
+            for point in [corner(bed.minX, bed.minY), corner(bed.maxX, bed.minY),
+                          corner(bed.maxX, bed.maxY), corner(bed.minX, bed.maxY)] {
+                bbMin = simd_min(bbMin, point)
+                bbMax = simd_max(bbMax, point)
+            }
+        }
         for obj in objects {
             for inst in obj.instances where inst.plate == currentPlateIndex {
                 let m = inst.model
@@ -644,32 +636,18 @@ final class Renderer: NSObject, MTKViewDelegate {
                                  (m * SIMD4(c.x, c.y, c.z, 1)).z)
                     bbMin = simd_min(bbMin, w)
                     bbMax = simd_max(bbMax, w)
-                    any = true
                 }
             }
         }
-        // Desktop frames the CURRENT plate's content, never other plates';
-        // an EMPTY plate still frames — the plate box itself (the bed grid
-        // already anchors to the current plate's origin).
-        if !any, bed.maxX > bed.minX, bed.maxY > bed.minY {
-            let center = bed.center
-            func corner(_ x: Float, _ y: Float) -> SIMD3<Float> {
-                CoordinateMapper.viewerPoint(fromEngine: SIMD3(x, y, 0), bedCenter: center)
-            }
-            for point in [corner(bed.minX, bed.minY), corner(bed.maxX, bed.minY),
-                          corner(bed.maxX, bed.maxY), corner(bed.minX, bed.maxY)] {
-                bbMin = simd_min(bbMin, point)
-                bbMax = simd_max(bbMax, point)
-                any = true
-            }
-        }
-        guard any else { return }
+        guard bbMin.x <= bbMax.x else { return }
         let size = bbMax - bbMin
         let maxDim = max(size.x, max(size.y, size.z))
-        camera.target = (bbMin + bbMax) * 0.5 * SIMD3(1, 0.9, 1)
-        camera.distance = min(max(maxDim * 2.6, 110), 1400)
-        camera.pitch = 0.42
-        camera.yaw = -0.65
+        camera.animate(
+            target: (bbMin + bbMax) * 0.5 * SIMD3(1, 0.6, 1),
+            distance: min(max(maxDim * 1.7, 110), 1400),
+            yaw: -0.65,
+            pitch: 0.42
+        )
     }
 
     // MARK: Thumbnails (offscreen, desktop G-code/3MF plate thumbnails)
@@ -1228,6 +1206,12 @@ final class Renderer: NSObject, MTKViewDelegate {
             return
         }
 
+        let frameTime = Float(CACurrentMediaTime())
+        if let last = lastFrameTime {
+            camera.tick(deltaTime: min(max(frameTime - last, 0), 0.1))
+        }
+        lastFrameTime = frameTime
+
         let aspect = Float(view.drawableSize.width / max(view.drawableSize.height, 1))
         let viewProj = camera.projection(aspect: aspect) * camera.viewMatrix
 
@@ -1275,7 +1259,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         for obj in objects {
             guard obj.indexCount > 0, !obj.instances.isEmpty else { continue }
             encoder.setVertexBuffer(obj.vb, offset: 0, index: 0)
-            for inst in obj.instances {
+            for inst in obj.instances where inst.plate == currentPlateIndex {
                 let model = inst.model
                 cubeUniforms.mvp = viewProj * model
                 cubeUniforms.model = model
@@ -1306,7 +1290,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         for obj in objects {
             for draw in obj.volumes where draw.indexCount > 0 {
                 encoder.setVertexBuffer(draw.vb, offset: 0, index: 0)
-                for inst in obj.instances {
+                for inst in obj.instances where inst.plate == currentPlateIndex {
                     cubeUniforms.mvp = viewProj * inst.model
                     cubeUniforms.model = inst.model
                     cubeUniforms.color = obj.selectedVolumeID == draw.volumeID

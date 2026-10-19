@@ -52,6 +52,161 @@ struct PlateTabView: View {
         )
     }
 
+    /// Bottom bar stack: plate chips, filament bar, manipulation panel.
+    @ViewBuilder
+    private var bottomBars: some View {
+        VStack(alignment: .leading, spacing: 8) {
+        PlateBar(
+            plates: document.plates,
+            currentID: document.currentPlate?.id,
+            isBusy: document.isBusy || document.isMutating,
+            onSelect: { id in Task { await document.selectPlate(id) } },
+            onAdd: { Task { await document.addPlate() } },
+            onRename: { plate in
+                plateRenameText = plate.name
+                plateRenameTarget = plate.id
+            },
+            onToggleLock: { plate in
+                Task { await document.lockPlate(plate.id, locked: !plate.locked) }
+            },
+            onDuplicate: { plate in
+                Task { await document.duplicatePlate(plate.id) }
+            },
+            onMoveFront: { plate in
+                Task { await document.movePlateToFront(plate.id) }
+            },
+            onDelete: { plate in
+                Task { await document.deletePlate(plate.id) }
+            }
+        )
+        .frame(maxWidth: .infinity, alignment: .leading)
+        FilamentBar(
+            slots: environment.presets.filamentSlots,
+            isBusy: environment.presets.isSelecting,
+            onAdd: { Task { await environment.presets.addFilament() } },
+            onRemove: { slot in Task { await environment.presets.removeFilament(slot: slot) } },
+            onSelectPreset: { slot, name in
+                Task { await environment.presets.selectFilamentPreset(slot: slot, name: name) }
+            },
+            onSetColour: { slot, colour in
+                Task { await environment.presets.setFilamentColour(slot: slot, colour: colour) }
+            },
+            filamentPresets: environment.presets.filaments,
+            onEditFlushVolumes: { flushPresented = true }
+        )
+        .sheet(isPresented: $flushPresented) {
+            FlushingVolumesSheet(
+                slots: environment.presets.filamentSlots,
+                editedMatrix: environment.presets
+                    .editedConfigs[.machine]?["flush_volumes_matrix"],
+                editedMultiplier: environment.presets
+                    .editedConfigs[.machine]?["flush_multiplier"],
+                onApply: { matrix, multiplier in
+                    Task {
+                        await environment.presets.setValue(
+                            kind: .machine, key: "flush_volumes_matrix",
+                            serializedValue: matrix
+                        )
+                        await environment.presets.setValue(
+                            kind: .machine, key: "flush_multiplier",
+                            serializedValue: multiplier
+                        )
+                    }
+                }
+            )
+        }
+        if let selection = document.selection,
+           let object = document.scene?.object(id: selection.objectID),
+           let transform = document.selectedDisplayTransform {
+            ManipulationPanel(
+                mode: gizmoMode,
+                header: PanelHeader(
+                    name: object.name,
+                    instanceOrdinal: (object.instances.firstIndex { $0.id == selection.instanceID } ?? 0) + 1,
+                    instanceCount: object.instances.count,
+                    size: document.selectedSize ?? .zero,
+                    selectionCount: document.selectedGroup.count,
+                    volumeName: selection.volumeID.flatMap { volumeID in
+                        object.volumes.first { $0.id == volumeID }?.name
+                    },
+                    volumeRole: selection.volumeID.flatMap { volumeID in
+                        object.volumes.first { $0.id == volumeID }?.role
+                    }
+                ),
+                transform: transform,
+                meshSize: object.mesh.bounds.size,
+                bedCenter: SIMD2(Double(bed.center.x), Double(bed.center.y)),
+                rotationAxis: $rotationAxis,
+                isBusy: document.isBusy,
+                extruder: object.extruder,
+                filamentSlots: environment.presets.filamentSlots,
+                onSetExtruder: { extruder in
+                    let target: VolumeID? = selection.volumeID
+                    Task {
+                        // Desktop Set-extruder: 0 = default. On a part
+                        // it sets the VOLUME extruder, else the object's.
+                        if extruder == 0 {
+                            await document.eraseSetting(
+                                objectID: object.id, volumeID: target, key: "extruder"
+                            )
+                        } else {
+                            await document.setSetting(
+                                objectID: object.id, volumeID: target,
+                                key: "extruder", value: String(extruder)
+                            )
+                        }
+                    }
+                },
+                actions: ManipulationActions(
+                    setTransform: { newTransform, label in
+                        Task { await document.setSelectedTransform(newTransform, label: label) }
+                    },
+                    rotate: { axis, degrees in
+                        Task { await document.rotateSelected(axis: axis, degrees: degrees) }
+                    },
+                    resetRotation: {
+                        Task { await document.resetRotation() }
+                    }
+                ),
+                volume: selection.volumeID.flatMap { volumeID in
+                    object.volumes.first { $0.id == volumeID }.map { volume in
+                        SelectedVolumeInfo(
+                            objectID: object.id,
+                            volumeID: volume.id,
+                            name: volume.name,
+                            role: volume.role,
+                            overrideCount: volume.overrideCount
+                        )
+                    }
+                },
+                volumeActions: selection.volumeID.map { volumeID in
+                    VolumeActions(
+                        editSettings: {
+                            settingsTarget = SettingsTarget(
+                                objectID: object.id, volumeID: volumeID,
+                                title: object.volumes.first { $0.id == volumeID }?.name ?? "Part"
+                            )
+                        },
+                        changeType: { role in
+                            Task {
+                                await document.setVolumeType(
+                                    role, volumeID: volumeID, objectID: object.id
+                                )
+                            }
+                        },
+                        delete: {
+                            Task {
+                                await document.deleteVolume(volumeID, objectID: object.id)
+                            }
+                        }
+                    )
+                }
+            )
+            .padding(.horizontal, 12)
+            .padding(.bottom, 8)
+        }
+        }
+    }
     var body: some View {
         ZStack {
             canvas.ignoresSafeArea()
@@ -85,155 +240,13 @@ struct PlateTabView: View {
                 .padding(.trailing, 12)
                 .padding(.top, 8)
                 Spacer()
-                PlateBar(
-                    plates: document.plates,
-                    currentID: document.currentPlate?.id,
-                    isBusy: document.isBusy || document.isMutating,
-                    onSelect: { id in Task { await document.selectPlate(id) } },
-                    onAdd: { Task { await document.addPlate() } },
-                    onRename: { plate in
-                        plateRenameText = plate.name
-                        plateRenameTarget = plate.id
-                    },
-                    onToggleLock: { plate in
-                        Task { await document.lockPlate(plate.id, locked: !plate.locked) }
-                    },
-                    onDuplicate: { plate in
-                        Task { await document.duplicatePlate(plate.id) }
-                    },
-                    onMoveFront: { plate in
-                        Task { await document.movePlateToFront(plate.id) }
-                    },
-                    onDelete: { plate in
-                        Task { await document.deletePlate(plate.id) }
-                    }
-                )
-                .frame(maxWidth: .infinity, alignment: .leading)
-                FilamentBar(
-                    slots: environment.presets.filamentSlots,
-                    isBusy: environment.presets.isSelecting,
-                    onAdd: { Task { await environment.presets.addFilament() } },
-                    onRemove: { slot in Task { await environment.presets.removeFilament(slot: slot) } },
-                    onSelectPreset: { slot, name in
-                        Task { await environment.presets.selectFilamentPreset(slot: slot, name: name) }
-                    },
-                    onSetColour: { slot, colour in
-                        Task { await environment.presets.setFilamentColour(slot: slot, colour: colour) }
-                    },
-                    filamentPresets: environment.presets.filaments,
-                    onEditFlushVolumes: { flushPresented = true }
-                )
-                .sheet(isPresented: $flushPresented) {
-                    FlushingVolumesSheet(
-                        slots: environment.presets.filamentSlots,
-                        editedMatrix: environment.presets
-                            .editedConfigs[.machine]?["flush_volumes_matrix"],
-                        editedMultiplier: environment.presets
-                            .editedConfigs[.machine]?["flush_multiplier"],
-                        onApply: { matrix, multiplier in
-                            Task {
-                                await environment.presets.setValue(
-                                    kind: .machine, key: "flush_volumes_matrix",
-                                    serializedValue: matrix
-                                )
-                                await environment.presets.setValue(
-                                    kind: .machine, key: "flush_multiplier",
-                                    serializedValue: multiplier
-                                )
-                            }
-                        }
-                    )
-                }
-                if let selection = document.selection,
-                   let object = document.scene?.object(id: selection.objectID),
-                   let transform = document.selectedDisplayTransform {
-                    ManipulationPanel(
-                        mode: gizmoMode,
-                        header: PanelHeader(
-                            name: object.name,
-                            instanceOrdinal: (object.instances.firstIndex { $0.id == selection.instanceID } ?? 0) + 1,
-                            instanceCount: object.instances.count,
-                            size: document.selectedSize ?? .zero,
-                            selectionCount: document.selectedGroup.count,
-                            volumeName: selection.volumeID.flatMap { volumeID in
-                                object.volumes.first { $0.id == volumeID }?.name
-                            },
-                            volumeRole: selection.volumeID.flatMap { volumeID in
-                                object.volumes.first { $0.id == volumeID }?.role
-                            }
-                        ),
-                        transform: transform,
-                        meshSize: object.mesh.bounds.size,
-                        bedCenter: SIMD2(Double(bed.center.x), Double(bed.center.y)),
-                        rotationAxis: $rotationAxis,
-                        isBusy: document.isBusy,
-                        extruder: object.extruder,
-                        filamentSlots: environment.presets.filamentSlots,
-                        onSetExtruder: { extruder in
-                            let target: VolumeID? = selection.volumeID
-                            Task {
-                                // Desktop Set-extruder: 0 = default. On a part
-                                // it sets the VOLUME extruder, else the object's.
-                                if extruder == 0 {
-                                    await document.eraseSetting(
-                                        objectID: object.id, volumeID: target, key: "extruder"
-                                    )
-                                } else {
-                                    await document.setSetting(
-                                        objectID: object.id, volumeID: target,
-                                        key: "extruder", value: String(extruder)
-                                    )
-                                }
-                            }
-                        },
-                        actions: ManipulationActions(
-                            setTransform: { newTransform, label in
-                                Task { await document.setSelectedTransform(newTransform, label: label) }
-                            },
-                            rotate: { axis, degrees in
-                                Task { await document.rotateSelected(axis: axis, degrees: degrees) }
-                            },
-                            resetRotation: {
-                                Task { await document.resetRotation() }
-                            }
-                        ),
-                        volume: selection.volumeID.flatMap { volumeID in
-                            object.volumes.first { $0.id == volumeID }.map { volume in
-                                SelectedVolumeInfo(
-                                    objectID: object.id,
-                                    volumeID: volume.id,
-                                    name: volume.name,
-                                    role: volume.role,
-                                    overrideCount: volume.overrideCount
-                                )
-                            }
-                        },
-                        volumeActions: selection.volumeID.map { volumeID in
-                            VolumeActions(
-                                editSettings: {
-                                    settingsTarget = SettingsTarget(
-                                        objectID: object.id, volumeID: volumeID,
-                                        title: object.volumes.first { $0.id == volumeID }?.name ?? "Part"
-                                    )
-                                },
-                                changeType: { role in
-                                    Task {
-                                        await document.setVolumeType(
-                                            role, volumeID: volumeID, objectID: object.id
-                                        )
-                                    }
-                                },
-                                delete: {
-                                    Task {
-                                        await document.deleteVolume(volumeID, objectID: object.id)
-                                    }
-                                }
-                            )
-                        }
-                    )
-                    .padding(.horizontal, 12)
-                    .padding(.bottom, 8)
-                }
+                // The bottom stack clears the left gizmo rail (52pt tools +
+                // 12pt leading + 12pt gap) and the trailing screen edge:
+                // running to x=0 put the plate chips UNDER the rail and
+                // clipped them at the screen edge (IMG_1045/1046).
+                bottomBars
+                    .padding(.leading, 76)
+                    .padding(.trailing, 12)
             }
         }
         .fileImporter(
@@ -1727,18 +1740,26 @@ private struct ManipulationPanel: View {
                 Text(header.volumeName ?? header.name)
                     .font(.subheadline.weight(.semibold))
                     .lineLimit(1)
-                Text("instance \(header.instanceOrdinal)/\(header.instanceCount)")
+                    .truncationMode(.middle)
+                    .layoutPriority(1)
+                Text("inst. \(header.instanceOrdinal)/\(header.instanceCount)")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                    .fixedSize()
                 if header.selectionCount > 1 {
                     Text("+\(header.selectionCount - 1) selected")
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(Color.accentColor)
+                        .fixedSize()
                 }
-                Spacer()
+                Spacer(minLength: 12)
+                // One line, never wrapped mid-measurement (IMG_1045: the
+                // string broke after the second × when squeezed).
                 Text(String(format: "%.1f × %.1f × %.1f mm", header.size.x, header.size.y, header.size.z))
                     .font(.caption.monospaced())
                     .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .fixedSize()
                 if showsExtruderMenu {
                     Menu {
                         Button {
@@ -1979,11 +2000,11 @@ private struct RotatePanel: View {
         relativeFocused = false
     }
 
-    /// Engine Euler angle as a 0–359.9 display value.
+    /// Engine Euler angle as a 0–359.9 display value (never "-0.0").
     static func degrees(_ radians: Double) -> String {
         var value = (radians * 180 / .pi).truncatingRemainder(dividingBy: 360)
         if value < 0 { value += 360 }
-        if value >= 359.95 { value = 0 }
+        if abs(value) < 0.05 || value >= 359.95 { value = 0 }
         return String(format: "%.1f", value)
     }
 }
