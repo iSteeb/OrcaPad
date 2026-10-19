@@ -34,7 +34,20 @@ struct PlateTabView: View {
     private var document: DocumentStore { environment.document }
 
     private var bed: EngineBed {
-        environment.presets.printVolume.map(EngineBed.init) ?? EngineBed.fallback
+        let base = environment.presets.printVolume.map(EngineBed.init) ?? EngineBed.fallback
+        // The rendered bed IS the current plate (desktop): shift the
+        // printer's bed box to the selected plate's world origin so the
+        // grid, gestures and camera anchor there; other plates keep their
+        // true relative offsets beside it.
+        guard let plate = document.currentPlate else { return base }
+        let width = plate.size.x > 0 ? plate.size.x : base.maxX - base.minX
+        let depth = plate.size.y > 0 ? plate.size.y : base.maxY - base.minY
+        return EngineBed(
+            minX: plate.origin.x,
+            minY: plate.origin.y,
+            maxX: plate.origin.x + width,
+            maxY: plate.origin.y + depth
+        )
     }
 
     var body: some View {
