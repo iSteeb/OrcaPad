@@ -349,3 +349,22 @@ in ~/xtool-cheatsheet.md — link, don't duplicate.)
 - iOS 17+ ATS blocks plain-HTTP IP-address hosts by default; LAN printers
   need NSAllowsLocalNetworking + private CIDR NSExceptionDomains (and
   NSAllowsArbitraryLoadsInWebContent for the printer web view).
+
+### Config well-formedness (2026-10-15, TestFlight 0.2.0 crash)
+- The engine's ToolOrdering copies `filament_count^2` floats per nozzle from
+  `flush_volumes_matrix` with NO size guard — an empty vector = memmove from
+  a null buffer = guaranteed SIGSEGV ("crashes when slicing", iPad11,4,
+  0.2.0 build 5.1). Desktop never guards this either; it survives on three
+  pipeline properties: print_config_def defaults always present,
+  `PresetBundle::full_config()` normalizing per-filament vectors
+  (repeat-last-value padding to the extruder count), and GUI editors never
+  writing shape-invalid vectors.
+- The correct fix class is NOT a per-option band-aid at the crash site:
+  (1) fix OUR poisoning source (set_value/preset-save writing empty
+  vectors — same class as the enum keys_map empty-serialization), and
+  (2) one general config finalization at the Bridge slice boundary applying
+  desktop's normalization semantics to EVERY vector option + matrix-shape
+  validation, with repairs surfaced as slice-report warnings so future
+  poisoning is observable. Engine receives only desktop-grade configs.
+- Never "catch" engine SIGSEGVs at the ABI boundary (signal handlers):
+  post-segfault engine state is untrustworthy and it hides real bugs.

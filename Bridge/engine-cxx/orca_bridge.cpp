@@ -4517,6 +4517,117 @@ struct OrcapadSliceAccumulator {
     int64_t gcode_bytes = 0;
 };
 
+// --- config finalization (desktop PresetBundle::full_config semantics) -----
+
+/// Per-filament vector options the desktop bundle pads to the filament
+/// count (repeat-last-value); matrix-shaped options follow below. Everything
+/// the engine indexes by filament count must be structurally valid BEFORE
+/// print.apply: ToolOrdering (and friends) copy straight out of these
+/// vectors — an empty/short one crashed slicing with a null memmove
+/// (TestFlight 0.2.0). Repairs are reported, never silent.
+static const char *const orcapad_per_filament_keys[] = {
+    "filament_colour", "filament_diameter", "filament_flow_ratio",
+    "filament_density", "filament_type", "filament_soluble",
+    "filament_cost", "filament_settings_id", "filament_ids",
+    "filament_max_volumetric_speed", "filament_minimal_purge_on_wipe_tower",
+    "filament_load_time", "filament_unload_time", "filament_toolchange_delay",
+    "filament_cooling_moves", "filament_cooling_initial_speed",
+    "filament_cooling_final_speed", "filament_ramming_parameters",
+    "filament_multitool_ramming", "filament_staging_times",
+    "filament_retraction_length", "filament_retraction_speed",
+    "filament_deretraction_speed", "filament_retract_restart_extra",
+    "filament_retract_before_wipe", "filament_wipe", "filament_retraction_layer_change",
+    "filament_travel_lift",
+};
+
+/// Applies desktop's normalization to one config: pads per-filament vectors
+/// to the filament count (repeat last value, like full_config()), and sizes
+/// the flush matrix (filaments^2 per nozzle; upstream default 280/0) and
+/// flush vector. Returns one warning per repair.
+static std::vector<OrcapadWarning> orcapad_finalize_config(
+    Slic3r::DynamicPrintConfig &config) {
+    std::vector<OrcapadWarning> repairs;
+    auto filament_count = [&]() -> size_t {
+        const auto *colours = config.option<Slic3r::ConfigOptionStrings>("filament_colour");
+        return colours && !colours->values.empty() ? colours->values.size() : 1;
+    };
+    const size_t filaments = filament_count();
+    for (const char *key : orcapad_per_filament_keys) {
+        if (!config.has(key)) continue;
+        const Slic3r::ConfigOption *option = config.option(key);
+        size_t size = 0;
+        if (const auto *strings = dynamic_cast<const Slic3r::ConfigOptionStrings *>(option))
+            size = strings->values.size();
+        else if (const auto *floats = dynamic_cast<const Slic3r::ConfigOptionFloats *>(option))
+            size = floats->values.size();
+        else if (const auto *ints = dynamic_cast<const Slic3r::ConfigOptionInts *>(option))
+            size = ints->values.size();
+        else if (const auto *bools = dynamic_cast<const Slic3r::ConfigOptionBools *>(option))
+            size = bools->values.size();
+        else continue;
+        if (size == 0 || size >= filaments) continue;
+        if (auto *strings = dynamic_cast<Slic3r::ConfigOptionStrings *>(config.option(key))) {
+            while (strings->values.size() < filaments) strings->values.push_back(strings->values.back());
+        } else if (auto *floats = dynamic_cast<Slic3r::ConfigOptionFloats *>(config.option(key))) {
+            while (floats->values.size() < filaments) floats->values.push_back(floats->values.back());
+        } else if (auto *ints = dynamic_cast<Slic3r::ConfigOptionInts *>(config.option(key))) {
+            while (ints->values.size() < filaments) ints->values.push_back(ints->values.back());
+        } else if (auto *bools = dynamic_cast<Slic3r::ConfigOptionBools *>(config.option(key))) {
+            while (bools->values.size() < filaments) bools->values.push_back(bools->values.back());
+        } else {
+            continue;
+        }
+        repairs.push_back({ORCA_SLICE_WARNING_WARNING, ORCA_SLICE_SOURCE_VALIDATE,
+                           key, "vector had " + std::to_string(size) +
+                               " value(s) for " + std::to_string(filaments) +
+                               " filament(s); padded with the last value", ""});
+    }
+    // flush matrix: filaments^2 per nozzle (280 between different
+    // filaments, 0 on the diagonal — upstream PrintConfig defaults)
+    if (auto *nozzles = config.option<Slic3r::ConfigOptionFloats>("nozzle_diameter")) {
+        const size_t nozzle_count = nozzles->values.empty() ? 1 : nozzles->values.size();
+        if (auto *matrix = config.option<Slic3r::ConfigOptionFloats>("flush_volumes_matrix")) {
+            const size_t need = filaments * filaments * nozzle_count;
+            if (matrix->values.size() < need) {
+                std::vector<double> repaired(need, 280.0);
+                for (size_t nozzle = 0; nozzle < nozzle_count; ++nozzle)
+                    for (size_t row = 0; row < filaments; ++row)
+                        repaired[nozzle * filaments * filaments + row * filaments + row] = 0.0;
+                matrix->values = std::move(repaired);
+                repairs.push_back({ORCA_SLICE_WARNING_WARNING, ORCA_SLICE_SOURCE_VALIDATE,
+                                   "flush_volumes_matrix",
+                                   "flush matrix had too few values; reset to the "
+                                   "default 280 mm\u00b3 purge volumes", ""});
+            }
+        }
+    }
+    return repairs;
+}
+
+/// Appends finalized-config repairs to an already-filled ABI report.
+static void orcapad_report_append_warnings(
+    orca_slice_report *report, const std::vector<OrcapadWarning> &warnings) {
+    if (!report || warnings.empty()) return;
+    orca_slice_warning *grown = static_cast<orca_slice_warning *>(
+        std::realloc(report->warnings,
+                     (report->warning_count + warnings.size()) * sizeof(orca_slice_warning)));
+    if (!grown) return;
+    report->warnings = grown;
+    for (const OrcapadWarning &warning : warnings) {
+        orca_slice_warning &slot = report->warnings[report->warning_count];
+        slot.level = warning.level;
+        slot.source = warning.source;
+        slot.code = orcapad_empty_string();
+        slot.message = orcapad_empty_string();
+        slot.detail = orcapad_empty_string();
+        if (orcapad_copy_string(warning.code.c_str(), &slot.code) &&
+            orcapad_copy_string(warning.message.c_str(), &slot.message) &&
+            orcapad_copy_string(warning.detail.c_str(), &slot.detail)) {
+            ++report->warning_count;
+        }
+    }
+}
+
 static orca_result orcapad_run_print(const char *operation,
                                      Slic3r::Print &print,
                                      const char *gcode_path,
@@ -4672,13 +4783,17 @@ orca_result orca_slice_to_gcode(const char *stl_path, const char *gcode_path,
         Slic3r::DynamicPrintConfig config =
             Slic3r::DynamicPrintConfig::full_print_config();
         orcapad_config_overlays(config);
+        const std::vector<OrcapadWarning> repairs = orcapad_finalize_config(config);
 
         if (progress) progress(2, "applying config", ctx);
         Slic3r::Print print;
         print.apply(model, std::move(config));
         print.is_BBL_printer() = false;
-        return orcapad_run_print(operation, print, gcode_path, progress, ctx,
-                                 job, out_report);
+        const orca_result sliced = orcapad_run_print(operation, print, gcode_path, progress, ctx,
+                                                     job, out_report);
+        if (sliced.code == ORCA_STATUS_OK)
+            orcapad_report_append_warnings(out_report, repairs);
+        return sliced;
     });
 }
 
@@ -4743,6 +4858,7 @@ orca_result orca_plater_slice_to_gcode(orca_plater *plater,
         Slic3r::DynamicPrintConfig config =
             Slic3r::DynamicPrintConfig::full_print_config();
         orcapad_config_overlays(config);
+        const std::vector<OrcapadWarning> repairs = orcapad_finalize_config(config);
         if (progress) progress(1, "applying plater", ctx);
         Slic3r::Model plate_model;
         const orca_result filtered =
@@ -4755,8 +4871,11 @@ orca_result orca_plater_slice_to_gcode(orca_plater *plater,
         print.set_plate_origin(
             orcapad_plate_origin(*plater, plater->current_plate));
         print.set_plate_index(plater->current_plate);
-        return orcapad_run_print(operation, print, gcode_path, progress, ctx,
-                                 job, out_report);
+        const orca_result sliced = orcapad_run_print(operation, print, gcode_path, progress, ctx,
+                                                     job, out_report);
+        if (sliced.code == ORCA_STATUS_OK)
+            orcapad_report_append_warnings(out_report, repairs);
+        return sliced;
     });
 }
 
@@ -4782,6 +4901,7 @@ orca_result orca_plater_slice_to_gcode_with_presets(
 
     return orcapad_guard(operation, [&]() -> orca_result {
         Slic3r::DynamicPrintConfig config = presets->bundle->full_config();
+        const std::vector<OrcapadWarning> repairs = orcapad_finalize_config(config);
         if (progress) progress(1, "applying presets", ctx);
         Slic3r::Model plate_model;
         const orca_result filtered =
@@ -4794,8 +4914,11 @@ orca_result orca_plater_slice_to_gcode_with_presets(
         print.set_plate_origin(
             orcapad_plate_origin(*plater, plater->current_plate));
         print.set_plate_index(plater->current_plate);
-        return orcapad_run_print(operation, print, gcode_path, progress, ctx,
-                                 job, out_report);
+        const orca_result sliced = orcapad_run_print(operation, print, gcode_path, progress, ctx,
+                                                     job, out_report);
+        if (sliced.code == ORCA_STATUS_OK)
+            orcapad_report_append_warnings(out_report, repairs);
+        return sliced;
     });
 }
 
@@ -4889,6 +5012,11 @@ static orca_result orcapad_slice_all(orca_plater *plater,
                 ? presets->bundle->full_config()
                 : Slic3r::DynamicPrintConfig::full_print_config();
             if (!presets) orcapad_config_overlays(config);
+            const std::vector<OrcapadWarning> repairs =
+                orcapad_finalize_config(config);
+            if (!repairs.empty())
+                aggregate.warnings.insert(
+                    aggregate.warnings.end(), repairs.begin(), repairs.end());
 
             Slic3r::Print print;
             print.apply(plate_model, std::move(config));

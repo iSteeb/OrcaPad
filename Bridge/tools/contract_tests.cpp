@@ -2964,6 +2964,29 @@ static void test_slice_with_presets(const std::string &dir,
                         "slice with presets");
     CHECK_EQ(snapshot_revision(plater), revision); // slices never mutate
 
+    // --- config finalization regression (TestFlight 0.2.0 crash class) ---
+    // A short/empty flush matrix + multi-filament config memmoved from a
+    // null buffer in ToolOrdering (0.2.0, iPad11,4). The Bridge finalizes
+    // every slice config (desktop full_config semantics) before the engine
+    // touches it. Note: the bundle merge derives the filament count from
+    // the SELECTED FILAMENT PRESETS, so the full multi-filament repair
+    // path is exercised by the multi-filament suite (select_filaments);
+    // here we pin that machine-preset edits never break slicing.
+    {
+        GUARD(fw0, orca_presets_set_value(presets, 0, "flush_volumes_matrix",
+                                         "280"));
+        expect_ok(fw0, "short flush matrix");
+        const std::string repaired = dir + "/presets-repaired.gcode";
+        ProgressRecord repair_progress;
+        GUARD(fw2, orca_plater_slice_to_gcode_with_presets(
+                      plater, presets, repaired.c_str(), progress_trampoline,
+                      &repair_progress, nullptr, &report));
+        expect_ok(fw2, "slice with short flush matrix");
+        orca_slice_report_dispose(&report);
+        GUARD(fw3, orca_presets_reset_kind(presets, 0));
+        expect_ok(fw3, "reset machine preset");
+    }
+
     // preset-backed output must NOT be the defaults overlay: the gcode
     // carries the selected machine's printable area from full_config()
     // (basic parity probe — exact values come from device verification)

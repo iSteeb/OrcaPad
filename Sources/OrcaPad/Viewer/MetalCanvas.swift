@@ -143,6 +143,11 @@ struct MetalCanvas: UIViewRepresentable {
         if scene.cameraRequest.id != coordinator.lastCameraRequest {
             coordinator.lastCameraRequest = scene.cameraRequest.id
             coordinator.renderer?.camera.apply(scene.cameraRequest.preset)
+            // View reset (desktop): Default View also re-fits the focused
+            // bed on screen instead of keeping a stale zoom.
+            if scene.cameraRequest.preset == .defaultValue {
+                coordinator.renderer?.frameBed()
+            }
         }
     }
 

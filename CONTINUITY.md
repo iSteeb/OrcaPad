@@ -2,6 +2,17 @@
 
 ## PLAN
 
+- [2026-10-15 USER] Approved plan (execute -> release-0.5.0):
+  A1 camera reset = fit focused bed; A2 general config finalization at the
+  Bridge slice boundary (desktop full_config semantics: per-filament vector
+  padding, matrix-shape validation, repairs as report warnings) + find/fix
+  the preset-save vector poisoning + regression tests; A3 desktop-parity
+  pass over shipped features; B multi-filament cluster (B1 Bridge filament
+  list + selection, B2 plater filament bar, B3 object/part extruder
+  assignment + per-extruder colors, B4 flushing volumes editor + per-object
+  flush-into, B5 per-extruder vector editors); tag release-0.5.0 after all
+  gates. NO upstream writeup.
+
 - [2026-10-14 USER] Feature priority = app "feels complete": high-traffic
   interactions (transforms, core loop) BEFORE raw parity %. Release flow:
   tag after local gates, NO pre-tag device install - iPoke gets builds via

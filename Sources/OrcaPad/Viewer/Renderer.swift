@@ -588,6 +588,29 @@ final class Renderer: NSObject, MTKViewDelegate {
     ] = []
 
     /// Frames the camera on the combined scene bbox (call after import).
+    /// Desktop view reset: fit the focused BED (current plate) on screen —
+    /// not a tight zoom on the objects.
+    func frameBed() {
+        guard bed.maxX > bed.minX, bed.maxY > bed.minY else { return }
+        let center = bed.center
+        func corner(_ x: Float, _ y: Float) -> SIMD3<Float> {
+            CoordinateMapper.viewerPoint(fromEngine: SIMD3(x, y, 0), bedCenter: center)
+        }
+        let corners = [corner(bed.minX, bed.minY), corner(bed.maxX, bed.minY),
+                       corner(bed.maxX, bed.maxY), corner(bed.minX, bed.maxY)]
+        var bbMin = SIMD3<Float>(repeating: .infinity)
+        var bbMax = SIMD3<Float>(repeating: -.infinity)
+        for point in corners {
+            bbMin = simd_min(bbMin, point)
+            bbMax = simd_max(bbMax, point)
+        }
+        let maxDim = max(bbMax.x - bbMin.x, bbMax.y - bbMin.y, bbMax.z - bbMin.z)
+        camera.target = SIMD3((bbMin.x + bbMax.x) * 0.5, 0, (bbMin.z + bbMax.z) * 0.5)
+        camera.distance = min(max(maxDim * 1.6, 110), 1400)
+        camera.pitch = 0.42
+        camera.yaw = -0.65
+    }
+
     func frameScene() {
         var bbMin = SIMD3<Float>(repeating: .infinity)
         var bbMax = SIMD3<Float>(repeating: -.infinity)
