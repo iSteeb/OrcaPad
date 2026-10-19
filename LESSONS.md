@@ -377,3 +377,16 @@ in ~/xtool-cheatsheet.md — link, don't duplicate.)
   the bundle config, then 60° — bundle-only reads miss per-object overrides.
 - When porting a desktop job, port its PARAMETER INITIALIZATION verbatim
   (init_arrange_params / OrientJob::prepare), not just the engine call.
+
+### UI direction from user feedback (2026-10-19, device round 2)
+- Multi-plate MUST stay visible: other plates render as dimmed outlined
+  beds WITH their (faded) objects beside the current plate — removing them
+  for "desktop parity" was wrong for this app's plate-grid model.
+- One wide pill top bar per tab is THE chrome pattern (Plate, Preview,
+  Device): Undo/Redo | Menu (file+objects) | Arrange | Tools; the left
+  gizmo rail is retired. Tools live in a collapsible bottom half-modal:
+  collapsed = touch manipulation with live readouts + axis chips,
+  expanded = numeric entry. Rotate: tapping the selected model cycles the
+  axis focus.
+- Never clamp UI to "what desktop does" when the user's model differs -
+  the plate grid and the touch manipulation flow are OrcaPad's own.

@@ -19,6 +19,27 @@ enum GizmoMode: String, CaseIterable, Sendable {
     /// Desktop rectangle selection: one-finger drag draws a marquee and
     /// selects every instance whose screen footprint it intersects.
     case select
+
+    /// Menu label + symbol for the Tools menu and the collapsible panel.
+    var menuLabel: String {
+        switch self {
+        case .move: return "Move"
+        case .rotate: return "Rotate"
+        case .scale: return "Scale"
+        case .layFlat: return "Lay flat"
+        case .select: return "Select"
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .move: return "arrow.up.and.down.and.arrow.left.and.right"
+        case .rotate: return "arrow.clockwise.circle"
+        case .scale: return "arrow.up.left.and.arrow.down.right"
+        case .layFlat: return "square.bottomhalf.filled"
+        case .select: return "rectangle.dashed"
+        }
+    }
 }
 
 /// One immutable instance draw derived from a revisioned scene snapshot.
@@ -555,11 +576,32 @@ final class Renderer: NSObject, MTKViewDelegate {
         appliedRevision = scene.revision
         primaryObjectID = selectedObjectID
         primaryInstanceID = selectedInstanceID
-        // Desktop shows ONLY the current plate (no ghost outlines of the
-        // other plates, no off-plate objects — they confused the 3D view;
-        // plate chips carry the per-plate object counts instead).
+        // Multi-plate visibility: the other plates render as dimmed
+        // outlined beds beside the current (gridded) plate.
         currentPlateIndex = scene.currentPlate
         plateOutlineVertices = []
+        let dim = SIMD4<Float>(0.35, 0.38, 0.45, 1)
+        for plate in scene.plates where plate.index != scene.currentPlate {
+            let a = CoordinateMapper.viewerPoint(
+                fromEngine: SIMD3(plate.origin.x, plate.origin.y, 0),
+                bedCenter: bed.center
+            )
+            let b = CoordinateMapper.viewerPoint(
+                fromEngine: SIMD3(plate.origin.x + plate.size.x,
+                                  plate.origin.y + plate.size.y, 0),
+                bedCenter: bed.center
+            )
+            let lo = SIMD3(min(a.x, b.x), 0.2, min(a.z, b.z))
+            let hi = SIMD3(max(a.x, b.x), 0.2, max(a.z, b.z))
+            let p00 = SIMD3(lo.x, lo.y, lo.z)
+            let p10 = SIMD3(hi.x, lo.y, lo.z)
+            let p11 = SIMD3(hi.x, lo.y, hi.z)
+            let p01 = SIMD3(lo.x, lo.y, hi.z)
+            for edge in [(p00, p10), (p10, p11), (p11, p01), (p01, p00)] {
+                plateOutlineVertices.append(VertexPC(position: edge.0, color: dim))
+                plateOutlineVertices.append(VertexPC(position: edge.1, color: dim))
+            }
+        }
         selectedInstanceIDs = rebuilt.flatMap { object in
             object.instances.filter(\.selected).map {
                 (objectID: object.objectID, instanceID: $0.instanceID)
@@ -1259,16 +1301,26 @@ final class Renderer: NSObject, MTKViewDelegate {
         for obj in objects {
             guard obj.indexCount > 0, !obj.instances.isEmpty else { continue }
             encoder.setVertexBuffer(obj.vb, offset: 0, index: 0)
-            for inst in obj.instances where inst.plate == currentPlateIndex {
+            // Other plates render DIMMED (multi-plate visibility); the
+            // current plate draws normally. Off-plate opacity handled by
+            // the color choice below.
+            for inst in obj.instances {
                 let model = inst.model
                 cubeUniforms.mvp = viewProj * model
                 cubeUniforms.model = model
-                cubeUniforms.color = inst.selected ? Renderer.selectedColor
+                var color = inst.selected ? Renderer.selectedColor
                     : (inst.printable ? Renderer.objectColor : Renderer.unprintableColor)
                 if !inst.selected, inst.printable,
                    inst.extruder >= 1, inst.extruder <= filamentColors.count {
-                    cubeUniforms.color = filamentColors[inst.extruder - 1]
+                    color = filamentColors[inst.extruder - 1]
                 }
+                if inst.plate != currentPlateIndex {
+                    // inactive plate: clearly visible but faded (alpha blend
+                    // would need the blend pipeline; darken toward bg)
+                    color = SIMD4<Float>(color.x * 0.45 + 0.03, color.y * 0.45 + 0.03,
+                                         color.z * 0.45 + 0.03, color.w)
+                }
+                cubeUniforms.color = color
                 cubeUniforms.normalSign = inst.mirrored ? -1 : 1
                 var cu = cubeUniforms
                 encoder.setVertexBytes(&cu, length: MemoryLayout<CubeUniforms>.stride, index: 1)
@@ -1290,7 +1342,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         for obj in objects {
             for draw in obj.volumes where draw.indexCount > 0 {
                 encoder.setVertexBuffer(draw.vb, offset: 0, index: 0)
-                for inst in obj.instances where inst.plate == currentPlateIndex {
+                for inst in obj.instances {
                     cubeUniforms.mvp = viewProj * inst.model
                     cubeUniforms.model = inst.model
                     cubeUniforms.color = obj.selectedVolumeID == draw.volumeID

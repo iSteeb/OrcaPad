@@ -158,6 +158,16 @@
 
 ## OUTCOMES
 
+- [2026-10-19] UI overhaul round 2 (user device feedback, 7 items):
+  multi-plate rendering restored (dimmed beds + faded objects); Plate tab
+  chrome = one wide pill (Undo/Redo | Menu(file+objects) | Arrange |
+  Tools), left rail removed; tools = collapsible half-modal (collapsed
+  touch / expanded numeric, tap-model cycles rotate axis); Preview tab
+  = same top pill (Scheme | View | Open | Share), left dock removed,
+  layer-slider hitboxes track-level (overlap bug fixed), legend off by
+  default; Device tab = same pill bar + PrusaLink (digest) beside
+  Duet/FlashAir. release-0.6.0.
+
 - [2026-10-19] Verification + UI pass: VERIFICATION.md records the
   feature-by-feature desktop-equivalence audit (62 features). 3 real
   divergences fixed (arrange distance default 0 brim-aware, fill-bed same,

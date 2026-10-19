@@ -20,6 +20,9 @@ struct PlateTabView: View {
     @State private var projectName = ""
     @State private var objectsPresented = false
     @State private var gizmoMode: GizmoMode = .move
+    /// The tools half-modal: collapsed = touch manipulation, expanded =
+    /// numeric entry (per user spec).
+    @State private var toolsExpanded = false
     @State private var rotationAxis: EngineAxis = .z
     @State private var renameTarget: RenameTarget?
     @State private var settingsTarget: SettingsTarget?
@@ -118,6 +121,13 @@ struct PlateTabView: View {
         if let selection = document.selection,
            let object = document.scene?.object(id: selection.objectID),
            let transform = document.selectedDisplayTransform {
+            ToolsPanel(
+                mode: gizmoMode,
+                expanded: $toolsExpanded,
+                rotationAxis: $rotationAxis,
+                transform: transform,
+                meshSize: object.mesh.bounds.size
+            ) {
             ManipulationPanel(
                 mode: gizmoMode,
                 header: PanelHeader(
@@ -202,8 +212,8 @@ struct PlateTabView: View {
                     )
                 }
             )
-            .padding(.horizontal, 12)
             .padding(.bottom, 8)
+            }
         }
         }
     }
@@ -220,33 +230,15 @@ struct PlateTabView: View {
                     }
                 }
 
-            HStack(alignment: .center) {
-                GizmoToolbar(
-                    mode: $gizmoMode,
-                    hasSelection: document.selection != nil,
-                    isBusy: document.isBusy,
-                    onDuplicate: duplicateSelection,
-                    onDelete: deleteSelection
-                )
-                .padding(.leading, 12)
-                Spacer()
-            }
-
             VStack {
-                HStack {
-                    Spacer()
-                    fileActions
-                }
-                .padding(.trailing, 12)
-                .padding(.top, 8)
+                // One wide pill bar (all former left-rail + top controls):
+                // Undo / Redo | Menu (file + objects) | Arrange | Tools.
+                topBar
+                    .padding(.horizontal, 12)
+                    .padding(.top, 8)
                 Spacer()
-                // The bottom stack clears the left gizmo rail (52pt tools +
-                // 12pt leading + 12pt gap) and the trailing screen edge:
-                // running to x=0 put the plate chips UNDER the rail and
-                // clipped them at the screen edge (IMG_1045/1046).
                 bottomBars
-                    .padding(.leading, 76)
-                    .padding(.trailing, 12)
+                    .padding(.horizontal, 12)
             }
         }
         .fileImporter(
@@ -358,6 +350,12 @@ struct PlateTabView: View {
                     Task { await document.layFlatSelected(normal: normal, presets: engine) }
                 },
                 onHighlightFlattenPlane: { document.setFlattenHighlight($0) },
+                onCycleRotationAxis: {
+                    let order: [EngineAxis] = [.x, .y, .z]
+                    if let index = order.firstIndex(of: rotationAxis) {
+                        rotationAxis = order[(index + 1) % order.count]
+                    }
+                },
                 onEnd: { Task { await document.commitSelectedTransform() } }
                 )
             )
@@ -368,7 +366,10 @@ struct PlateTabView: View {
 
     // MARK: File / object actions (top-right)
 
-    private var fileActions: some View {
+    /// The Plate tab chrome (one wide pill): Undo / Redo | Menu (file +
+    /// objects) | Arrange (arrange / fill bed / orient) | Tools (gizmo
+    /// modes + duplicate / delete). The former left rail is gone.
+    private var topBar: some View {
         HStack(spacing: 4) {
             PlateActionButton(
                 symbol: "arrow.uturn.backward",
@@ -397,15 +398,6 @@ struct PlateTabView: View {
                     Label("Import model…", systemImage: "plus.square")
                 }
                 Menu {
-                    ForEach(CameraViewPreset.allCases) { preset in
-                        Button(preset.rawValue) {
-                            document.applyCameraView(preset)
-                        }
-                    }
-                } label: {
-                    Label("View", systemImage: "camera")
-                }
-                Menu {
                     ForEach(
                         PrimitiveShape.allCases.filter(\.isObjectShape),
                         id: \.self
@@ -423,7 +415,6 @@ struct PlateTabView: View {
                 } label: {
                     Label("Add shape", systemImage: "cube")
                 }
-                Divider()
                 Button {
                     importMode = .project
                     importPresented = true
@@ -441,6 +432,15 @@ struct PlateTabView: View {
                     ShareLink(item: project) {
                         Label("Share \(project.lastPathComponent)", systemImage: "square.and.arrow.up")
                     }
+                }
+                Menu {
+                    ForEach(CameraViewPreset.allCases) { preset in
+                        Button(preset.rawValue) {
+                            document.applyCameraView(preset)
+                        }
+                    }
+                } label: {
+                    Label("View", systemImage: "camera")
                 }
                 Divider()
                 Button {
@@ -468,49 +468,86 @@ struct PlateTabView: View {
                 .keyboardShortcut("v", modifiers: .command)
                 Divider()
                 Button {
+                    objectsPresented = true
+                } label: {
+                    Label("Objects…", systemImage: "list.bullet")
+                }
+                .disabled(document.scene?.objects.isEmpty != false)
+                Divider()
+                Button {
                     aboutPresented = true
                 } label: {
                     Label("About OrcaPad", systemImage: "info.circle")
                 }
             } label: {
-                ChromeToolLabel(symbol: "doc.badge.plus", label: "File")
+                ChromeToolLabel(symbol: "line.3.horizontal", label: "Menu")
             }
-            .opacity(document.isBusy ? 0.35 : 1)
             .disabled(document.isBusy)
-            PlateActionButton(
-                symbol: "list.bullet",
-                label: "Objects",
-                disabled: document.scene?.objects.isEmpty != false || document.isMutating
-            ) {
-                objectsPresented = true
-            }
-            PlateActionButton(
-                symbol: "square.grid.3x3", label: "Arrange",
-                disabled: document.scene?.objects.isEmpty != false || document.isMutating
-            ) {
-                guard let engine = environment.presets.engineForSlicing else { return }
-                Task { await document.arrangeAll(presets: engine, allowRotations: false) }
-            }
-            if let selection = document.selection {
-                PlateActionButton(
-                    symbol: "square.stack.3d.up.fill", label: "Fill bed",
-                    disabled: document.isMutating
-                ) {
+            Menu {
+                Button {
                     guard let engine = environment.presets.engineForSlicing else { return }
-                    Task {
-                        await document.fillBed(
-                            objectID: selection.objectID, presets: engine, allowRotations: false
-                        )
+                    Task { await document.arrangeAll(presets: engine, allowRotations: false) }
+                } label: {
+                    Label("Arrange", systemImage: "square.grid.3x3")
+                }
+                .disabled(document.scene?.objects.isEmpty != false || document.isMutating)
+                if let selection = document.selection {
+                    Button {
+                        guard let engine = environment.presets.engineForSlicing else { return }
+                        Task {
+                            await document.fillBed(
+                                objectID: selection.objectID, presets: engine, allowRotations: false
+                            )
+                        }
+                    } label: {
+                        Label("Fill bed", systemImage: "square.stack.3d.up.fill")
+                    }
+                    .disabled(document.isMutating)
+                }
+                Button {
+                    guard let engine = environment.presets.engineForSlicing else { return }
+                    Task { await document.orientAll(presets: engine) }
+                } label: {
+                    Label("Orient", systemImage: "location.north.circle")
+                }
+                .disabled(document.scene?.objects.isEmpty != false || document.isMutating)
+            } label: {
+                ChromeToolLabel(symbol: "square.grid.3x3", label: "Arrange")
+            }
+            .disabled(document.isBusy)
+            Menu {
+                ForEach(Array(GizmoMode.allCases.enumerated()), id: \.offset) { _, mode in
+                    Button {
+                        gizmoMode = mode
+                        toolsExpanded = false
+                    } label: {
+                        if gizmoMode == mode {
+                            Label(mode.menuLabel, systemImage: "checkmark")
+                        } else {
+                            Text(mode.menuLabel)
+                        }
                     }
                 }
+                Divider()
+                Button {
+                    duplicateSelection()
+                } label: {
+                    Label("Duplicate", systemImage: "plus.square.on.square")
+                }
+                .disabled(document.selection == nil || document.isBusy)
+                Button(role: .destructive) {
+                    deleteSelection()
+                } label: {
+                    Label("Delete", systemImage: "trash")
+                }
+                .disabled(document.selection == nil || document.isBusy)
+            } label: {
+                ChromeToolLabel(
+                    symbol: gizmoMode.symbol,
+                    label: "Tools"
+                )
             }
-            PlateActionButton(
-                symbol: "location.north.circle", label: "Orient",
-                disabled: document.scene?.objects.isEmpty != false || document.isMutating
-            ) {
-                guard let engine = environment.presets.engineForSlicing else { return }
-                Task { await document.orientAll(presets: engine) }
-            }
+            .disabled(document.isBusy)
         }
         .padding(6)
         .background(.ultraThinMaterial, in: Capsule())
@@ -1612,65 +1649,6 @@ private struct PlateBar: View {
 
 // MARK: - Gizmo toolbar (left, desktop parity)
 
-private struct GizmoToolbar: View {
-    @Binding var mode: GizmoMode
-    let hasSelection: Bool
-    let isBusy: Bool
-    let onDuplicate: () -> Void
-    let onDelete: () -> Void
-
-    var body: some View {
-        VStack(spacing: 6) {
-            tool(.select, symbol: "rectangle.dashed", label: "Select")
-            tool(.move, symbol: "arrow.up.and.down.and.arrow.left.and.right", label: "Move")
-            tool(.rotate, symbol: "arrow.clockwise.circle", label: "Rotate")
-            tool(.scale, symbol: "arrow.up.left.and.arrow.down.right", label: "Scale")
-            tool(.layFlat, symbol: "square.bottomhalf.filled", label: "Lay flat")
-            Divider().frame(width: 32)
-            action("plus.square.on.square", label: "Copy", action: onDuplicate)
-            action("trash", label: "Delete", action: onDelete)
-            Divider().frame(width: 32)
-            future("paintbrush.pointed", label: "Supports")
-        }
-        .padding(.vertical, 10)
-        .padding(.horizontal, 6)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 18))
-    }
-
-    private func tool(_ target: GizmoMode, symbol: String, label: String) -> some View {
-        Button {
-            mode = target
-        } label: {
-            toolLabel(symbol: symbol, label: label)
-                .foregroundStyle(mode == target ? Color.accentColor : Color.primary)
-                .background(
-                    mode == target ? Color.accentColor.opacity(0.18) : Color.clear,
-                    in: RoundedRectangle(cornerRadius: 10)
-                )
-        }
-        .buttonStyle(.plain)
-    }
-
-    private func action(_ symbol: String, label: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            toolLabel(symbol: symbol, label: label)
-        }
-        .buttonStyle(.plain)
-        .disabled(!hasSelection || isBusy)
-        .opacity(hasSelection && !isBusy ? 1 : 0.35)
-    }
-
-    private func future(_ symbol: String, label: String) -> some View {
-        toolLabel(symbol: symbol, label: label)
-            .opacity(0.25)
-            .accessibilityLabel("\(label) — coming later")
-    }
-
-    private func toolLabel(symbol: String, label: String) -> some View {
-        ChromeToolLabel(symbol: symbol, label: label)
-    }
-}
-
 // MARK: - Object manipulation panels (desktop parity, one per gizmo mode)
 
 private struct PanelHeader {
@@ -2234,6 +2212,106 @@ private struct PlateActionButton: View {
         .buttonStyle(.plain)
         .opacity(disabled ? 0.35 : 1)
         .disabled(disabled)
+    }
+}
+
+/// Collapsible tools half-modal (user spec): COLLAPSED is a compact bar
+/// for touch manipulation (live readouts, axis-focus chips for rotate);
+/// EXPANDED reveals the full numeric editors. Dragging on the canvas works
+/// in both states - the panel never blocks the object.
+private struct ToolsPanel<Content: View>: View {
+    let mode: GizmoMode
+    @Binding var expanded: Bool
+    @Binding var rotationAxis: EngineAxis
+    let transform: InstanceTransform
+    let meshSize: SIMD3<Float>
+    @ViewBuilder let content: () -> Content
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 12) {
+                Image(systemName: mode.symbol)
+                    .font(.system(size: 17, weight: .medium))
+                    .foregroundStyle(Color.accentColor)
+                    .frame(width: 34)
+                context
+                Spacer(minLength: 8)
+                Button {
+                    withAnimation(.snappy(duration: 0.25)) { expanded.toggle() }
+                } label: {
+                    Image(systemName: expanded ? "chevron.down.circle.fill" : "chevron.up.circle.fill")
+                        .font(.title3)
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(expanded ? "Collapse tools" : "Expand tools")
+            }
+            .frame(height: 44)
+            if expanded {
+                content()
+                    .padding(.top, 4)
+                    .transition(.opacity.combined(with: .move(edge: .bottom)))
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 8)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 18))
+    }
+
+    /// Collapsed-state context: live values + focus chips + touch hint.
+    @ViewBuilder
+    private var context: some View {
+        switch mode {
+        case .move:
+            HStack(spacing: 10) {
+                Text("X \(String(format: "%.1f", transform.offsetX)) · Y \(String(format: "%.1f", transform.offsetY))")
+                    .font(.callout.monospaced())
+                Text("drag to move")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        case .rotate:
+            HStack(spacing: 8) {
+                ForEach(EngineAxis.allCases, id: \.self) { candidate in
+                    Button {
+                        rotationAxis = candidate
+                    } label: {
+                        Text(candidate.label)
+                            .font(.callout.weight(.semibold))
+                            .frame(width: 34, height: 30)
+                            .foregroundStyle(rotationAxis == candidate ? Color.white : candidate.color)
+                            .background(
+                                rotationAxis == candidate ? candidate.color : candidate.color.opacity(0.15),
+                                in: RoundedRectangle(cornerRadius: 8)
+                            )
+                    }
+                    .buttonStyle(.plain)
+                }
+                Text(RotatePanel.degrees(transform.rotation[Int(rotationAxis.rawValue)])) + Text("°")
+                Text("tap model to cycle")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        case .scale:
+            HStack(spacing: 10) {
+                Text("\(String(format: "%.0f", transform.scaleX * 100))%")
+                    .font(.callout.monospaced())
+                Text("\(String(format: "%.0f×%.0f×%.0f", meshSize.x, meshSize.y, meshSize.z)) mm")
+                    .font(.callout.monospaced())
+                    .foregroundStyle(.secondary)
+                Text("drag vertically")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        case .layFlat:
+            Text("tap a face of the object")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+        case .select:
+            Text("drag to select")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+        }
     }
 }
 

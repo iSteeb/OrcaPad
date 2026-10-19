@@ -34,10 +34,16 @@ struct DeviceTabView: View {
 
     var body: some View {
         NavigationStack {
-            deviceLayout
+            VStack(spacing: 0) {
+                // Same wide pill chrome as Plate / Preview: Printers | file
+                // actions (reload, browser, send).
+                topBar
+                    .padding(.horizontal, 12)
+                    .padding(.top, 8)
+                deviceLayout
+            }
                 .navigationTitle(selected?.name ?? "Device")
                 .navigationBarTitleDisplayMode(.inline)
-                .toolbar { toolbar }
                 .sheet(item: $editorTarget) { target in
                     PhysicalPrinterEditor(
                         existing: target.record,
@@ -166,11 +172,10 @@ struct DeviceTabView: View {
             }
     }
 
-    // MARK: Toolbar
+    // MARK: Top bar (Plate-style wide pill)
 
-    @ToolbarContentBuilder
-    private var toolbar: some ToolbarContent {
-        ToolbarItem(placement: .topBarLeading) {
+    private var topBar: some View {
+        HStack(spacing: 4) {
             Menu {
                 ForEach(store.printers, id: \.name) { printer in
                     Button {
@@ -196,33 +201,37 @@ struct DeviceTabView: View {
                 }
                 .disabled(store.printers.isEmpty)
             } label: {
-                Label("Printers", systemImage: "printer")
+                ChromeToolLabel(symbol: "printer", label: "Printers")
             }
             .disabled(store.isSaving)
-        }
-        ToolbarItemGroup(placement: .topBarTrailing) {
+            Divider().frame(height: 28)
             Button {
                 session.reload()
             } label: {
-                Label("Reload", systemImage: "arrow.clockwise")
+                ChromeToolLabel(symbol: "arrow.clockwise", label: "Reload")
             }
+            .buttonStyle(.plain)
             .disabled(selectedURL == nil)
             Button {
                 if let selectedURL { openURL(selectedURL) }
             } label: {
-                Label("Open in browser", systemImage: "safari")
+                ChromeToolLabel(symbol: "safari", label: "Browser")
             }
+            .buttonStyle(.plain)
             .disabled(selectedURL == nil)
             Button {
                 sendPresented = true
             } label: {
-                Label("Send G-code", systemImage: "paperplane")
+                ChromeToolLabel(symbol: "paperplane", label: "Send")
             }
+            .buttonStyle(.plain)
             .disabled(
                 selected == nil || environment.slicing.lastOutcome?.outputURL == nil
                     || environment.printHost.isUploading
             )
         }
+        .padding(6)
+        .background(.ultraThinMaterial, in: Capsule())
     }
 
     // MARK: Actions
@@ -399,6 +408,7 @@ enum PrinterHostKind {
     static let supported: [(value: String, label: String)] = [
         ("moonraker", "Moonraker (Klipper)"),
         ("octoprint", "OctoPrint"),
+        ("prusalink", "PrusaLink"),
         ("duet", "Duet / RepRapFirmware"),
         ("flashair", "FlashAir SD card"),
     ]
@@ -411,6 +421,7 @@ enum PrinterHostKind {
         switch hostType {
         case "moonraker": return "antenna.radiowaves.left.and.right"
         case "octoprint": return "server.rack"
+        case "prusalink": return "printer.dotmatrix"
         case "duet": return "cpu"
         case "flashair": return "sdcard"
         default: return "printer"

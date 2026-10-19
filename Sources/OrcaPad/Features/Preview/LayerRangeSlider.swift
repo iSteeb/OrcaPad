@@ -6,6 +6,10 @@ import SwiftUI
 /// Desktop-style vertical layer range slider: layer 0 at the bottom, the top
 /// layer at the top, two thumbs bounding the visible range. Updates stream
 /// live while dragging (the renderer only moves index windows).
+///
+/// Hit-testing is TRACK-level: a drag grabs the NEAREST thumb (decided once
+/// at drag start), so overlapping thumbs never block each other (the per-
+/// thumb hitboxes used to make coincident handles undraggable).
 struct LayerRangeSlider: View {
     let lower: Int
     let upper: Int
@@ -14,6 +18,7 @@ struct LayerRangeSlider: View {
     let onChange: (_ lower: Int, _ upper: Int) -> Void
 
     private let thumbSize: CGFloat = 26
+    @State private var draggingUpper = false
 
     var body: some View {
         GeometryReader { geometry in
@@ -34,7 +39,23 @@ struct LayerRangeSlider: View {
                 thumb(value: lower, height: height, isUpper: false)
             }
             .frame(maxWidth: .infinity)
+            .contentShape(Rectangle())  // the whole track is draggable
             .coordinateSpace(name: "layer-track")
+            .gesture(
+                DragGesture(minimumDistance: 0, coordinateSpace: .named("layer-track"))
+                    .onChanged { drag in
+                        // Decide the target thumb ONCE per drag: whichever
+                        // thumb center is nearest the touch (ties -> upper).
+                        let distanceUpper = abs(drag.location.y - (y(upper, height) + thumbSize / 2))
+                        let distanceLower = abs(drag.location.y - (y(lower, height) + thumbSize / 2))
+                        let target = value(at: drag.location.y, height: height)
+                        if distanceUpper <= distanceLower {
+                            onChange(min(lower, target), max(target, lower))
+                        } else {
+                            onChange(min(target, upper), upper)
+                        }
+                    }
+            )
         }
     }
 
@@ -64,16 +85,6 @@ struct LayerRangeSlider: View {
                 .offset(x: -thumbSize - 28)
         }
         .offset(y: y(current, height))
-        .gesture(
-            DragGesture(coordinateSpace: .named("layer-track"))
-                .onChanged { drag in
-                    let target = value(at: drag.location.y, height: height)
-                    if isUpper {
-                        onChange(min(lower, target), max(target, lower))
-                    } else {
-                        onChange(min(target, upper), upper)
-                    }
-                }
-        )
+        .allowsHitTesting(false)  // the track gesture owns all dragging
     }
 }

@@ -11,7 +11,7 @@ import UniformTypeIdentifiers
 struct PreviewTabView: View {
     @Environment(AppEnvironment.self) private var environment
     @State private var store = GcodePreviewStore()
-    @State private var showLegend = true
+    @State private var showLegend = false
     @State private var frameRequest = 0
     @State private var openPresented = false
     /// Last slice job consumed: tab re-appearance must not override an
@@ -115,31 +115,17 @@ struct PreviewTabView: View {
             )
             .ignoresSafeArea()
 
-            // Left dock (Plate-style): scheme, travel, legend, framing.
-            HStack(alignment: .top, spacing: 10) {
-                PreviewDock(
-                    colorMode: $store.colorMode,
-                    showTravel: $store.showTravel,
-                    showSeams: $store.showSeams,
-                    showRetractions: $store.showRetractions,
-                    showLegend: $showLegend,
-                    onFrame: { frameRequest += 1 }
-                )
-                if showLegend { legend }
-                Spacer()
-            }
-            .padding(.leading, 12)
-            .padding(.top, 60)
-            .padding(.bottom, 110)
-
-            // Top-right: file actions (desktop "Export G-code" / G-code viewer).
-            VStack {
-                HStack {
-                    Spacer()
-                    fileActions
+            // One wide top pill bar (Plate-style chrome): Scheme | View |
+            // Open | Share. The former left dock is gone.
+            VStack(spacing: 8) {
+                topBar
+                    .padding(.horizontal, 12)
+                    .padding(.top, 8)
+                if showLegend {
+                    legend
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 12)
                 }
-                .padding(.trailing, 12)
-                .padding(.top, 8)
                 Spacer()
             }
 
@@ -174,22 +160,55 @@ struct PreviewTabView: View {
 
     // MARK: Bottom panel: move scrubber + scheme controls
 
-    private var fileActions: some View {
+    /// Preview chrome (one wide pill): Scheme menu (color scheme picker),
+    /// View menu (travel / seams / retractions / legend / frame), Open,
+    /// Share — everything the left dock and the file capsule did.
+    private var topBar: some View {
         HStack(spacing: 4) {
-            Button { openPresented = true } label: {
-                Label("Open", systemImage: "doc.badge.plus")
-                    .labelStyle(.iconOnly)
-                    .frame(width: 40, height: 34)
+            Menu {
+                Picker("Color scheme", selection: $store.colorMode) {
+                    ForEach(ToolpathColorMode.allCases) { mode in
+                        Text(mode.rawValue).tag(mode)
+                    }
+                }
+            } label: {
+                ChromeToolLabel(symbol: "paintpalette", label: "Scheme")
             }
+            Menu {
+                Toggle(isOn: $store.showTravel) {
+                    Label("Travel moves", systemImage: "arrow.triangle.swap")
+                }
+                Toggle(isOn: $store.showSeams) {
+                    Label("Seam markers", systemImage: "smallcircle.filled.circle")
+                }
+                Toggle(isOn: $store.showRetractions) {
+                    Label("Retractions", systemImage: "arrow.uturn.left.circle")
+                }
+                Divider()
+                Toggle(isOn: $showLegend) {
+                    Label("Legend", systemImage: "list.bullet.rectangle")
+                }
+                Button {
+                    frameRequest += 1
+                } label: {
+                    Label("Frame scene", systemImage: "viewfinder")
+                }
+            } label: {
+                ChromeToolLabel(symbol: "slider.horizontal.3", label: "View")
+            }
+            Divider().frame(height: 28)
+            Button {
+                openPresented = true
+            } label: {
+                ChromeToolLabel(symbol: "doc.badge.plus", label: "Open")
+            }
+            .buttonStyle(.plain)
             if let url = store.loadedURL {
                 ShareLink(item: url) {
-                    Label("Export G-code", systemImage: "square.and.arrow.up")
-                        .labelStyle(.iconOnly)
-                        .frame(width: 40, height: 34)
+                    ChromeToolLabel(symbol: "square.and.arrow.up", label: "Share")
                 }
             }
         }
-        .font(.system(size: 17, weight: .medium))
         .padding(6)
         .background(.ultraThinMaterial, in: Capsule())
     }
@@ -360,7 +379,6 @@ struct PreviewTabView: View {
     }
 }
 
-/// Left dock for the Preview tab (mirrors the Plate gizmo toolbar style).
 private struct PreviewDock: View {
     @Binding var colorMode: ToolpathColorMode
     @Binding var showTravel: Bool

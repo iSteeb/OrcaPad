@@ -60,6 +60,9 @@ struct CanvasManipulation {
     let onLayFlat: (SIMD3<Double>) -> Void
     /// Touch-hover highlight of the flatten plane under the finger.
     let onHighlightFlattenPlane: (Int?) -> Void
+    /// Rotate mode: tapping the (selected) model cycles the rotation axis
+    /// focus (user spec; desktop picks the ring you grab instead).
+    let onCycleRotationAxis: () -> Void
     let onEnd: () -> Void
 }
 
@@ -249,6 +252,11 @@ struct MetalCanvas: UIViewRepresentable {
                     manipulation?.onLayFlat(face.engineNormal)
                     return
                 }
+            } else if renderer.gizmoMode == .rotate,
+                      let hit = renderer.pickInstance(at: location, in: view),
+                      isSelected(hit) {
+                // Rotate focus follows the model: tap it to cycle X -> Y -> Z.
+                manipulation?.onCycleRotationAxis()
             } else if let hit = renderer.pickInstance(at: location, in: view) {
                 // Desktop part selection: tapping the already-selected
                 // instance refines the selection to the tapped volume; the
