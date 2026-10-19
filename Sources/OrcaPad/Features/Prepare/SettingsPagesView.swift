@@ -201,6 +201,64 @@ private struct GroupHeader: View {
 
 /// One option row: typed editor, unit, tooltip, range validation, modified
 /// badge, and per-row reset.
+/// Desktop per-extruder vector editing: one compact numeric field per
+/// element, slot-numbered; commits recombine the CSV serialization.
+struct PerElementVectorEditor: View {
+    let value: String
+    let onCommit: (String) -> Void
+    let onReject: (String) -> Void
+
+    @State private var elements: [String] = []
+
+    var body: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 6) {
+                ForEach(Array(elements.indices), id: \.self) { index in
+                    HStack(spacing: 2) {
+                        Text("\(index + 1)")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                        TextField("0", text: binding(index))
+                            .keyboardType(.numbersAndPunctuation)
+                            .frame(width: 56)
+                            .textFieldStyle(.roundedBorder)
+                            .font(.caption.monospaced())
+                            .onSubmit { commit() }
+                    }
+                }
+            }
+        }
+        .onAppear { elements = value.split(separator: ",").map(String.init) }
+        .onChange(of: value) { _, newValue in
+            elements = newValue.split(separator: ",").map(String.init)
+        }
+    }
+
+    private func binding(_ index: Int) -> Binding<String> {
+        Binding(
+            get: { index < elements.count ? elements[index] : "" },
+            set: { if index < elements.count { elements[index] = $0 } }
+        )
+    }
+
+    private func commit() {
+        let combined = elements
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .joined(separator: ",")
+        // element-level numeric sanity: every element must parse
+        for element in elements {
+            let trimmed = element.trimmingCharacters(in: .whitespaces)
+            let candidate = trimmed.hasSuffix("%")
+                ? String(trimmed.dropLast()) : trimmed
+            if !candidate.isEmpty, Double(candidate) == nil {
+                onReject("\"\(element)\" is not a number")
+                return
+            }
+        }
+        onCommit(combined)
+    }
+}
+
 struct SettingsEditorRowView: View {
     let row: SettingsEditorRow
     let onCommit: (String) -> Void
@@ -276,6 +334,12 @@ struct SettingsEditorRowView: View {
     @ViewBuilder
     private var editor: some View {
         switch row.editorKind {
+        case .perElement:
+            PerElementVectorEditor(
+                value: row.value,
+                onCommit: onCommit,
+                onReject: onReject
+            )
         case .toggle:
             Toggle("", isOn: Binding(
                 get: { row.boolValue },

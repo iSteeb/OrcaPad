@@ -31,6 +31,7 @@ struct PlateTabView: View {
     @State private var parameterTablePresented = false
     @State private var plateRenameTarget: PlateID?
     @State private var plateRenameText = ""
+    @State private var flushPresented = false
 
     private var document: DocumentStore { environment.document }
 
@@ -119,8 +120,30 @@ struct PlateTabView: View {
                     onSetColour: { slot, colour in
                         Task { await environment.presets.setFilamentColour(slot: slot, colour: colour) }
                     },
-                    filamentPresets: environment.presets.filaments
+                    filamentPresets: environment.presets.filaments,
+                    onEditFlushVolumes: { flushPresented = true }
                 )
+                .sheet(isPresented: $flushPresented) {
+                    FlushingVolumesSheet(
+                        slots: environment.presets.filamentSlots,
+                        editedMatrix: environment.presets
+                            .editedConfigs[.machine]?["flush_volumes_matrix"],
+                        editedMultiplier: environment.presets
+                            .editedConfigs[.machine]?["flush_multiplier"],
+                        onApply: { matrix, multiplier in
+                            Task {
+                                await environment.presets.setValue(
+                                    kind: .machine, key: "flush_volumes_matrix",
+                                    serializedValue: matrix
+                                )
+                                await environment.presets.setValue(
+                                    kind: .machine, key: "flush_multiplier",
+                                    serializedValue: multiplier
+                                )
+                            }
+                        }
+                    )
+                }
                 if let selection = document.selection,
                    let object = document.scene?.object(id: selection.objectID),
                    let transform = document.selectedDisplayTransform {
@@ -1216,6 +1239,7 @@ private struct FilamentBar: View {
     let onSelectPreset: (Int, String) -> Void
     let onSetColour: (Int, String) -> Void
     let filamentPresets: [PresetEntry]
+    let onEditFlushVolumes: () -> Void
 
     @State private var colourTarget: Int?
 
@@ -1240,6 +1264,13 @@ private struct FilamentBar: View {
                             colourTarget = index
                         } label: {
                             Label("Edit colour…", systemImage: "paintpalette")
+                        }
+                        if index == 0 {
+                            Button {
+                                onEditFlushVolumes()
+                            } label: {
+                                Label("Flushing volumes…", systemImage: "square.grid.3x3.middle.filled")
+                            }
                         }
                         if slots.count > 1 {
                             Button(role: .destructive) {
@@ -1349,6 +1380,119 @@ private struct FilamentColourPicker: View {
                 }
         }
         .onAppear { colour = Color(hex: initial) ?? .gray }
+    }
+}
+
+/// Desktop FlushingVolumesDialog: the N x N purge matrix + flush
+/// multiplier, edited on the MACHINE preset. Cells show from (row) ->
+/// to (column) filament with the slot colors as headers; the default is
+/// 280 mm\u00b3 between different filaments, 0 on the diagonal.
+struct FlushingVolumesSheet: View {
+    let slots: [EnginePresets.FilamentSlot]
+    let editedMatrix: String?
+    let editedMultiplier: String?
+    let onApply: (String, String) -> Void
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var matrix: [[Double]] = []
+    @State private var multiplier = 1.0
+
+    var body: some View {
+        NavigationStack {
+            ScrollView([.horizontal, .vertical]) {
+                VStack(alignment: .leading, spacing: 10) {
+                    if matrix.count == slots.count {
+                        Grid(horizontalSpacing: 6, verticalSpacing: 6) {
+                            GridRow {
+                                Color.clear.frame(width: 34, height: 34)
+                                ForEach(Array(slots.enumerated()), id: \.offset) { _, slot in
+                                    swatch(slot.colour)
+                                }
+                            }
+                            ForEach(Array(matrix.indices), id: \.self) { row in
+                                GridRow {
+                                    swatch(slots[row].colour)
+                                    ForEach(Array(matrix[row].indices), id: \.self) { column in
+                                        TextField(
+                                            "0",
+                                            value: $matrix[row][column],
+                                            format: .number.precision(.fractionLength(0))
+                                        )
+                                        .keyboardType(.numberPad)
+                                        .multilineTextAlignment(.center)
+                                        .frame(width: 56, height: 34)
+                                        .textFieldStyle(.roundedBorder)
+                                        .font(.caption.monospaced())
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    HStack {
+                        Text("Flush multiplier")
+                        TextField(
+                            "1",
+                            value: $multiplier,
+                            format: .number.precision(.fractionLength(2))
+                        )
+                        .keyboardType(.decimalPad)
+                        .frame(width: 80)
+                        .textFieldStyle(.roundedBorder)
+                    }
+                    .font(.callout)
+                }
+                .padding()
+            }
+            .navigationTitle("Flushing volumes")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Apply") {
+                        let csv = matrix.map { row in
+                            row.map { String(format: "%.0f", $0) }.joined(separator: ",")
+                        }.joined(separator: ",")
+                        onApply(csv, String(format: "%.2f", multiplier))
+                        dismiss()
+                    }
+                }
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }
+                }
+                ToolbarItem(placement: .topBarLeading) {
+                    Button("Reset") {
+                        load(defaults: true)
+                    }
+                }
+            }
+        }
+        .onAppear { load(defaults: false) }
+    }
+
+    private func swatch(_ colour: String) -> some View {
+        Circle()
+            .fill(Color(hex: colour) ?? .gray)
+            .frame(width: 22, height: 22)
+            .overlay(Circle().strokeBorder(.secondary.opacity(0.5)))
+    }
+
+    private func load(defaults: Bool) {
+        let count = slots.count
+        guard count > 0 else { return }
+        let parsed = (defaults ? nil : editedMatrix)?
+            .split(separator: ",")
+            .compactMap { Double($0) } ?? []
+        var grid: [[Double]] = []
+        for row in 0..<count {
+            var line: [Double] = []
+            for column in 0..<count {
+                let index = row * count + column
+                line.append(index < parsed.count ? parsed[index]
+                              : (row == column ? 0 : 280))
+            }
+            grid.append(line)
+        }
+        matrix = grid
+        multiplier = Double(editedMultiplier ?? "1") ?? 1
     }
 }
 

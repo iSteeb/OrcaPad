@@ -163,6 +163,12 @@ struct SettingsEditorRow: Identifiable, Sendable {
     }
 
     var editorKind: SettingsEditorKind {
+        // Desktop per-extruder editing: multi-element NUMERIC vectors get
+        // one small field per element (slot), not a raw CSV blob.
+        if !behavesAsScalar, value.contains(","),
+           [1, 2, 4, 5].contains(scalarType) {
+            return .perElement
+        }
         guard behavesAsScalar else { return .text }
         if scalarType == 3 && multiline { return .multiline }
         if !enumValues.isEmpty && (scalarType == 9 || scalarType == 2) {
@@ -243,6 +249,8 @@ enum SettingsEditorKind: Sendable {
     case numeric
     case text
     case multiline
+    /// Multi-element numeric vector (desktop per-extruder value columns).
+    case perElement
 }
 
 /// C-style escaping used by the engine's scalar string serialization

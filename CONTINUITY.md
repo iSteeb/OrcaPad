@@ -92,6 +92,11 @@
 
 ## PROGRESS
 
+- [2026-10-15 CODE] ABI v31 + C10 (multi-filament, parity 51 done 40%):
+  filament slots/count/per-slot preset+colour API, FilamentBar, object
+  extruder assignment + slot tinting, FlushingVolumesSheet,
+  per-element vector editors, config finalization on every slice path
+  (0.2.0 crash class), camera reset = fit focused bed. Release 0.5.0.
 - [2026-10-14 CODE] ABI v30 + C9d (fill bed, parity 48 done 38%):
   orca_plater_fill_bed (desktop FillBedJob formula; clones marked
   bed_idx=256 — UNARRANGED skips them), instances variant, overflow

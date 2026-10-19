@@ -160,6 +160,15 @@ Device, each tab a clean feature module over the same stores.
       nester, instances variant, one undo step, Plate tab button on the
       selected object. plate.fill-bed ✅ (48 done, 38%). Plus: all-printers
       sidebar with live reachability in the Device tab.
+- [x] C10: multi-filament (ABI v31) — Bridge filament slots/count/
+      per-slot preset + colour; FilamentBar (add/remove/swap/colour);
+      object/part extruder assignment + per-slot instance tinting;
+      FlushingVolumesSheet (WipingDialog parity); per-element numeric
+      vector editors; general config finalization at every slice path
+      (the 0.2.0 crash class). plate.object-filament,
+      prepare.flushing-volumes, prepare.per-extruder-values ✅ (51 done,
+      40%). Plus: camera reset fits the focused bed; plate-background +
+      empty-plate camera fixes. → release-0.5.0.
 - [ ] Parity backlog: generated PARITY.md "Remaining work" (priority order)
 - [x] Device tab: printer web UI (user-allowed 2026-10-07, scoped AGENTS.md
       exception): selected physical printer's own page in a WKWebView,

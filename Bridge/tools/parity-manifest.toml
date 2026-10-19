@@ -696,12 +696,11 @@ priority = 101
 id = "prepare.per-extruder-values"
 area = "prepare"
 title = "Per-extruder vector values"
-status = "partial"
+status = "done"
 source = "src/slic3r/GUI/Tab.cpp:build_extruder_pages|extruder_idx"
-evidence = ["client:multiline"]
-gap = "only one-element vectors are editable (as scalars)"
+evidence = ["client:struct PerElementVectorEditor", "client:case perElement"]
 work = "UI"
-priority = 102
+note = "Multi-element numeric vectors render one slot-numbered field per element (desktop per-extruder columns) recombining the CSV serialization; one-element vectors stay scalar editors; string vectors keep the raw text field"
 
 [[feature]]
 id = "prepare.option-dependencies"
@@ -793,10 +792,11 @@ note = "ABI v31: PresetBundle set_num_filaments semantics (new slots duplicate t
 id = "prepare.flushing-volumes"
 area = "prepare"
 title = "Flushing volumes"
-status = "missing"
+status = "done"
 desktop = ["dialog:WipingDialog", "pref:Auto flush after changing..."]
+evidence = ["client:struct FlushingVolumesSheet"]
 work = "Bridge + UI"
-priority = 107
+note = "Desktop WipingDialog parity on the machine preset: the N x N purge matrix with slot-color headers + flush multiplier (FlushingVolumesSheet from the filament bar); writes flush_volumes_matrix/flush_multiplier through the preset value contract; config finalization guarantees a valid matrix at slice time"
 
 [[feature]]
 id = "prepare.ramming"

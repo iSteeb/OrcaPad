@@ -125,6 +125,16 @@ contract test literal in the same commit)**
 - Presets: entries expose engine vendor + `is_compatible`; overrides are
   written to the edited preset of a kind (`full_config()` merges edited
   presets, so slices consume them); edited vs system dumps detect changes.
+- Multi-filament (ABI v31, desktop Sidebar filament list):
+  `orca_presets_set_filament_count` (PresetBundle set_num_filaments
+  semantics — new slots duplicate the last preset, 1..16),
+  `orca_presets_filament_slots` (preset name + color per slot),
+  per-slot `orca_presets_select_filament` / `set_filament_colour`; the
+  scene snapshot carries the object-level extruder; every slice config
+  is FINALIZED first (`orcapad_finalize_config`: per-filament vectors
+  padded repeat-last like desktop full_config, flush matrix validated to
+  filaments\u00b2 per nozzle; repairs surface as slice warnings — the
+  TestFlight 0.2.0 crash class).
 - G-code preview: `orca_gcode_load` runs the upstream GCodeProcessor;
   `orca_gcode_toolpath` returns a compact owned segment/layer copy carrying
   the engine's own ExtrusionRole/EMoveType values (never libvgcode's).
