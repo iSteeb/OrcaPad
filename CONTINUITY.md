@@ -158,6 +158,15 @@
 
 ## OUTCOMES
 
+- [2026-10-19] C10 milestone complete (multi-filament + polish, ABI v30->31,
+  parity 38%->40%, 51 done): release-0.5.0 run 39243764031 green end to
+  end - both jobs green, external group + Beta App Review submitted.
+  Carries: multi-filament slots/bar/assignment/flush editor/vector
+  editors, config finalization (0.2.0 crash class), camera reset = fit
+  bed, plate-background + empty-plate fixes, all-printers device tab,
+  fill bed, flatten planes, rotate/scale polish, slice-all. Awaiting:
+  review approval + on-device checks.
+
 - [2026-10-14] C9 milestone complete (plates + open-in, ABI v26→v27,
   files.open-in ✅, plate.multi-plate 🟡 major): release-0.3.0 run
   38570936772 green end to end — build 0.3.0 (6.1) uploaded, external
