@@ -43,6 +43,7 @@ struct DeviceTabView: View {
                 deviceLayout
             }
                 .navigationTitle(selected?.name ?? "Device")
+                .toolbar(.hidden, for: .navigationBar)
                 .navigationBarTitleDisplayMode(.inline)
                 .sheet(item: $editorTarget) { target in
                     PhysicalPrinterEditor(

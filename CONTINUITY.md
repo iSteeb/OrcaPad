@@ -158,6 +158,14 @@
 
 ## OUTCOMES
 
+- [2026-10-19] UI round 3 (user TestFlight feedback, 8 items): pill bars
+  SCROLLABLE with first-class tools (Plate: undo/redo/menu/arrange/fill/
+  orient + gizmo modes + filament chips inline; Preview: de-nested
+  toggles; Prepare: mode-per-kind memory + kind buttons + page chips);
+  live gesture value updates; uniform-only scale drag; move/rotate/scale
+  panels rebuilt (comfortable rows, consistent buttons); nav titles
+  hidden (bottom tab identifies the page). release-0.7.0.
+
 - [2026-10-19] UI overhaul round 2 (user device feedback, 7 items):
   multi-plate rendering restored (dimmed beds + faded objects); Plate tab
   chrome = one wide pill (Undo/Redo | Menu(file+objects) | Arrange |

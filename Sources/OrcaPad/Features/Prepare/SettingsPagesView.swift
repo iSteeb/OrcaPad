@@ -11,10 +11,19 @@ struct SettingsPagesSections: View {
     let kind: PresetKind
     let filter: SettingsModeFilter
     let search: String
+    /// External page selection (the top pill's page chips drive it).
+    var externalSelectedPage: Binding<String?>? = nil
 
     @Environment(AppEnvironment.self) private var environment
-    @State private var selectedPage: String?
     @State private var collapsedGroups: Set<String> = []
+
+    private var selectedPage: Binding<String?> {
+        externalSelectedPage ?? Binding(
+            get: { internalPage },
+            set: { internalPage = $0 }
+        )
+    }
+    @State private var internalPage: String?
 
     private var presets: PresetStore { environment.presets }
 
@@ -47,14 +56,14 @@ struct SettingsPagesSections: View {
     @ViewBuilder
     private func content(_ pages: [SettingsPageModel]) -> some View {
         // While searching, show every matching page; otherwise one page.
-        let current = pages.first { $0.title == selectedPage } ?? pages[0]
+        let current = pages.first { $0.title == selectedPage.wrappedValue } ?? pages[0]
         let visible = search.isEmpty ? [current] : pages
 
         Section {
             PageStrip(
                 pages: pages,
                 selected: current.title,
-                onSelect: { selectedPage = $0 }
+                onSelect: { selectedPage.wrappedValue = $0 }
             )
             .listRowInsets(EdgeInsets(top: 6, leading: 8, bottom: 6, trailing: 8))
         }

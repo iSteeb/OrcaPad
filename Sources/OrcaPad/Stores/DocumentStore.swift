@@ -817,13 +817,48 @@ final class DocumentStore {
 
     /// Transform shown by the panels: always the engine's authoritative value
     /// (gesture previews are matrix-only and commit as one mutation).
-    var selectedDisplayTransform: InstanceTransform? { selectedAuthoritativeTransform }
+    /// Transform shown by the panels: the authoritative value PLUS the live
+    /// gesture preview (pending), so readouts update while the finger drags
+    /// (user spec), not only after commit.
+    var selectedDisplayTransform: InstanceTransform? {
+        guard var live = selectedAuthoritativeTransform else { return nil }
+        switch pending {
+        case .move:
+            if let selection,
+               let preview = previewMatrices[selection.instanceID],
+               let base = manipulationBase {
+                let delta = EngineMatrix.origin(preview) - EngineMatrix.origin(base)
+                live.offsetX += Double(delta.x)
+                live.offsetY += Double(delta.y)
+            }
+        case .rotate(let axis, let radians):
+            switch axis {
+            case .x: live.rotationX += radians
+            case .y: live.rotationY += radians
+            case .z: live.rotationZ += radians
+            }
+        case .scale(let factor):
+            live.scaleX *= factor
+            live.scaleY *= factor
+            live.scaleZ *= factor
+        case .scaleAxis(let axis, let factor):
+            switch axis {
+            case .x: live.scaleX *= factor
+            case .y: live.scaleY *= factor
+            case .z: live.scaleZ *= factor
+            }
+        case nil:
+            break
+        }
+        return live
+    }
 
-    /// Local (object-axis) size: snapshot bounds × per-axis scale.
+    /// Local (object-axis) size: snapshot bounds × per-axis scale (live:
+    /// includes the gesture preview).
     var selectedSize: SIMD3<Float>? {
         guard let selection,
               let object = scene?.object(id: selection.objectID),
-              let transform = selectedAuthoritativeTransform else { return nil }
+              let transform = selectedDisplayTransform else { return nil }
         return object.mesh.bounds.size * SIMD3<Float>(transform.scale)
     }
 

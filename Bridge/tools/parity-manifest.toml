@@ -136,9 +136,9 @@ title = "Scale gizmo + panel"
 status = "done"
 desktop = ["gizmo:Scale"]
 evidence = ["client:struct ScalePanel", "abi:orca_plater_instance_set",
-            "client:func scaleAxisHit", "client:func previewScale"]
+            "client:func previewScale\\(factor"]
 work = "UI"
-note = "On-canvas per-axis handles (projected local-axis segments of the scale gizmo, one local axis each) beside the uniform vertical drag; panel has per-axis scale, size and reset like desktop"
+note = "On-canvas finger drag scales UNIFORM only (user direction; desktop's per-axis handles are a mouse affordance); per-axis scale/size entry lives in the expanded tools panel"
 
 [[feature]]
 id = "plate.scale-to-fit"
@@ -780,7 +780,7 @@ desktop = ["context:Edit", "context:Merge with", "context:{item_name}@create_fil
            "dialog:FilamentPickerDialog"]
 source = "src/slic3r/GUI/Plater.cpp:on_filament_count_change|add_filament"
 evidence = ["abi:orca_presets_set_filament_count", "abi:orca_presets_filament_slots",
-            "client:struct FilamentBar", 'client:func addFilament\(',
+            "client:struct FilamentChips", 'client:func addFilament\(',
             "abi:orca_presets_select_filament", "client:struct FilamentColourPicker",
             "client:func setFilamentColour"]
 gap = "no merge-with (combining two filament presets into one user preset) yet; per-slot preset edit opens the filament settings pages instead of a slot-scoped editor"

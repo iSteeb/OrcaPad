@@ -160,57 +160,71 @@ struct PreviewTabView: View {
 
     // MARK: Bottom panel: move scrubber + scheme controls
 
-    /// Preview chrome (one wide pill): Scheme menu (color scheme picker),
-    /// View menu (travel / seams / retractions / legend / frame), Open,
-    /// Share — everything the left dock and the file capsule did.
+    /// Preview chrome: ONE wide, horizontally SCROLLABLE pill with direct
+    /// (de-nested) controls: Scheme menu | travel / seams / retractions /
+    /// legend / frame toggles | Open | Share.
     private var topBar: some View {
-        HStack(spacing: 4) {
-            Menu {
-                Picker("Color scheme", selection: $store.colorMode) {
-                    ForEach(ToolpathColorMode.allCases) { mode in
-                        Text(mode.rawValue).tag(mode)
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 4) {
+                Menu {
+                    Picker("Color scheme", selection: $store.colorMode) {
+                        ForEach(ToolpathColorMode.allCases) { mode in
+                            Text(mode.rawValue).tag(mode)
+                        }
                     }
+                } label: {
+                    ChromeToolLabel(symbol: "paintpalette", label: "Scheme")
                 }
-            } label: {
-                ChromeToolLabel(symbol: "paintpalette", label: "Scheme")
-            }
-            Menu {
-                Toggle(isOn: $store.showTravel) {
-                    Label("Travel moves", systemImage: "arrow.triangle.swap")
+                Divider().frame(height: 28)
+                barToggle("arrow.triangle.swap", "Travel", store.showTravel) {
+                    store.showTravel.toggle()
                 }
-                Toggle(isOn: $store.showSeams) {
-                    Label("Seam markers", systemImage: "smallcircle.filled.circle")
+                barToggle("smallcircle.filled.circle", "Seams", store.showSeams) {
+                    store.showSeams.toggle()
                 }
-                Toggle(isOn: $store.showRetractions) {
-                    Label("Retractions", systemImage: "arrow.uturn.left.circle")
+                barToggle("arrow.uturn.left.circle", "Retract", store.showRetractions) {
+                    store.showRetractions.toggle()
                 }
-                Divider()
-                Toggle(isOn: $showLegend) {
-                    Label("Legend", systemImage: "list.bullet.rectangle")
+                barToggle("list.bullet.rectangle", "Legend", showLegend) {
+                    showLegend.toggle()
                 }
                 Button {
                     frameRequest += 1
                 } label: {
-                    Label("Frame scene", systemImage: "viewfinder")
+                    ChromeToolLabel(symbol: "viewfinder", label: "Frame")
                 }
-            } label: {
-                ChromeToolLabel(symbol: "slider.horizontal.3", label: "View")
-            }
-            Divider().frame(height: 28)
-            Button {
-                openPresented = true
-            } label: {
-                ChromeToolLabel(symbol: "doc.badge.plus", label: "Open")
-            }
-            .buttonStyle(.plain)
-            if let url = store.loadedURL {
-                ShareLink(item: url) {
-                    ChromeToolLabel(symbol: "square.and.arrow.up", label: "Share")
+                .buttonStyle(.plain)
+                Divider().frame(height: 28)
+                Button {
+                    openPresented = true
+                } label: {
+                    ChromeToolLabel(symbol: "doc.badge.plus", label: "Open")
+                }
+                .buttonStyle(.plain)
+                if let url = store.loadedURL {
+                    ShareLink(item: url) {
+                        ChromeToolLabel(symbol: "square.and.arrow.up", label: "Share")
+                    }
                 }
             }
+            .padding(6)
         }
-        .padding(6)
+        .frame(height: 58)
         .background(.ultraThinMaterial, in: Capsule())
+    }
+
+    private func barToggle(
+        _ symbol: String, _ label: String, _ active: Bool, action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            ChromeToolLabel(symbol: symbol, label: label)
+                .foregroundStyle(active ? Color.accentColor : Color.primary)
+                .background(
+                    active ? Color.accentColor.opacity(0.18) : Color.clear,
+                    in: RoundedRectangle(cornerRadius: 10)
+                )
+        }
+        .buttonStyle(.plain)
     }
 
     private var bottomPanel: some View {

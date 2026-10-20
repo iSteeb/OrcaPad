@@ -83,20 +83,6 @@ struct PlateTabView: View {
             }
         )
         .frame(maxWidth: .infinity, alignment: .leading)
-        FilamentBar(
-            slots: environment.presets.filamentSlots,
-            isBusy: environment.presets.isSelecting,
-            onAdd: { Task { await environment.presets.addFilament() } },
-            onRemove: { slot in Task { await environment.presets.removeFilament(slot: slot) } },
-            onSelectPreset: { slot, name in
-                Task { await environment.presets.selectFilamentPreset(slot: slot, name: name) }
-            },
-            onSetColour: { slot, colour in
-                Task { await environment.presets.setFilamentColour(slot: slot, colour: colour) }
-            },
-            filamentPresets: environment.presets.filaments,
-            onEditFlushVolumes: { flushPresented = true }
-        )
         .sheet(isPresented: $flushPresented) {
             FlushingVolumesSheet(
                 slots: environment.presets.filamentSlots,
@@ -126,7 +112,7 @@ struct PlateTabView: View {
                 expanded: $toolsExpanded,
                 rotationAxis: $rotationAxis,
                 transform: transform,
-                meshSize: object.mesh.bounds.size
+                meshSize: document.selectedSize ?? object.mesh.bounds.size
             ) {
             ManipulationPanel(
                 mode: gizmoMode,
@@ -334,7 +320,6 @@ struct PlateTabView: View {
                     onMove: { document.moveSelected(by: $0) },
                     onBegin: { document.beginManipulation() },
                     onRotate: { document.previewRotation(axis: rotationAxis, deltaRadians: $0, snapDegrees: $1) },
-                    onScaleAxis: { document.previewScale(axis: $0, factor: $1) },
                 onScale: { document.previewScale(factor: $0) },
                 onLayFlat: { normal in
                     guard let engine = environment.presets.engineForSlicing else {
@@ -366,190 +351,198 @@ struct PlateTabView: View {
 
     // MARK: File / object actions (top-right)
 
-    /// The Plate tab chrome (one wide pill): Undo / Redo | Menu (file +
-    /// objects) | Arrange (arrange / fill bed / orient) | Tools (gizmo
-    /// modes + duplicate / delete). The former left rail is gone.
+    /// The Plate tab chrome: ONE wide, horizontally SCROLLABLE pill. The
+    /// main tools are first-class buttons again (no nesting): Undo / Redo |
+    /// Menu (file + clipboard + objects) | Arrange / Fill bed / Orient |
+    /// Select / Move / Rotate / Scale / Lay flat | filament slot chips.
     private var topBar: some View {
-        HStack(spacing: 4) {
-            PlateActionButton(
-                symbol: "arrow.uturn.backward",
-                label: "Undo",
-                disabled: document.history?.canUndo != true || document.isBusy
-            ) {
-                Task { await document.undo() }
-            }
-            .keyboardShortcut("z", modifiers: .command)
-            .accessibilityHint(document.history.map { "Undo \($0.undoLabel)" } ?? "")
-            PlateActionButton(
-                symbol: "arrow.uturn.forward",
-                label: "Redo",
-                disabled: document.history?.canRedo != true || document.isBusy
-            ) {
-                Task { await document.redo() }
-            }
-            .keyboardShortcut("z", modifiers: [.command, .shift])
-            .accessibilityHint(document.history.map { "Redo \($0.redoLabel)" } ?? "")
-            Divider().frame(height: 28)
-            Menu {
-                Button {
-                    importMode = .model
-                    importPresented = true
-                } label: {
-                    Label("Import model…", systemImage: "plus.square")
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 4) {
+                PlateActionButton(
+                    symbol: "arrow.uturn.backward",
+                    label: "Undo",
+                    disabled: document.history?.canUndo != true || document.isBusy
+                ) {
+                    Task { await document.undo() }
                 }
+                .keyboardShortcut("z", modifiers: .command)
+                PlateActionButton(
+                    symbol: "arrow.uturn.forward",
+                    label: "Redo",
+                    disabled: document.history?.canRedo != true || document.isBusy
+                ) {
+                    Task { await document.redo() }
+                }
+                .keyboardShortcut("z", modifiers: [.command, .shift])
+                Divider().frame(height: 28)
                 Menu {
-                    ForEach(
-                        PrimitiveShape.allCases.filter(\.isObjectShape),
-                        id: \.self
-                    ) { shape in
-                        Button(shape.label) {
-                            Task {
-                                await document.addShapeObject(
-                                    shape: shape,
-                                    sizeMM: shapeSize,
-                                    bedCenter: bedCenter
-                                )
+                    Button {
+                        importMode = .model
+                        importPresented = true
+                    } label: {
+                        Label("Import model…", systemImage: "plus.square")
+                    }
+                    Menu {
+                        ForEach(
+                            PrimitiveShape.allCases.filter(\.isObjectShape),
+                            id: \.self
+                        ) { shape in
+                            Button(shape.label) {
+                                Task {
+                                    await document.addShapeObject(
+                                        shape: shape,
+                                        sizeMM: shapeSize,
+                                        bedCenter: bedCenter
+                                    )
+                                }
                             }
                         }
+                    } label: {
+                        Label("Add shape", systemImage: "cube")
                     }
-                } label: {
-                    Label("Add shape", systemImage: "cube")
-                }
-                Button {
-                    importMode = .project
-                    importPresented = true
-                } label: {
-                    Label("Open project…", systemImage: "folder")
-                }
-                Button {
-                    projectName = defaultProjectName
-                    savePresented = true
-                } label: {
-                    Label("Save project…", systemImage: "square.and.arrow.down")
-                }
-                .disabled(document.scene?.objects.isEmpty != false)
-                if let project = document.lastSavedProject {
-                    ShareLink(item: project) {
-                        Label("Share \(project.lastPathComponent)", systemImage: "square.and.arrow.up")
+                    Button {
+                        importMode = .project
+                        importPresented = true
+                    } label: {
+                        Label("Open project…", systemImage: "folder")
                     }
-                }
-                Menu {
-                    ForEach(CameraViewPreset.allCases) { preset in
-                        Button(preset.rawValue) {
-                            document.applyCameraView(preset)
+                    Button {
+                        projectName = defaultProjectName
+                        savePresented = true
+                    } label: {
+                        Label("Save project…", systemImage: "square.and.arrow.down")
+                    }
+                    .disabled(document.scene?.objects.isEmpty != false)
+                    if let project = document.lastSavedProject {
+                        ShareLink(item: project) {
+                            Label("Share \(project.lastPathComponent)", systemImage: "square.and.arrow.up")
                         }
                     }
-                } label: {
-                    Label("View", systemImage: "camera")
-                }
-                Divider()
-                Button {
-                    Task { await document.copySelected() }
-                } label: {
-                    Label("Copy", systemImage: "doc.on.doc")
-                }
-                .disabled(document.selection == nil)
-                .keyboardShortcut("c", modifiers: .command)
-                Button {
-                    Task { await document.cutSelected() }
-                } label: {
-                    Label("Cut", systemImage: "scissors")
-                }
-                .disabled(document.selection == nil)
-                .keyboardShortcut("x", modifiers: .command)
-                Button {
-                    Task {
-                        await document.pasteObject(bedCenter: bedCenter)
+                    Menu {
+                        ForEach(CameraViewPreset.allCases) { preset in
+                            Button(preset.rawValue) {
+                                document.applyCameraView(preset)
+                            }
+                        }
+                    } label: {
+                        Label("View", systemImage: "camera")
+                    }
+                    Divider()
+                    Button {
+                        Task { await document.copySelected() }
+                    } label: {
+                        Label("Copy", systemImage: "doc.on.doc")
+                    }
+                    .disabled(document.selection == nil)
+                    .keyboardShortcut("c", modifiers: .command)
+                    Button {
+                        Task { await document.cutSelected() }
+                    } label: {
+                        Label("Cut", systemImage: "scissors")
+                    }
+                    .disabled(document.selection == nil)
+                    .keyboardShortcut("x", modifiers: .command)
+                    Button {
+                        Task {
+                            await document.pasteObject(bedCenter: bedCenter)
+                        }
+                    } label: {
+                        Label("Paste", systemImage: "clipboard")
+                    }
+                    .disabled(document.isBusy)
+                    .keyboardShortcut("v", modifiers: .command)
+                    Button {
+                        duplicateSelection()
+                    } label: {
+                        Label("Duplicate", systemImage: "plus.square.on.square")
+                    }
+                    .disabled(document.selection == nil || document.isBusy)
+                    Button(role: .destructive) {
+                        deleteSelection()
+                    } label: {
+                        Label("Delete", systemImage: "trash")
+                    }
+                    .disabled(document.selection == nil || document.isBusy)
+                    Divider()
+                    Button {
+                        objectsPresented = true
+                    } label: {
+                        Label("Objects…", systemImage: "list.bullet")
+                    }
+                    .disabled(document.scene?.objects.isEmpty != false)
+                    Divider()
+                    Button {
+                        aboutPresented = true
+                    } label: {
+                        Label("About OrcaPad", systemImage: "info.circle")
                     }
                 } label: {
-                    Label("Paste", systemImage: "clipboard")
+                    ChromeToolLabel(symbol: "line.3.horizontal", label: "Menu")
                 }
                 .disabled(document.isBusy)
-                .keyboardShortcut("v", modifiers: .command)
-                Divider()
-                Button {
-                    objectsPresented = true
-                } label: {
-                    Label("Objects…", systemImage: "list.bullet")
-                }
-                .disabled(document.scene?.objects.isEmpty != false)
-                Divider()
-                Button {
-                    aboutPresented = true
-                } label: {
-                    Label("About OrcaPad", systemImage: "info.circle")
-                }
-            } label: {
-                ChromeToolLabel(symbol: "line.3.horizontal", label: "Menu")
-            }
-            .disabled(document.isBusy)
-            Menu {
-                Button {
+                Divider().frame(height: 28)
+                PlateActionButton(
+                    symbol: "square.grid.3x3", label: "Arrange",
+                    disabled: document.scene?.objects.isEmpty != false || document.isMutating
+                ) {
                     guard let engine = environment.presets.engineForSlicing else { return }
                     Task { await document.arrangeAll(presets: engine, allowRotations: false) }
-                } label: {
-                    Label("Arrange", systemImage: "square.grid.3x3")
                 }
-                .disabled(document.scene?.objects.isEmpty != false || document.isMutating)
                 if let selection = document.selection {
-                    Button {
+                    PlateActionButton(
+                        symbol: "square.stack.3d.up.fill", label: "Fill bed",
+                        disabled: document.isMutating
+                    ) {
                         guard let engine = environment.presets.engineForSlicing else { return }
                         Task {
                             await document.fillBed(
                                 objectID: selection.objectID, presets: engine, allowRotations: false
                             )
                         }
-                    } label: {
-                        Label("Fill bed", systemImage: "square.stack.3d.up.fill")
                     }
-                    .disabled(document.isMutating)
                 }
-                Button {
+                PlateActionButton(
+                    symbol: "location.north.circle", label: "Orient",
+                    disabled: document.scene?.objects.isEmpty != false || document.isMutating
+                ) {
                     guard let engine = environment.presets.engineForSlicing else { return }
                     Task { await document.orientAll(presets: engine) }
-                } label: {
-                    Label("Orient", systemImage: "location.north.circle")
                 }
-                .disabled(document.scene?.objects.isEmpty != false || document.isMutating)
-            } label: {
-                ChromeToolLabel(symbol: "square.grid.3x3", label: "Arrange")
-            }
-            .disabled(document.isBusy)
-            Menu {
+                Divider().frame(height: 28)
                 ForEach(Array(GizmoMode.allCases.enumerated()), id: \.offset) { _, mode in
                     Button {
                         gizmoMode = mode
                         toolsExpanded = false
                     } label: {
-                        if gizmoMode == mode {
-                            Label(mode.menuLabel, systemImage: "checkmark")
-                        } else {
-                            Text(mode.menuLabel)
-                        }
+                        ChromeToolLabel(symbol: mode.symbol, label: mode.menuLabel)
+                            .foregroundStyle(gizmoMode == mode ? Color.white : Color.primary)
+                            .background(
+                                gizmoMode == mode ? Color.accentColor : Color.clear,
+                                in: RoundedRectangle(cornerRadius: 10)
+                            )
                     }
+                    .buttonStyle(.plain)
+                    .disabled(document.isBusy)
                 }
-                Divider()
-                Button {
-                    duplicateSelection()
-                } label: {
-                    Label("Duplicate", systemImage: "plus.square.on.square")
-                }
-                .disabled(document.selection == nil || document.isBusy)
-                Button(role: .destructive) {
-                    deleteSelection()
-                } label: {
-                    Label("Delete", systemImage: "trash")
-                }
-                .disabled(document.selection == nil || document.isBusy)
-            } label: {
-                ChromeToolLabel(
-                    symbol: gizmoMode.symbol,
-                    label: "Tools"
+                Divider().frame(height: 28)
+                FilamentChips(
+                    slots: environment.presets.filamentSlots,
+                    isBusy: environment.presets.isSelecting,
+                    onAdd: { Task { await environment.presets.addFilament() } },
+                    onRemove: { slot in Task { await environment.presets.removeFilament(slot: slot) } },
+                    onSelectPreset: { slot, name in
+                        Task { await environment.presets.selectFilamentPreset(slot: slot, name: name) }
+                    },
+                    onSetColour: { slot, colour in
+                        Task { await environment.presets.setFilamentColour(slot: slot, colour: colour) }
+                    },
+                    onEditFlushVolumes: { flushPresented = true },
+                    filamentPresets: environment.presets.filaments
                 )
             }
-            .disabled(document.isBusy)
+            .padding(6)
         }
-        .padding(6)
+        .frame(height: 58)
         .background(.ultraThinMaterial, in: Capsule())
     }
 
@@ -1272,130 +1265,117 @@ private extension VolumeRole {
 /// Desktop plate selector: chips for the plates in order, tap to select
 /// (import target + slice source), long-press for the plate menu (rename,
 /// lock, duplicate, move to front, delete). Presentation only.
-/// Desktop left-panel filament list (touch-adapted): one chip per slot with
-/// its color swatch + preset name; add / remove; tap a chip for its preset
-/// menu and a color edit. Drives the multi-filament config (extruder count,
-/// per-slot filament presets and colors).
-private struct FilamentBar: View {
+/// Filament slot chips for the top pill bar (desktop filament list,
+/// compact): numbered color circles; tap for the slot menu (preset swap,
+/// color, remove, flushing volumes); + adds a slot.
+private struct FilamentChips: View {
     let slots: [EnginePresets.FilamentSlot]
     let isBusy: Bool
     let onAdd: () -> Void
     let onRemove: (Int) -> Void
     let onSelectPreset: (Int, String) -> Void
     let onSetColour: (Int, String) -> Void
-    let filamentPresets: [PresetEntry]
     let onEditFlushVolumes: () -> Void
+    let filamentPresets: [PresetEntry]
 
     @State private var colourTarget: Int?
 
     var body: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 8) {
-                ForEach(Array(slots.enumerated()), id: \.offset) { index, slot in
-                    Menu {
-                        ForEach(filamentPresets, id: \.name) { preset in
-                            Button {
-                                onSelectPreset(index, preset.name)
-                            } label: {
-                                if preset.name == slot.presetName {
-                                    Label(preset.name, systemImage: "checkmark")
-                                } else {
-                                    Text(preset.name)
-                                }
-                            }
-                        }
-                        Divider()
-                        Button {
-                            colourTarget = index
-                        } label: {
-                            Label("Edit colour…", systemImage: "paintpalette")
-                        }
-                        if index == 0 {
-                            Button {
-                                onEditFlushVolumes()
-                            } label: {
-                                Label("Flushing volumes…", systemImage: "square.grid.3x3.middle.filled")
-                            }
-                        }
-                        if slots.count > 1 {
-                            Button(role: .destructive) {
-                                onRemove(index)
-                            } label: {
-                                Label("Remove filament", systemImage: "minus.circle")
-                            }
-                        }
-                    } label: {
-                        HStack(spacing: 6) {
-                            Circle()
-                                .fill(Color(hex: slot.colour) ?? .gray)
-                                .frame(width: 16, height: 16)
-                                .overlay(Circle().strokeBorder(.secondary.opacity(0.5)))
-                            Text("\(index + 1) · \(shortName(slot.presetName))")
-                                .font(.caption)
-                                .lineLimit(1)
-                        }
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 6)
-                        .frame(maxWidth: 220)
-                        .background(Color(.secondarySystemBackground), in: Capsule())
-                    }
+        HStack(spacing: 6) {
+            ForEach(Array(slots.enumerated()), id: \.offset) { index, slot in
+                slotMenu(index: index, slot: slot)
                     .disabled(isBusy)
-                }
-                Button(action: onAdd) {
-                    Image(systemName: "plus.circle.fill")
-                        .font(.title3)
-                }
-                .disabled(isBusy || slots.count >= 16)
-                .accessibilityLabel("Add filament")
             }
-            .padding(.horizontal, 8)
-            .padding(.vertical, 4)
+            Button(action: onAdd) {
+                Image(systemName: "plus.circle.fill")
+                    .font(.title3)
+                    .frame(height: 36)
+            }
+            .disabled(isBusy || slots.count >= 16)
+            .accessibilityLabel("Add filament")
         }
         .sheet(item: Binding(
-            get: { colourTarget.map { FilamentColourTarget(slot: $0) } },
+            get: { colourTarget.map { Target(slot: $0) } },
             set: { colourTarget = $0?.slot }
         )) { target in
-            FilamentColourPicker(
-                initial: slots[target.slot].colour
-            ) { colour in
+            FilamentColourPicker(initial: slots[target.slot].colour) { colour in
                 onSetColour(target.slot, colour)
             }
             .presentationDetents([.height(320)])
         }
     }
 
-    private func shortName(_ name: String) -> String {
-        name.replacingOccurrences(of: " @", with: "@")
+    @ViewBuilder
+    private func slotMenu(index: Int, slot: EnginePresets.FilamentSlot) -> some View {
+        Menu {
+            presetSection(index: index, slot: slot)
+            Divider()
+            actionsSection(index: index)
+        } label: {
+            slotLabel(slot: slot, index: index)
+        }
     }
 
-    private struct FilamentColourTarget: Identifiable {
+    @ViewBuilder
+    private func presetSection(index: Int, slot: EnginePresets.FilamentSlot) -> some View {
+        ForEach(filamentPresets, id: \.name) { preset in
+            presetButton(index: index, preset: preset, selected: preset.name == slot.presetName)
+        }
+    }
+
+    @ViewBuilder
+    private func presetButton(index: Int, preset: PresetEntry, selected: Bool) -> some View {
+        Button {
+            onSelectPreset(index, preset.name)
+        } label: {
+            if selected {
+                Label(preset.name, systemImage: "checkmark")
+            } else {
+                Text(preset.name)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func actionsSection(index: Int) -> some View {
+        Button {
+            colourTarget = index
+        } label: {
+            Label("Edit colour…", systemImage: "paintpalette")
+        }
+        if index == 0 {
+            Button {
+                onEditFlushVolumes()
+            } label: {
+                Label("Flushing volumes…", systemImage: "square.grid.3x3.middle.filled")
+            }
+        }
+        if slots.count > 1 {
+            Button(role: .destructive) {
+                onRemove(index)
+            } label: {
+                Label("Remove filament", systemImage: "minus.circle")
+            }
+        }
+    }
+
+    private func slotLabel(slot: EnginePresets.FilamentSlot, index: Int) -> some View {
+        HStack(spacing: 4) {
+            Circle()
+                .fill(Color(hex: slot.colour) ?? .gray)
+                .frame(width: 16, height: 16)
+                .overlay(Circle().strokeBorder(.secondary.opacity(0.5)))
+            Text("\(index + 1)")
+                .font(.caption.weight(.semibold).monospacedDigit())
+        }
+        .frame(height: 36)
+        .padding(.horizontal, 8)
+        .background(Color(.secondarySystemBackground), in: Capsule())
+    }
+
+    private struct Target: Identifiable {
         let slot: Int
         var id: Int { slot }
-    }
-}
-
-/// #rrggbb hex color parsing/formatting for filament swatches.
-extension Color {
-    init?(hex: String) {
-        var value = hex.hasPrefix("#") ? String(hex.dropFirst()) : hex
-        guard value.count == 6, let rgb = UInt64(value, radix: 16) else { return nil }
-        value = ""
-        self.init(
-            .sRGB,
-            red: Double((rgb >> 16) & 0xFF) / 255,
-            green: Double((rgb >> 8) & 0xFF) / 255,
-            blue: Double(rgb & 0xFF) / 255
-        )
-    }
-
-    static func hexString(_ color: Color) -> String {
-        let ui = UIColor(color)
-        var red: CGFloat = 0, green: CGFloat = 0, blue: CGFloat = 0, alpha: CGFloat = 0
-        ui.getRed(&red, green: &green, blue: &blue, alpha: &alpha)
-        return String(
-            format: "#%02X%02X%02X",
-            Int(red * 255), Int(green * 255), Int(blue * 255)
-        )
     }
 }
 
@@ -1429,10 +1409,30 @@ private struct FilamentColourPicker: View {
     }
 }
 
-/// Desktop FlushingVolumesDialog: the N x N purge matrix + flush
-/// multiplier, edited on the MACHINE preset. Cells show from (row) ->
-/// to (column) filament with the slot colors as headers; the default is
-/// 280 mm\u00b3 between different filaments, 0 on the diagonal.
+/// #rrggbb hex color parsing/formatting for filament swatches.
+extension Color {
+    init?(hex: String) {
+        let value = hex.hasPrefix("#") ? String(hex.dropFirst()) : hex
+        guard value.count == 6, let rgb = UInt64(value, radix: 16) else { return nil }
+        self.init(
+            .sRGB,
+            red: Double((rgb >> 16) & 0xFF) / 255,
+            green: Double((rgb >> 8) & 0xFF) / 255,
+            blue: Double(rgb & 0xFF) / 255
+        )
+    }
+
+    static func hexString(_ color: Color) -> String {
+        let ui = UIColor(color)
+        var red: CGFloat = 0, green: CGFloat = 0, blue: CGFloat = 0, alpha: CGFloat = 0
+        ui.getRed(&red, green: &green, blue: &blue, alpha: &alpha)
+        return String(
+            format: "#%02X%02X%02X",
+            Int(red * 255), Int(green * 255), Int(blue * 255)
+        )
+    }
+}
+
 struct FlushingVolumesSheet: View {
     let slots: [EnginePresets.FilamentSlot]
     let editedMatrix: String?
@@ -1843,12 +1843,14 @@ private struct ManipulationPanel: View {
 
     // Move: X / Y on the bed plane + center (Z is engine-managed: rests on bed).
     private var movePanel: some View {
-        HStack(alignment: .bottom, spacing: 14) {
-            NumericField(label: "X", unit: "mm", value: transform.offsetX, digits: 2) { value in
-                var updated = transform; updated.offsetX = value; actions.setTransform(updated, "Move")
-            }
-            NumericField(label: "Y", unit: "mm", value: transform.offsetY, digits: 2) { value in
-                var updated = transform; updated.offsetY = value; actions.setTransform(updated, "Move")
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .bottom, spacing: 14) {
+                NumericField(label: "X position", unit: "mm", value: transform.offsetX, digits: 2) { value in
+                    var updated = transform; updated.offsetX = value; actions.setTransform(updated, "Move")
+                }
+                NumericField(label: "Y position", unit: "mm", value: transform.offsetY, digits: 2) { value in
+                    var updated = transform; updated.offsetY = value; actions.setTransform(updated, "Move")
+                }
             }
             Button {
                 var updated = transform
@@ -1857,10 +1859,10 @@ private struct ManipulationPanel: View {
                 actions.setTransform(updated, "Center")
             } label: {
                 Label("Center on bed", systemImage: "scope")
+                    .frame(maxWidth: .infinity)
             }
             .buttonStyle(.bordered)
-            .font(.caption)
-            Spacer()
+            .controlSize(.large)
         }
     }
 }
@@ -1879,96 +1881,78 @@ private struct RotatePanel: View {
     @FocusState private var relativeFocused: Bool
 
     var body: some View {
-        ViewThatFits(in: .horizontal) {
-            panelLayout(compact: false)
-            panelLayout(compact: true)
-        }
-    }
-
-    /// `compact` stacks the controls vertically (Split View / narrow widths);
-    /// the default row matches the desktop Object-manipulation panel.
-    private func panelLayout(compact: Bool) -> some View {
-        let axes = HStack(spacing: 6) {
-            ForEach(EngineAxis.allCases, id: \.self) { candidate in
-                Button {
-                    axis = candidate
-                } label: {
-                    Text(candidate.label)
-                        .font(.callout.weight(.semibold))
-                        .frame(width: 40, height: 30)
-                        .foregroundStyle(axis == candidate ? Color.white : candidate.color)
-                        .background(
-                            axis == candidate ? candidate.color : candidate.color.opacity(0.15),
-                            in: RoundedRectangle(cornerRadius: 8)
-                        )
-                }
-                .buttonStyle(.plain)
-            }
-        }
-        let readouts = HStack(spacing: 10) {
-            ForEach(EngineAxis.allCases, id: \.self) { candidate in
-                Text("\(candidate.label) \(Self.degrees(transform.rotation[Int(candidate.rawValue)]))°")
-                    .font(.caption.monospaced())
-                    .foregroundStyle(candidate == axis ? candidate.color : Color.secondary)
-            }
-        }
-        let controls = VStack(spacing: 6) {
-            HStack(spacing: 6) {
-                Button { actions.rotate(axis, -Self.step) } label: {
-                    Label("−15°", systemImage: "arrow.counterclockwise")
-                }
-                Button { actions.rotate(axis, Self.step) } label: {
-                    Label("+15°", systemImage: "arrow.clockwise")
-                }
-            }
-            .buttonStyle(.borderedProminent)
-            .tint(axis.color)
-            // Desktop rotate input window: type ANY relative angle.
-            HStack(spacing: 4) {
-                TextField("angle", text: $relativeDegrees)
-                    .keyboardType(.numbersAndPunctuation)
-                    .focused($relativeFocused)
-                    .frame(width: 68)
-                    .textFieldStyle(.roundedBorder)
-                Text("°")
-                    .foregroundStyle(Color.secondary)
-                Button("Rotate", action: applyRelative)
-                    .buttonStyle(.bordered)
-                    .font(.caption)
-            }
-            Button("Reset rotation", action: actions.resetRotation)
-                .buttonStyle(.bordered)
-                .font(.caption)
-        }
-        if compact {
-            return AnyView(
-                VStack(alignment: .leading, spacing: 10) {
-                    HStack(spacing: 12) {
-                        AxisGlyph(selected: axis)
-                            .frame(width: 56, height: 56)
-                        VStack(alignment: .leading, spacing: 6) {
-                            axes
-                            readouts
-                        }
-                    }
-                    controls
-                }
-            )
-        }
-        return AnyView(
-            HStack(alignment: .center, spacing: 16) {
-                AxisGlyph(selected: axis)
-                    .frame(width: 70, height: 70)
-                VStack(alignment: .leading, spacing: 8) {
-                    axes
-                    readouts
+        VStack(alignment: .leading, spacing: 12) {
+            // Euler readout: one comfortable row
+            HStack(spacing: 14) {
+                ForEach(EngineAxis.allCases, id: \.self) { candidate in
+                    Text("\(candidate.label) \(Self.degrees(transform.rotation[Int(candidate.rawValue)]))°")
+                        .font(.callout.monospaced())
+                        .foregroundStyle(candidate == axis ? candidate.color : Color.secondary)
                 }
                 Spacer()
-                controls
             }
-        )
+            // Axis selector: big, tap-friendly
+            HStack(spacing: 8) {
+                Text("Axis")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .frame(width: 44, alignment: .leading)
+                ForEach(EngineAxis.allCases, id: \.self) { candidate in
+                    Button {
+                        axis = candidate
+                    } label: {
+                        Text(candidate.label)
+                            .font(.body.weight(.semibold))
+                            .frame(maxWidth: .infinity, minHeight: 36)
+                            .foregroundStyle(axis == candidate ? Color.white : candidate.color)
+                            .background(
+                                axis == candidate ? candidate.color : candidate.color.opacity(0.15),
+                                in: RoundedRectangle(cornerRadius: 10)
+                            )
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            // Relative angle: entry + quick steps, one aligned row
+            HStack(spacing: 8) {
+                Text("Angle")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .frame(width: 44, alignment: .leading)
+                TextField("e.g. 12.5", text: $relativeDegrees)
+                    .keyboardType(.numbersAndPunctuation)
+                    .font(.body.monospaced())
+                    .textFieldStyle(.roundedBorder)
+                    .frame(maxWidth: 120, minHeight: 34)
+                    .multilineTextAlignment(.center)
+                    .onSubmit(applyRelative)
+                Text("°")
+                    .foregroundStyle(.secondary)
+                Button("Rotate", action: applyRelative)
+                    .buttonStyle(.bordered)
+                Spacer()
+                Button { actions.rotate(axis, -Self.step) } label: {
+                    Image(systemName: "minus")
+                }
+                .buttonStyle(.bordered)
+                Text("15°")
+                    .font(.caption.monospaced())
+                    .foregroundStyle(.secondary)
+                Button { actions.rotate(axis, Self.step) } label: {
+                    Image(systemName: "plus")
+                }
+                .buttonStyle(.bordered)
+            }
+            Button(role: .destructive) {
+                actions.resetRotation()
+            } label: {
+                Label("Reset rotation", systemImage: "arrow.uturn.backward.circle")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.large)
+        }
     }
-
 
     private func applyRelative() {
         guard let degrees = Double(relativeDegrees.trimmingCharacters(in: .whitespaces)),
@@ -1978,12 +1962,30 @@ private struct RotatePanel: View {
         relativeFocused = false
     }
 
-    /// Engine Euler angle as a 0–359.9 display value (never "-0.0").
+    /// Engine Euler angle as a 0-359.9 display value (never "-0.0").
     static func degrees(_ radians: Double) -> String {
         var value = (radians * 180 / .pi).truncatingRemainder(dividingBy: 360)
         if value < 0 { value += 360 }
         if abs(value) < 0.05 || value >= 359.95 { value = 0 }
         return String(format: "%.1f", value)
+    }
+}
+
+private extension EngineAxis {
+    var label: String {
+        switch self {
+        case .x: return "X"
+        case .y: return "Y"
+        case .z: return "Z"
+        }
+    }
+
+    var color: Color {
+        switch self {
+        case .x: return .red
+        case .y: return .green
+        case .z: return .blue
+        }
     }
 }
 
@@ -2042,24 +2044,28 @@ private struct ScalePanel: View {
     @State private var uniform = true
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 12) {
                 Toggle(isOn: $uniform) {
                     Label("Uniform", systemImage: uniform ? "lock.fill" : "lock.open")
                 }
                 .toggleStyle(.button)
-                .font(.caption)
-                Button("100%") {
+                Spacer()
+                Button(role: .destructive) {
                     var updated = transform
                     updated.scaleX = 1; updated.scaleY = 1; updated.scaleZ = 1
                     actions.setTransform(updated, "Reset scale")
+                } label: {
+                    Label("Reset 100%", systemImage: "arrow.uturn.backward.circle")
                 }
                 .buttonStyle(.bordered)
-                .font(.caption)
-                Spacer()
             }
-            HStack(alignment: .bottom, spacing: 12) {
-                Text("Scale").font(.caption).foregroundStyle(.secondary).frame(width: 34, alignment: .leading)
+            // Scale percentages: one aligned row
+            HStack(alignment: .bottom, spacing: 14) {
+                Text("Scale")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .frame(width: 44, alignment: .leading)
                 ForEach(EngineAxis.allCases, id: \.self) { axis in
                     NumericField(
                         label: axis.label, unit: "%",
@@ -2070,8 +2076,12 @@ private struct ScalePanel: View {
                     }
                 }
             }
-            HStack(alignment: .bottom, spacing: 12) {
-                Text("Size").font(.caption).foregroundStyle(.secondary).frame(width: 34, alignment: .leading)
+            // Absolute size: one aligned row
+            HStack(alignment: .bottom, spacing: 14) {
+                Text("Size")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .frame(width: 44, alignment: .leading)
                 ForEach(EngineAxis.allCases, id: \.self) { axis in
                     let mesh = Double(meshSize[Int(axis.rawValue)])
                     NumericField(
@@ -2095,10 +2105,10 @@ private struct ScalePanel: View {
         guard newScale.isFinite, newScale > 0 else { return }
         var updated = transform
         if uniform {
-            let factor = newScale / scale(axis)
-            updated.scaleX *= factor
-            updated.scaleY *= factor
-            updated.scaleZ *= factor
+            let ratio = newScale / scale(axis)
+            updated.scaleX *= ratio
+            updated.scaleY *= ratio
+            updated.scaleZ *= ratio
         } else {
             switch axis {
             case .x: updated.scaleX = newScale
@@ -2110,25 +2120,6 @@ private struct ScalePanel: View {
     }
 }
 
-private extension EngineAxis {
-    var label: String {
-        switch self {
-        case .x: return "X"
-        case .y: return "Y"
-        case .z: return "Z"
-        }
-    }
-
-    var color: Color {
-        switch self {
-        case .x: return Color(red: 0.95, green: 0.30, blue: 0.25)
-        case .y: return Color(red: 0.35, green: 0.80, blue: 0.35)
-        case .z: return Color(red: 0.30, green: 0.55, blue: 1.00)
-        }
-    }
-}
-
-/// Numeric text field committing on submit with range validation.
 private struct NumericField: View {
     let label: String
     let unit: String
@@ -2142,21 +2133,23 @@ private struct NumericField: View {
     @State private var invalid = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
+        VStack(alignment: .leading, spacing: 4) {
             Text(label)
-                .font(.caption2)
+                .font(.caption.weight(.medium))
                 .foregroundStyle(.secondary)
-            HStack(spacing: 3) {
+            HStack(spacing: 4) {
                 TextField(label, text: $draft)
                     .onSubmit(submit)
                     .keyboardType(.numbersAndPunctuation)
-                    .font(.callout.monospaced())
-                    .frame(width: 76)
+                    .font(.body.monospaced())
+                    .frame(maxWidth: .infinity, minHeight: 34)
                     .textFieldStyle(.roundedBorder)
+                    .multilineTextAlignment(.center)
                     .foregroundStyle(invalid ? Color.red : Color.primary)
                 Text(unit)
-                    .font(.caption)
+                    .font(.caption.monospaced())
                     .foregroundStyle(.secondary)
+                    .frame(width: 26, alignment: .leading)
             }
         }
         .onAppear { draft = formatted(value) }

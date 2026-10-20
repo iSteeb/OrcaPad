@@ -10,7 +10,18 @@ import SwiftUI
 /// Simple/Advanced/Expert filter, and the Slice action in the toolbar.
 struct PrepareTabView: View {
     @Environment(AppEnvironment.self) private var environment
-    @State private var modeFilter: SettingsModeFilter = .simple
+    @State private var activeKind: PresetKind = .process
+    @State private var activePage: String?
+    /// Per-kind mode memory (user spec: simple for printer, advanced for
+    /// process, remembered across switches). Persisted per kind.
+    @State private var kindModes: [PresetKind: SettingsModeFilter] =
+        Dictionary(uniqueKeysWithValues: PresetKind.allCases.map { kind in
+            (kind, UserDefaults.standard.string(forKey: "prepare.mode.\(kind)")
+                .flatMap(SettingsModeFilter.init(rawValue:)) ?? .simple)
+        })
+    private var modeFilter: SettingsModeFilter {
+        get { kindModes[activeKind] ?? .simple }
+    }
     @State private var search = ""
     @State private var showAllProcesses = false
     /// Desktop UnsavedChangesDialog: a selection waiting for a decision
@@ -45,6 +56,7 @@ struct PrepareTabView: View {
                 }
             }
             .navigationTitle("Prepare")
+                .toolbar(.hidden, for: .navigationBar)
             .toolbar {
                 ToolbarItem(placement: .primaryAction) { sliceButton }
             }
@@ -135,20 +147,171 @@ struct PrepareTabView: View {
     // MARK: Editor
 
     private var editor: some View {
-        List {
-            Section {
-                Picker("Mode", selection: $modeFilter) {
-                    ForEach(SettingsModeFilter.allCases) { filter in
-                        Text(filter.rawValue).tag(filter)
-                    }
-                }
-                .pickerStyle(.segmented)
-            }
+        VStack(spacing: 0) {
+            preparePill
+                .padding(.horizontal, 12)
+                .padding(.top, 4)
+                .padding(.bottom, 8)
+            settingsList
+        }
+    }
 
+    /// The Prepare chrome: ONE wide, horizontally SCROLLABLE pill.
+    /// [Mode] | [Printer][Filament][Process] | active kind's page chips
+    /// (Quality / Strength / Support … for process). Mode memory is
+    /// per-kind; kind buttons select presets and focus their settings.
+    private var preparePill: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 4) {
+                Menu {
+                    ForEach(SettingsModeFilter.allCases) { filter in
+                        Button {
+                            setMode(filter)
+                        } label: {
+                            if modeFilter == filter {
+                                Label(filter.rawValue, systemImage: "checkmark")
+                            } else {
+                                Text(filter.rawValue)
+                            }
+                        }
+                    }
+                } label: {
+                    ChromeToolLabel(symbol: "ellipsis.text", label: modeFilter.rawValue)
+                }
+                Divider().frame(height: 28)
+                kindButton(.machine, symbol: "printer", label: "Printer")
+                kindButton(.filament, symbol: "circle.dotted.circle", label: "Filament")
+                kindButton(.process, symbol: "slider.horizontal.3", label: "Process")
+                Divider().frame(height: 28)
+                pageChips
+            }
+            .padding(6)
+        }
+        .frame(height: 58)
+        .background(.ultraThinMaterial, in: Capsule())
+    }
+
+    private func setMode(_ filter: SettingsModeFilter) {
+        kindModes[activeKind] = filter
+        UserDefaults.standard.set(filter.rawValue, forKey: "prepare.mode.\(activeKind)")
+        activePage = nil
+    }
+
+    @ViewBuilder
+    private func kindButton(_ kind: PresetKind, symbol: String, label: String) -> some View {
+        let active = activeKind == kind
+        Menu {
+            presetEntries(kind)
+            Divider()
+            Button {
+                activeKind = kind
+                activePage = nil
+            } label: {
+                Label("Focus \(label) settings", systemImage: "scope")
+            }
+        } label: {
+            ChromeToolLabel(symbol: symbol, label: label)
+                .foregroundStyle(active ? Color.white : Color.primary)
+                .background(
+                    active ? Color.accentColor : Color.clear,
+                    in: RoundedRectangle(cornerRadius: 10)
+                )
+        }
+    }
+
+    @ViewBuilder
+    private func presetEntries(_ kind: PresetKind) -> some View {
+        let entries = presetList(for: kind)
+        let current = currentPreset(for: kind)
+        ForEach(entries, id: \.name) { entry in
+            presetMenuButton(kind: kind, entry: entry, selected: entry.name == current)
+        }
+    }
+
+    private func presetList(for kind: PresetKind) -> [PresetEntry] {
+        switch kind {
+        case .machine:
+            return presets.machines
+        case .filament:
+            return presets.filaments
+        case .process:
+            return showAllProcesses ? presets.processes : presets.processes.filter(\.isCompatible)
+        }
+    }
+
+    private func currentPreset(for kind: PresetKind) -> String {
+        switch kind {
+        case .machine:
+            return presets.selection.machine
+        case .filament:
+            return presets.selection.filament
+        case .process:
+            return presets.selection.process
+        }
+    }
+
+    @ViewBuilder
+    private func presetMenuButton(kind: PresetKind, entry: PresetEntry, selected: Bool) -> some View {
+        Button {
+            requestSelect(kind, entry.name)
+        } label: {
+            if selected {
+                Label(entry.name, systemImage: "checkmark")
+            } else {
+                Text(entry.name)
+            }
+        }
+    }
+
+    /// The active kind's settings pages as scrollable chips in the pill
+    /// (process: Quality / Strength / Support …).
+    @ViewBuilder
+    private var pageChips: some View {
+        switch SettingsPageModel.build(
+            kind: activeKind,
+            edited: presets.editedConfigs[activeKind] ?? [:],
+            modified: presets.modifiedKeys(in: activeKind),
+            filter: modeFilter,
+            search: ""
+        ) {
+        case .success(let pages):
+            ForEach(pages) { page in
+                Button {
+                    activePage = page.title
+                } label: {
+                    Text(page.title)
+                        .font(.caption.weight(.medium))
+                        .lineLimit(1)
+                        .padding(.horizontal, 10)
+                        .frame(height: 36)
+                        .background(
+                            activePage == page.title
+                                ? Color.accentColor.opacity(0.18) : Color(.secondarySystemBackground),
+                            in: Capsule()
+                        )
+                        .foregroundStyle(activePage == page.title ? Color.accentColor : Color.primary)
+                }
+                .buttonStyle(.plain)
+            }
+        case .failure:
+            EmptyView()
+        }
+    }
+
+    private var settingsList: some View {
+        List {
             printerSection
             filamentSection
             processSection
-            SettingsPagesSections(kind: .process, filter: modeFilter, search: search)
+            SettingsPagesSections(
+                kind: activeKind,
+                filter: modeFilter,
+                search: search,
+                externalSelectedPage: Binding(
+                    get: { activePage },
+                    set: { activePage = $0 }
+                )
+            )
 
             Section {
                 NavigationLink {
