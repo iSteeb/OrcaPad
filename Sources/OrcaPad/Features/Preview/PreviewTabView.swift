@@ -239,12 +239,16 @@ struct PreviewTabView: View {
                 in: 0...Double(max(store.topLayerSegmentCount, 1)),
                 step: 1
             )
+            // Bounded readouts: shrink to fit, never wrap or squeeze
+            // neighbors (global text rule).
             VStack(alignment: .trailing, spacing: 1) {
                 Text("\(store.topLayerProgress)/\(store.topLayerSegmentCount) moves")
                 Text("~\(Int(store.remainingSeconds / 60)) min after layer \(store.upperLayer + 1)")
             }
-            .font(.caption2.monospaced())
+            .font(.caption2.monospacedDigit())
             .foregroundStyle(.secondary)
+            .lineLimit(1)
+            .minimumScaleFactor(0.6)
             .frame(minWidth: 150, alignment: .trailing)
         }
         .padding(.horizontal, 16)

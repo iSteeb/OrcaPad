@@ -132,6 +132,14 @@ enum SettingsModeFilter: String, CaseIterable, Identifiable, Sendable {
     case expert = "Expert"
 
     var id: String { rawValue }
+
+    var symbol: String {
+        switch self {
+        case .simple: return "1.circle"
+        case .advanced: return "2.circle"
+        case .expert: return "3.circle"
+        }
+    }
 }
 
 /// One editable option merged from the schema and the engine's edited config.

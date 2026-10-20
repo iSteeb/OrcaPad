@@ -12,6 +12,7 @@ struct PrepareTabView: View {
     @Environment(AppEnvironment.self) private var environment
     @State private var activeKind: PresetKind = .process
     @State private var activePage: String?
+    @State private var expandedKind: PresetKind?
     /// Per-kind mode memory (user spec: simple for printer, advanced for
     /// process, remembered across switches). Persisted per kind.
     @State private var kindModes: [PresetKind: SettingsModeFilter] =
@@ -163,21 +164,18 @@ struct PrepareTabView: View {
     private var preparePill: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 4) {
-                Menu {
-                    ForEach(SettingsModeFilter.allCases) { filter in
-                        Button {
-                            setMode(filter)
-                        } label: {
-                            if modeFilter == filter {
-                                Label(filter.rawValue, systemImage: "checkmark")
-                            } else {
-                                Text(filter.rawValue)
-                            }
-                        }
-                    }
+                Button {
+                    let order: [SettingsModeFilter] = [.simple, .advanced, .expert]
+                    setMode(order[(order.firstIndex(of: modeFilter).map { ($0 + 1) % order.count } ?? 0)])
                 } label: {
-                    ChromeToolLabel(symbol: "ellipsis.text", label: modeFilter.rawValue)
+                    ChromeToolLabel(
+                        symbol: modeFilter.symbol,
+                        label: modeFilter.rawValue
+                    )
+                    .foregroundStyle(Color.accentColor)
                 }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Settings level: \(modeFilter.rawValue)")
                 Divider().frame(height: 28)
                 kindButton(.machine, symbol: "printer", label: "Printer")
                 kindButton(.filament, symbol: "circle.dotted.circle", label: "Filament")
@@ -197,18 +195,13 @@ struct PrepareTabView: View {
         activePage = nil
     }
 
-    @ViewBuilder
+    /// Kind buttons SWITCH THE PAGE (the pill drives the main view); each
+    /// page carries its own expandable categorized preset list.
     private func kindButton(_ kind: PresetKind, symbol: String, label: String) -> some View {
         let active = activeKind == kind
-        Menu {
-            presetEntries(kind)
-            Divider()
-            Button {
-                activeKind = kind
-                activePage = nil
-            } label: {
-                Label("Focus \(label) settings", systemImage: "scope")
-            }
+        return Button {
+            activeKind = kind
+            activePage = nil
         } label: {
             ChromeToolLabel(symbol: symbol, label: label)
                 .foregroundStyle(active ? Color.white : Color.primary)
@@ -217,15 +210,7 @@ struct PrepareTabView: View {
                     in: RoundedRectangle(cornerRadius: 10)
                 )
         }
-    }
-
-    @ViewBuilder
-    private func presetEntries(_ kind: PresetKind) -> some View {
-        let entries = presetList(for: kind)
-        let current = currentPreset(for: kind)
-        ForEach(entries, id: \.name) { entry in
-            presetMenuButton(kind: kind, entry: entry, selected: entry.name == current)
-        }
+        .buttonStyle(.plain)
     }
 
     private func presetList(for kind: PresetKind) -> [PresetEntry] {
@@ -298,20 +283,25 @@ struct PrepareTabView: View {
         }
     }
 
+    /// The pill drives the main view: ONE page per kind (user spec).
+    /// Printer: current selection + categorized list + plate type + volume +
+    ///   settings (defaults to the first page, e.g. Basic information).
+    /// Filament / Process: their categorized list + their settings.
     private var settingsList: some View {
         List {
-            printerSection
-            filamentSection
-            processSection
-            SettingsPagesSections(
-                kind: activeKind,
-                filter: modeFilter,
-                search: search,
-                externalSelectedPage: Binding(
-                    get: { activePage },
-                    set: { activePage = $0 }
-                )
-            )
+            switch activeKind {
+            case .machine:
+                presetPickerSection(.machine)
+                printerInfoSection
+                settingsSections(.machine)
+            case .filament:
+                presetPickerSection(.filament)
+                settingsSections(.filament)
+            case .process:
+                presetPickerSection(.process)
+                processActionsSection
+                settingsSections(.process)
+            }
 
             Section {
                 NavigationLink {
@@ -325,25 +315,50 @@ struct PrepareTabView: View {
         }
     }
 
-    private var printerSection: some View {
-        Section("Printer") {
-            NavigationLink {
-                GroupedPickerList(
-                    title: "Printer",
-                    entries: presets.machines,
-                    selected: presets.selection.machine,
-                    vendorPlaceholder: "Other manufacturers"
+    /// Current selection + inline EXPANDABLE categorized preset list.
+    @ViewBuilder
+    private func presetPickerSection(_ kind: PresetKind) -> some View {
+        Section {
+            presetHeader(kind)
+            if expandedKind == kind {
+                InlinePresetList(
+                    entries: presetList(for: kind),
+                    selected: currentPreset(for: kind)
                 ) { name in
-                    requestSelect(.machine, name)
+                    requestSelect(kind, name)
+                    expandedKind = nil
                 }
-            } label: {
-                presetLabel(presets.selection.machine, symbol: "printer")
             }
-            NavigationLink {
-                SettingsPagesScreen(kind: .machine, title: "Printer settings")
-            } label: {
-                settingsLabel("Printer settings", kind: .machine)
+        }
+    }
+
+    private func presetHeader(_ kind: PresetKind) -> some View {
+        let symbol: String
+        switch kind {
+        case .machine: symbol = "printer"
+        case .filament: symbol = "circle.dotted.circle"
+        case .process: symbol = "slider.horizontal.3"
+        }
+        return Button {
+            withAnimation(.snappy(duration: 0.2)) {
+                expandedKind = expandedKind == kind ? nil : kind
             }
+        } label: {
+            HStack {
+                Label(currentPreset(for: kind), systemImage: symbol)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.6)
+                Spacer()
+                Image(systemName: expandedKind == kind ? "chevron.up" : "chevron.down")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    /// Printer-only info rows: plate type + print volume.
+    private var printerInfoSection: some View {
+        Section("Printer") {
             if let bedType = presets.bedType {
                 PlateTypeRow(state: bedType) { value in
                     Task { await presets.setBedType(value) }
@@ -354,49 +369,14 @@ struct PrepareTabView: View {
                 LabeledContent("Print volume") {
                     Text(String(format: "%.0f × %.0f mm", volume.width, volume.depth))
                         .foregroundStyle(.secondary)
+                        .monospacedDigit()
                 }
             }
         }
     }
 
-    private var filamentSection: some View {
-        Section("Filament") {
-            NavigationLink {
-                GroupedPickerList(
-                    title: "Filament",
-                    entries: presets.filaments,
-                    selected: presets.selection.filament,
-                    vendorPlaceholder: "Generic filaments"
-                ) { name in
-                    requestSelect(.filament, name)
-                }
-            } label: {
-                presetLabel(presets.selection.filament, symbol: "circle.dotted.circle")
-            }
-            NavigationLink {
-                SettingsPagesScreen(kind: .filament, title: "Filament settings")
-            } label: {
-                settingsLabel("Filament settings", kind: .filament)
-            }
-        }
-    }
-
-    private var processSection: some View {
-        Section {
-            NavigationLink {
-                GroupedPickerList(
-                    title: "Process",
-                    entries: showAllProcesses
-                        ? presets.processes
-                        : presets.processes.filter(\.isCompatible),
-                    selected: presets.selection.process,
-                    vendorPlaceholder: "Generic processes"
-                ) { name in
-                    requestSelect(.process, name)
-                }
-            } label: {
-                presetLabel(presets.selection.process, symbol: "slider.horizontal.3")
-            }
+    private var processActionsSection: some View {
+        Section("Process") {
             Toggle("Show incompatible processes", isOn: $showAllProcesses)
                 .font(.caption)
             HStack {
@@ -414,9 +394,19 @@ struct PrepareTabView: View {
                 }
                 .font(.caption)
             }
-        } header: {
-            Text("Process")
         }
+    }
+
+    private func settingsSections(_ kind: PresetKind) -> some View {
+        SettingsPagesSections(
+            kind: kind,
+            filter: kindModes[kind] ?? .simple,
+            search: search,
+            externalSelectedPage: Binding(
+                get: { activePage },
+                set: { activePage = $0 }
+            )
+        )
     }
 
     /// Selecting another preset discards the edited copy (engine
@@ -572,6 +562,56 @@ struct SliceWarningsList: View {
             let base = warning.message.isEmpty ? warning.code : warning.message
             return warning.source == .objectStep && !warning.detail.isEmpty
                 ? "\(warning.detail): \(base)" : base
+        }
+    }
+}
+
+
+/// Inline categorized preset list (the pill's kind pages embed it instead
+/// of pushing a picker screen). Vendor sections, checkmark on the current
+/// selection, warning glyph on incompatible entries.
+private struct InlinePresetList: View {
+    let entries: [PresetEntry]
+    let selected: String
+    let onSelect: (String) -> Void
+
+    private var groups: [(vendor: String, entries: [PresetEntry])] {
+        let others = entries.filter { $0.origin != .system }
+        let byVendor = Dictionary(grouping: entries.filter { $0.origin == .system }) {
+            $0.vendor.isEmpty ? "Other" : $0.vendor
+        }
+        var result: [(String, [PresetEntry])] = []
+        if !others.isEmpty { result.append(("Project / user", others)) }
+        result.append(contentsOf: byVendor.map { ($0.key, $0.value) }.sorted { $0.0 < $1.0 })
+        return result
+    }
+
+    var body: some View {
+        ForEach(groups, id: \.vendor) { group in
+            Section(group.vendor) {
+                ForEach(group.entries, id: \.name) { entry in
+                    Button {
+                        onSelect(entry.name)
+                    } label: {
+                        HStack {
+                            if entry.name == selected {
+                                Image(systemName: "checkmark")
+                                    .foregroundStyle(Color.accentColor)
+                            }
+                            Text(entry.name)
+                                .foregroundStyle(entry.isCompatible ? Color.primary : Color.secondary)
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.6)
+                            if !entry.isCompatible {
+                                Image(systemName: "exclamationmark.triangle")
+                                    .font(.caption2)
+                                    .foregroundStyle(.orange)
+                            }
+                            Spacer()
+                        }
+                    }
+                }
+            }
         }
     }
 }

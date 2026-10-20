@@ -112,7 +112,8 @@ struct PlateTabView: View {
                 expanded: $toolsExpanded,
                 rotationAxis: $rotationAxis,
                 transform: transform,
-                meshSize: document.selectedSize ?? object.mesh.bounds.size
+                meshSize: document.selectedSize ?? object.mesh.bounds.size,
+                revision: document.presentationRevision
             ) {
             ManipulationPanel(
                 mode: gizmoMode,
@@ -1709,65 +1710,38 @@ private struct ManipulationPanel: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack {
+        VStack(alignment: .leading, spacing: 6) {
+            // Row 1: name (flexible, shrinks never wraps) + extruder chip
+            // (compact, fixed — it squeezed to vertical letters before).
+            HStack(spacing: 8) {
                 if let role = header.volumeRole {
                     Image(systemName: role.symbol)
                         .foregroundStyle(role.tint)
                 }
                 Text(header.volumeName ?? header.name)
-                    .font(.subheadline.weight(.semibold))
+                    .font(.body.weight(.semibold))
                     .lineLimit(1)
+                    .minimumScaleFactor(0.6)
                     .truncationMode(.middle)
-                    .layoutPriority(1)
-                Text("inst. \(header.instanceOrdinal)/\(header.instanceCount)")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize()
+                Spacer(minLength: 8)
+                if showsExtruderMenu { extruderChip }
+            }
+            // Row 2: meta chips — shrink to fit, never wrap, never squeeze.
+            HStack(spacing: 14) {
+                Text("instance \(header.instanceOrdinal) of \(header.instanceCount)")
                 if header.selectionCount > 1 {
                     Text("+\(header.selectionCount - 1) selected")
-                        .font(.caption.weight(.semibold))
                         .foregroundStyle(Color.accentColor)
-                        .fixedSize()
                 }
-                Spacer(minLength: 12)
-                // One line, never wrapped mid-measurement (IMG_1045: the
-                // string broke after the second × when squeezed).
-                Text(String(format: "%.1f × %.1f × %.1f mm", header.size.x, header.size.y, header.size.z))
-                    .font(.caption.monospaced())
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .fixedSize()
-                if showsExtruderMenu {
-                    Menu {
-                        Button {
-                            onSetExtruder?(0)
-                        } label: {
-                            Label("Default", systemImage: extruder == 0 ? "checkmark" : "")
-                        }
-                        ForEach(Array(filamentSlots.enumerated()), id: \.offset) { index, slot in
-                            Button {
-                                onSetExtruder?(index + 1)
-                            } label: {
-                                HStack {
-                                    Text("Slot \(index + 1) · \(slot.presetName)")
-                                    if extruder == index + 1 {
-                                        Image(systemName: "checkmark")
-                                    }
-                                }
-                            }
-                        }
-                    } label: {
-                        Label(
-                            extruder == 0 ? "Extruder: default"
-                                : "Extruder \(extruder)",
-                            systemImage: "paintbrush.pointed"
-                        )
-                        .font(.caption)
-                    }
-                    .disabled(isBusy)
-                }
+                Text(String(format: "%.1f × %.1f × %.1f mm",
+                            header.size.x, header.size.y, header.size.z))
+                    .monospacedDigit()
+                Spacer(minLength: 0)
             }
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
+            .minimumScaleFactor(0.6)
             switch mode {
             case .move: movePanel
             case .rotate: RotatePanel(transform: transform, axis: $rotationAxis, actions: actions)
@@ -1842,6 +1816,43 @@ private struct ManipulationPanel: View {
     }
 
     // Move: X / Y on the bed plane + center (Z is engine-managed: rests on bed).
+    /// Compact extruder chip: icon + tool number (the long label wrapped
+    /// vertically when squeezed — bounded text stays one line).
+    @ViewBuilder
+    private var extruderChip: some View {
+        Menu {
+            Button {
+                onSetExtruder?(0)
+            } label: {
+                Label("Default", systemImage: extruder == 0 ? "checkmark" : "")
+            }
+            ForEach(Array(filamentSlots.enumerated()), id: \.offset) { index, slot in
+                Button {
+                    onSetExtruder?(index + 1)
+                } label: {
+                    if extruder == index + 1 {
+                        Label("Slot \(index + 1) · \(slot.presetName)", systemImage: "checkmark")
+                    } else {
+                        Text("Slot \(index + 1) · \(slot.presetName)")
+                    }
+                }
+            }
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: "paintbrush.pointed")
+                Text(extruder == 0 ? "auto" : "T\(extruder)")
+                    .monospacedDigit()
+            }
+            .font(.caption.weight(.medium))
+            .padding(.horizontal, 8)
+            .padding(.vertical, 5)
+            .background(Color(.secondarySystemBackground), in: Capsule())
+            .lineLimit(1)
+            .fixedSize()
+        }
+        .disabled(isBusy)
+    }
+
     private var movePanel: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .bottom, spacing: 14) {
@@ -1930,16 +1941,20 @@ private struct RotatePanel: View {
                     .foregroundStyle(.secondary)
                 Button("Rotate", action: applyRelative)
                     .buttonStyle(.bordered)
+                    .fixedSize()
                 Spacer()
                 Button { actions.rotate(axis, -Self.step) } label: {
                     Image(systemName: "minus")
+                        .frame(width: 34, height: 34)
                 }
                 .buttonStyle(.bordered)
                 Text("15°")
                     .font(.caption.monospaced())
                     .foregroundStyle(.secondary)
+                    .fixedSize()
                 Button { actions.rotate(axis, Self.step) } label: {
                     Image(systemName: "plus")
+                        .frame(width: 34, height: 34)
                 }
                 .buttonStyle(.bordered)
             }
@@ -2141,15 +2156,15 @@ private struct NumericField: View {
                 TextField(label, text: $draft)
                     .onSubmit(submit)
                     .keyboardType(.numbersAndPunctuation)
-                    .font(.body.monospaced())
+                    .font(.callout.monospaced())
                     .frame(maxWidth: .infinity, minHeight: 34)
                     .textFieldStyle(.roundedBorder)
                     .multilineTextAlignment(.center)
                     .foregroundStyle(invalid ? Color.red : Color.primary)
                 Text(unit)
-                    .font(.caption.monospaced())
+                    .font(.caption2.monospaced())
                     .foregroundStyle(.secondary)
-                    .frame(width: 26, alignment: .leading)
+                    .fixedSize()
             }
         }
         .onAppear { draft = formatted(value) }
@@ -2218,10 +2233,14 @@ private struct ToolsPanel<Content: View>: View {
     @Binding var rotationAxis: EngineAxis
     let transform: InstanceTransform
     let meshSize: SIMD3<Float>
+    /// Advances on EVERY gesture event; observing it here guarantees the
+    /// readouts re-render live during drags.
+    var revision: UInt64 = 0
     @ViewBuilder let content: () -> Content
 
     var body: some View {
-        VStack(spacing: 0) {
+        let _ = revision
+        return VStack(spacing: 0) {
             HStack(spacing: 12) {
                 Image(systemName: mode.symbol)
                     .font(.system(size: 17, weight: .medium))
@@ -2258,7 +2277,7 @@ private struct ToolsPanel<Content: View>: View {
         case .move:
             HStack(spacing: 10) {
                 Text("X \(String(format: "%.1f", transform.offsetX)) · Y \(String(format: "%.1f", transform.offsetY))")
-                    .font(.callout.monospaced())
+                    .font(.callout.monospacedDigit().weight(.medium))
                 Text("drag to move")
                     .font(.caption)
                     .foregroundStyle(.secondary)

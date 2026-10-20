@@ -158,6 +158,17 @@
 
 ## OUTCOMES
 
+- [2026-10-19] UI round 4 (user feedback, Prepare + Plate): Prepare pill
+  DRIVES the page (tap-cycling mode toggle with per-kind memory; kind
+  buttons switch pages - printer page = preset list + plate type +
+  volume + settings defaulting to first page; filament/process
+  likewise). Plate: manipulation header rebuilt (2-row clean block,
+  compact extruder chip - the vertical-letters bug), rotate steppers
+  equalized + Rotate never wraps, numeric fields flexible monospaced,
+  live gesture values hardened (panel observes presentationRevision),
+  bounded text shrinks instead of wrapping (global rule, also preview
+  readouts). release-0.7.1.
+
 - [2026-10-19] UI round 3 (user TestFlight feedback, 8 items): pill bars
   SCROLLABLE with first-class tools (Plate: undo/redo/menu/arrange/fill/
   orient + gizmo modes + filament chips inline; Preview: de-nested
