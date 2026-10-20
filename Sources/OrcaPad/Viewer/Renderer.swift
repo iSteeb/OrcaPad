@@ -580,7 +580,11 @@ final class Renderer: NSObject, MTKViewDelegate {
         // outlined beds beside the current (gridded) plate.
         currentPlateIndex = scene.currentPlate
         plateOutlineVertices = []
-        let dim = SIMD4<Float>(0.35, 0.38, 0.45, 1)
+        // Inactive plates are DIMMED MINI-BEDS: a border plus a sparse
+        // grid (every 50 mm), clearly their own bed — never confused with
+        // the current plate's border, never invisible.
+        let border = SIMD4<Float>(0.42, 0.46, 0.55, 1)
+        let line = SIMD4<Float>(0.24, 0.26, 0.32, 1)
         for plate in scene.plates where plate.index != scene.currentPlate {
             let a = CoordinateMapper.viewerPoint(
                 fromEngine: SIMD3(plate.origin.x, plate.origin.y, 0),
@@ -591,16 +595,32 @@ final class Renderer: NSObject, MTKViewDelegate {
                                   plate.origin.y + plate.size.y, 0),
                 bedCenter: bed.center
             )
-            let lo = SIMD3(min(a.x, b.x), 0.2, min(a.z, b.z))
-            let hi = SIMD3(max(a.x, b.x), 0.2, max(a.z, b.z))
+            let lo = SIMD3(min(a.x, b.x), 0.15, min(a.z, b.z))
+            let hi = SIMD3(max(a.x, b.x), 0.15, max(a.z, b.z))
             let p00 = SIMD3(lo.x, lo.y, lo.z)
             let p10 = SIMD3(hi.x, lo.y, lo.z)
             let p11 = SIMD3(hi.x, lo.y, hi.z)
             let p01 = SIMD3(lo.x, lo.y, hi.z)
             for edge in [(p00, p10), (p10, p11), (p11, p01), (p01, p00)] {
-                plateOutlineVertices.append(VertexPC(position: edge.0, color: dim))
-                plateOutlineVertices.append(VertexPC(position: edge.1, color: dim))
+                plateOutlineVertices.append(VertexPC(position: edge.0, color: border))
+                plateOutlineVertices.append(VertexPC(position: edge.1, color: border))
             }
+            // sparse grid: lines every 50 mm (in plate-local coordinates)
+            let step: Float = 50
+            let width = hi.x - lo.x, depth = hi.z - lo.z
+            var x = lo.x + step
+            while x < hi.x - 1 {
+                plateOutlineVertices.append(VertexPC(position: SIMD3(x, lo.y, lo.z), color: line))
+                plateOutlineVertices.append(VertexPC(position: SIMD3(x, lo.y, hi.z), color: line))
+                x += step
+            }
+            var z = lo.z + step
+            while z < hi.z - 1 {
+                plateOutlineVertices.append(VertexPC(position: SIMD3(lo.x, lo.y, z), color: line))
+                plateOutlineVertices.append(VertexPC(position: SIMD3(hi.x, lo.y, z), color: line))
+                z += step
+            }
+            _ = width; _ = depth
         }
         selectedInstanceIDs = rebuilt.flatMap { object in
             object.instances.filter(\.selected).map {

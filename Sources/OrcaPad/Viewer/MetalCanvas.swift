@@ -427,6 +427,10 @@ struct MetalCanvas: UIViewRepresentable {
                 return .orbit
             case .move:
                 guard let bed = renderer.bedPlaneHit(at: location, in: view) else { return .orbit }
+                // onBegin arms the manipulation base — without it the live
+                // X/Y readouts never update during the drag (rotate/scale
+                // already called it; that's why only move was stale).
+                manipulation?.onBegin()
                 return .move(bedOrigin: bed)
             case .rotate:
                 // Center from the hit instance itself (selection may not be

@@ -158,6 +158,15 @@
 
 ## OUTCOMES
 
+- [2026-10-19] UI round 5: page chips only in the pill (internal PageStrip
+  hidden when pill-driven), in-content settings search restored (nav bar
+  hidden), preset lists searchable + compatibility-filtered (desktop combo
+  parity, show-incompatible toggle), MOVE live-values root cause fixed
+  (missing onBegin -> manipulationBase nil; rotate/scale worked because
+  they called it), rotate angle field flexible + icon apply button,
+  inactive plates render as dimmed mini-beds (border + sparse grid).
+  release-0.7.2.
+
 - [2026-10-19] UI round 4 (user feedback, Prepare + Plate): Prepare pill
   DRIVES the page (tap-cycling mode toggle with per-kind memory; kind
   buttons switch pages - printer page = preset list + plate type +

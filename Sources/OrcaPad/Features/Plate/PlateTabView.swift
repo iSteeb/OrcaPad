@@ -1934,14 +1934,18 @@ private struct RotatePanel: View {
                     .keyboardType(.numbersAndPunctuation)
                     .font(.body.monospaced())
                     .textFieldStyle(.roundedBorder)
-                    .frame(maxWidth: 120, minHeight: 34)
+                    .frame(maxWidth: .infinity, minHeight: 34)
                     .multilineTextAlignment(.center)
                     .onSubmit(applyRelative)
                 Text("°")
                     .foregroundStyle(.secondary)
-                Button("Rotate", action: applyRelative)
-                    .buttonStyle(.bordered)
                     .fixedSize()
+                Button(action: applyRelative) {
+                    Image(systemName: "arrow.clockwise.circle.fill")
+                        .font(.title3)
+                        .frame(width: 34, height: 34)
+                }
+                .buttonStyle(.bordered)
                 Spacer()
                 Button { actions.rotate(axis, -Self.step) } label: {
                     Image(systemName: "minus")

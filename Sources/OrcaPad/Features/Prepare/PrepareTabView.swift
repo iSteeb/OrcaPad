@@ -152,7 +152,29 @@ struct PrepareTabView: View {
             preparePill
                 .padding(.horizontal, 12)
                 .padding(.top, 4)
-                .padding(.bottom, 8)
+            HStack(spacing: 8) {
+                Image(systemName: "magnifyingglass")
+                    .foregroundStyle(.secondary)
+                TextField("Search settings", text: $search)
+                    .textFieldStyle(.plain)
+                    .autocorrectionDisabled()
+                    .textInputAutocapitalization(.never)
+                if !search.isEmpty {
+                    Button {
+                        search = ""
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .font(.callout)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 8)
+            .background(.ultraThinMaterial, in: Capsule())
+            .padding(.horizontal, 12)
+            .padding(.top, 6)
             settingsList
         }
     }
@@ -573,11 +595,30 @@ struct SliceWarningsList: View {
 private struct InlinePresetList: View {
     let entries: [PresetEntry]
     let selected: String
+    /// Desktop preset combos: incompatible entries hidden unless asked.
+    var filterCompatible = true
     let onSelect: (String) -> Void
 
+    @State private var search = ""
+    @State private var showIncompatible = false
+
+    private var visible: [PresetEntry] {
+        var list = filterCompatible && !showIncompatible
+            ? entries.filter(\.isCompatible)
+            : entries
+        if !search.isEmpty {
+            list = list.filter {
+                $0.name.localizedCaseInsensitiveContains(search) ||
+                    $0.vendor.localizedCaseInsensitiveContains(search)
+            }
+        }
+        return list
+    }
+
     private var groups: [(vendor: String, entries: [PresetEntry])] {
-        let others = entries.filter { $0.origin != .system }
-        let byVendor = Dictionary(grouping: entries.filter { $0.origin == .system }) {
+        let visibleList = visible
+        let others = visibleList.filter { $0.origin != .system }
+        let byVendor = Dictionary(grouping: visibleList.filter { $0.origin == .system }) {
             $0.vendor.isEmpty ? "Other" : $0.vendor
         }
         var result: [(String, [PresetEntry])] = []
@@ -587,6 +628,21 @@ private struct InlinePresetList: View {
     }
 
     var body: some View {
+        Section {
+            HStack(spacing: 8) {
+                Image(systemName: "magnifyingglass")
+                    .foregroundStyle(.secondary)
+                TextField("Search presets", text: $search)
+                    .textFieldStyle(.plain)
+                    .autocorrectionDisabled()
+                    .textInputAutocapitalization(.never)
+            }
+            .font(.callout)
+            if entries.contains(where: { !$0.isCompatible }) {
+                Toggle("Show incompatible presets", isOn: $showIncompatible)
+                    .font(.caption)
+            }
+        }
         ForEach(groups, id: \.vendor) { group in
             Section(group.vendor) {
                 ForEach(group.entries, id: \.name) { entry in

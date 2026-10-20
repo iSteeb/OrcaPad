@@ -60,12 +60,16 @@ struct SettingsPagesSections: View {
         let visible = search.isEmpty ? [current] : pages
 
         Section {
-            PageStrip(
-                pages: pages,
-                selected: current.title,
-                onSelect: { selectedPage.wrappedValue = $0 }
-            )
-            .listRowInsets(EdgeInsets(top: 6, leading: 8, bottom: 6, trailing: 8))
+            // The pill's page chips drive selection when bound externally —
+            // no duplicate strip in the body (user spec).
+            if externalSelectedPage == nil {
+                PageStrip(
+                    pages: pages,
+                    selected: current.title,
+                    onSelect: { selectedPage.wrappedValue = $0 }
+                )
+                .listRowInsets(EdgeInsets(top: 6, leading: 8, bottom: 6, trailing: 8))
+            }
         }
 
         ForEach(visible) { page in
