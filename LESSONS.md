@@ -390,3 +390,9 @@ in ~/xtool-cheatsheet.md — link, don't duplicate.)
   axis focus.
 - Never clamp UI to "what desktop does" when the user's model differs -
   the plate grid and the touch manipulation flow are OrcaPad's own.
+
+### Visible primary actions (2026-10-25)
+- A ToolbarItem inside a hidden navigation bar is unreachable. When replacing
+  navigation chrome with a native pill, move every primary action into the
+  visible chrome. Keep Slice outside horizontal scrolling so it remains
+  discoverable on iPhone.
