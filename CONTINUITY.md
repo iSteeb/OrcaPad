@@ -92,6 +92,12 @@
 
 ## PROGRESS
 
+- [2026-10-25 CODE] Profile visibility follow-up: refresh filament compatibility
+  after restoring saved presets and after every preset selection, alongside
+  process compatibility. Previously the filtered filament list retained the
+  startup printer's compatibility flags and hid matching QIDI filaments.
+  Refresh the engine's filament-slot snapshot in the same operations.
+
 - [2026-10-25 CODE] User-requested bundled profile refresh and modified IPA +
   fork PR. JSON-only upstream snapshot `8af4c382a1f21fd21d851d184b9500bebb3925b7`
   (14,420 files); provenance: `Resources/profile-source.json`. QIDI X-Plus 5:

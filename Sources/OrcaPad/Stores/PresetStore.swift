@@ -203,6 +203,7 @@ final class PresetStore {
                 notice = "stored preset no longer available; using engine defaults"
             }
             // Compatibility flags are correct for whatever is selected.
+            let refreshedFilaments = try engine.entries(kind: .filament).get()
             let refreshedProcesses = try engine.entries(kind: .process).get()
             let volume = try engine.printVolume().get()
             let (bedType, staleBedType) = try BedTypeMemory.apply(
@@ -223,13 +224,14 @@ final class PresetStore {
             return PresetLoadPayload(
                 engine: engine,
                 machines: machines,
-                filaments: filaments,
+                filaments: refreshedFilaments,
                 processes: refreshedProcesses,
                 selection: selected,
                 printVolume: volume,
                 bedType: bedType,
                 editedConfigs: edited,
                 systemConfigs: system,
+                filamentSlots: try engine.filamentSlots().get(),
                 warning: warning,
                 notice: notice
             )
@@ -240,6 +242,7 @@ final class PresetStore {
             engine = payload.engine
             machines = payload.machines
             filaments = payload.filaments
+            filamentSlots = payload.filamentSlots
             processes = payload.processes
             selection = payload.selection
             printVolume = payload.printVolume
@@ -306,7 +309,7 @@ final class PresetStore {
             let bedType = try BedTypeMemory.apply(
                 memory[selected.machine], engine: engine
             )
-            // Selection changes invalidate process compatibility, the bed,
+            // Selection changes invalidate filament/process compatibility, the bed,
             // and the edited/system config pair (selecting resets the edited
             // working copy). Re-read engine state; the client never guesses.
             var edited: [PresetKind: [String: String]] = [:]
@@ -321,7 +324,9 @@ final class PresetStore {
                 try engine.printVolume().get(),
                 edited,
                 system,
-                bedType
+                bedType,
+                try engine.entries(kind: .filament).get(),
+                try engine.filamentSlots().get()
             )
         }
         isSelecting = false
@@ -332,10 +337,14 @@ final class PresetStore {
             let volume,
             let edited,
             let system,
-            let bed
+            let bed,
+            let refreshedFilaments,
+            let refreshedSlots
         )):
             selection = selected
+            filaments = refreshedFilaments
             processes = refreshedProcesses
+            filamentSlots = refreshedSlots
             printVolume = volume
             bedType = bed.0
             if bed.stale {
