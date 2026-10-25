@@ -25,7 +25,7 @@ let package = Package(
             name: "OrcaPad",
             dependencies: ["OrcaBridge"],
             resources: [
-                // OrcaSlicer system profiles (JSON-only subset, upstream tag).
+                // OrcaSlicer profiles (JSON-only; pin in profile-source.json).
                 // data_dir() points here — PresetBundle reads <dir>/system/…
                 .copy("Resources")
             ],

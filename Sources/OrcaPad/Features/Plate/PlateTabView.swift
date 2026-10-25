@@ -1985,7 +1985,7 @@ private struct RotatePanel: View {
     static func degrees(_ radians: Double) -> String {
         var value = (radians * 180 / .pi).truncatingRemainder(dividingBy: 360)
         if value < 0 { value += 360 }
-        if abs(value) < 0.05 || value >= 359.95 { value = 0 }
+        if Swift.abs(value) < 0.05 || value >= 359.95 { value = 0 }
         return String(format: "%.1f", value)
     }
 }

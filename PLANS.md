@@ -79,6 +79,11 @@ installs and slices on the device; a red audit or parity check blocks the
 upload.
 
 ## Gate C — Four-tab desktop-parity UX (in progress)
+
+- [x] 2026-10-25: refresh bundled system profiles, including QIDI X-Plus 5;
+      record snapshot provenance and smoke-test all four nozzle defaults with
+      desktop engine 2.4.2. Build a local IPA and submit a fork PR. Online
+      profile downloading remains separate work.
 **Goal:** the app reads like desktop OrcaSlicer: Plate → Prepare → Preview →
 Device, each tab a clean feature module over the same stores.
 
