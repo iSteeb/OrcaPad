@@ -99,9 +99,11 @@
   unchanged. Xcode 26.3 requires explicit Swift.abs and simd_mul at three
   existing call sites. Release iphoneos build, architecture audit and parity
   check pass. Desktop 2.4.2 slices all four nozzle defaults; reproducible check:
-  `Bridge/tools/smoke-test-qidi-plus5.py`. No physical print/iOS runtime test;
-  Linux Bridge host contract suite not run on this Mac. Local IPA needs signing
-  by the user's sideloading tool. Online profile updates remain unimplemented.
+  `Bridge/tools/smoke-test-qidi-plus5.py`. Development-signed IPA built locally
+  and installed/launched on the connected iPhone 15 Pro (iOS 27.2), using the
+  user's team and a separate bundle ID; profile expires 2026-11-01. On-device
+  slicing/physical printing not tested. Linux Bridge host contract suite not
+  run on this Mac. Online profile updates remain unimplemented.
 
 - [2026-10-15 CODE] ABI v31 + C10 (multi-filament, parity 51 done 40%):
   filament slots/count/per-slot preset+colour API, FilamentBar, object
