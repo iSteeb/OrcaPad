@@ -1,0 +1,9 @@
+{
+  "repository": "https://github.com/OrcaSlicer/OrcaSlicer",
+  "commit": "8af4c382a1f21fd21d851d184b9500bebb3925b7",
+  "path": "resources/profiles",
+  "format": "JSON-only snapshot",
+  "json_files": 14420,
+  "engine_version": "2.4.2",
+  "notes": "Profile data refresh only. New engine-only options remain subject to OrcaSlicer forward compatibility; online profile updates and printer cloud integrations are unchanged."
+}

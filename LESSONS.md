@@ -390,3 +390,13 @@ in ~/xtool-cheatsheet.md — link, don't duplicate.)
   axis focus.
 - Never clamp UI to "what desktop does" when the user's model differs -
   the plate grid and the touch manipulation flow are OrcaPad's own.
+
+### Profile refresh and macOS builds (2026-10-25)
+- Do not infer engine incompatibility from singleton arrays in newer JSON:
+  the 2.4.2 loader already deserializes these. Check with the matching engine.
+- Load profiles through each vendor index; filament subdirectories are nested.
+  Non-recursive globs falsely report missing default filaments.
+- Qualify Swift.abs and use explicit simd_mul where Xcode 26's C++ interop
+  overloads make scalar comparisons or matrix/vector products ambiguous.
+- Keep unrelated patch hunks separate: a bad anchor in one file rejects the
+  whole multi-file patch. Check the outcome before assuming any hunk landed.

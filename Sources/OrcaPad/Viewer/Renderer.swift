@@ -1056,8 +1056,8 @@ final class Renderer: NSObject, MTKViewDelegate {
     func projectToScreen(_ point: SIMD3<Float>, in view: MTKView) -> CGPoint? {
         let size = view.bounds.size
         let aspect = Float(size.width / max(size.height, 1))
-        let clip = camera.projection(aspect: aspect) * camera.viewMatrix
-            * SIMD4(point.x, point.y, point.z, 1)
+        let viewProjection = simd_mul(camera.projection(aspect: aspect), camera.viewMatrix)
+        let clip: SIMD4<Float> = simd_mul(viewProjection, SIMD4<Float>(point.x, point.y, point.z, 1))
         guard clip.w > 1e-5 else { return nil }
         let ndc = SIMD2(clip.x, clip.y) / clip.w
         return CGPoint(

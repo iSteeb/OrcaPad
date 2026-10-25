@@ -160,7 +160,7 @@ public struct InstanceTransform: Equatable, Sendable {
     public var rotation: SIMD3<Double> { SIMD3(rotationX, rotationY, rotationZ) }
     public var scale: SIMD3<Double> { SIMD3(scaleX, scaleY, scaleZ) }
     public var isUniformlyScaled: Bool {
-        abs(scaleX - scaleY) < 1e-9 && abs(scaleX - scaleZ) < 1e-9
+        Swift.abs(scaleX - scaleY) < 1e-9 && Swift.abs(scaleX - scaleZ) < 1e-9
     }
 
     public var isValid: Bool {

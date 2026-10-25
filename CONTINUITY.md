@@ -92,6 +92,17 @@
 
 ## PROGRESS
 
+- [2026-10-25 CODE] User-requested bundled profile refresh and modified IPA +
+  fork PR. JSON-only upstream snapshot `8af4c382a1f21fd21d851d184b9500bebb3925b7`
+  (14,420 files); provenance: `Resources/profile-source.json`. QIDI X-Plus 5:
+  four nozzle sizes, 16 process presets, 247 filament entries. Engine/ABI
+  unchanged. Xcode 26.3 requires explicit Swift.abs and simd_mul at three
+  existing call sites. Release iphoneos build, architecture audit and parity
+  check pass. Desktop 2.4.2 slices all four nozzle defaults; reproducible check:
+  `Bridge/tools/smoke-test-qidi-plus5.py`. No physical print/iOS runtime test;
+  Linux Bridge host contract suite not run on this Mac. Local IPA needs signing
+  by the user's sideloading tool. Online profile updates remain unimplemented.
+
 - [2026-10-15 CODE] ABI v31 + C10 (multi-filament, parity 51 done 40%):
   filament slots/count/per-slot preset+colour API, FilamentBar, object
   extruder assignment + slot tinting, FlushingVolumesSheet,
