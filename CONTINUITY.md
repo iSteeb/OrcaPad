@@ -92,6 +92,12 @@
 
 ## PROGRESS
 
+- [2026-10-25 CODE] Fix the hidden Slice action: Prepare hides its navigation
+  bar, so its navigation toolbar action was unreachable. Place the existing
+  Slice menu/progress/cancel control at the trailing edge of the visible pill,
+  outside the horizontal settings scroll. Separate fork PR from the profile
+  refresh. Combined device build validation is recorded in the PR.
+
 - [2026-10-15 CODE] ABI v31 + C10 (multi-filament, parity 51 done 40%):
   filament slots/count/per-slot preset+colour API, FilamentBar, object
   extruder assignment + slot tinting, FlushingVolumesSheet,

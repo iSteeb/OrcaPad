@@ -7,7 +7,7 @@ import SwiftUI
 /// Prepare tab (desktop parity): printer and filament presets with their
 /// settings screens, the process preset with its desktop pages inline
 /// (Quality / Strength / Speed / Support / Multimaterial / Others), a
-/// Simple/Advanced/Expert filter, and the Slice action in the toolbar.
+/// Simple/Advanced/Expert filter, and the Slice action in the visible top bar.
 struct PrepareTabView: View {
     @Environment(AppEnvironment.self) private var environment
     @State private var activeKind: PresetKind = .process
@@ -57,10 +57,7 @@ struct PrepareTabView: View {
                 }
             }
             .navigationTitle("Prepare")
-                .toolbar(.hidden, for: .navigationBar)
-            .toolbar {
-                ToolbarItem(placement: .primaryAction) { sliceButton }
-            }
+            .toolbar(.hidden, for: .navigationBar)
             .searchable(text: $search, placement: .navigationBarDrawer(displayMode: .automatic))
             .confirmationDialog(
                 "Unsaved changes",
@@ -81,7 +78,7 @@ struct PrepareTabView: View {
         }
     }
 
-    // MARK: Slice action (desktop parity: top toolbar)
+    // MARK: Slice action (pinned to the Prepare bar)
 
     @ViewBuilder
     private var sliceButton: some View {
@@ -179,33 +176,38 @@ struct PrepareTabView: View {
         }
     }
 
-    /// The Prepare chrome: ONE wide, horizontally SCROLLABLE pill.
-    /// [Mode] | [Printer][Filament][Process] | active kind's page chips
-    /// (Quality / Strength / Support … for process). Mode memory is
-    /// per-kind; kind buttons select presets and focus their settings.
+    /// Settings controls scroll within the pill; Slice stays visible at the
+    /// trailing edge even on iPhone. Mode memory is per-kind.
     private var preparePill: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 4) {
-                Button {
-                    let order: [SettingsModeFilter] = [.simple, .advanced, .expert]
-                    setMode(order[(order.firstIndex(of: modeFilter).map { ($0 + 1) % order.count } ?? 0)])
-                } label: {
-                    ChromeToolLabel(
-                        symbol: modeFilter.symbol,
-                        label: modeFilter.rawValue
-                    )
-                    .foregroundStyle(Color.accentColor)
+        HStack(spacing: 0) {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 4) {
+                    Button {
+                        let order: [SettingsModeFilter] = [.simple, .advanced, .expert]
+                        setMode(order[(order.firstIndex(of: modeFilter).map { ($0 + 1) % order.count } ?? 0)])
+                    } label: {
+                        ChromeToolLabel(
+                            symbol: modeFilter.symbol,
+                            label: modeFilter.rawValue
+                        )
+                        .foregroundStyle(Color.accentColor)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Settings level: \(modeFilter.rawValue)")
+                    Divider().frame(height: 28)
+                    kindButton(.machine, symbol: "printer", label: "Printer")
+                    kindButton(.filament, symbol: "circle.dotted.circle", label: "Filament")
+                    kindButton(.process, symbol: "slider.horizontal.3", label: "Process")
+                    Divider().frame(height: 28)
+                    pageChips
                 }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Settings level: \(modeFilter.rawValue)")
-                Divider().frame(height: 28)
-                kindButton(.machine, symbol: "printer", label: "Printer")
-                kindButton(.filament, symbol: "circle.dotted.circle", label: "Filament")
-                kindButton(.process, symbol: "slider.horizontal.3", label: "Process")
-                Divider().frame(height: 28)
-                pageChips
+                .padding(6)
             }
-            .padding(6)
+            Divider().frame(height: 28)
+            sliceButton
+                .fixedSize(horizontal: true, vertical: false)
+                .frame(minHeight: 44)
+                .padding(.horizontal, 12)
         }
         .frame(height: 58)
         .background(.ultraThinMaterial, in: Capsule())

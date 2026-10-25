@@ -883,7 +883,7 @@ title = "Slice with progress, cancel, validation and warnings"
 status = "done"
 source = "src/slic3r/GUI/BackgroundSlicingProcess.hpp:class BackgroundSlicingProcess"
 evidence = ["abi:orca_slice_job_new", "abi:orca_slice_job_cancel", "client:struct SliceWarningsList"]
-note = "edits are rejected while slicing (ARCHITECTURE \u00a75 edit-while-slicing is open)"
+note = "Slice stays pinned to the visible Prepare pill outside the scrolling settings controls; it is not placed in the hidden navigation bar. Edits are rejected while slicing (ARCHITECTURE \u00a75 edit-while-slicing is open)"
 
 [[feature]]
 id = "prepare.auto-slice"
