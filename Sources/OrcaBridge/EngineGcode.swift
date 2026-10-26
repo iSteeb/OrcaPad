@@ -338,6 +338,17 @@ public enum EngineGcode {
         for raw in parsed {
             let sectionURL = directory.appendingPathComponent(
                 "plate-\(raw.plateIndex)-\(UUID().uuidString).gcode")
+            // The section file is scratch: removed as soon as it is parsed —
+            // repeated previews must not accumulate megabytes in tmp.
+            defer {
+                do {
+                    try FileManager.default.removeItem(at: sectionURL)
+                } catch {
+                    // Best-effort cleanup of an OS-managed tmp file: failing
+                    // the preview over an undeletable scratch file would be a
+                    // false alarm (the system purges tmp regardless).
+                }
+            }
             do {
                 try Data(raw.lines.joined(separator: "\n").utf8).write(to: sectionURL)
             } catch {

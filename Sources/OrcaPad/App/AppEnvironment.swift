@@ -67,10 +67,17 @@ final class AppEnvironment {
     private func restoreAutosaveIfNeeded() async {
         let url = EnginePaths.autosaveURL()
         guard FileManager.default.fileExists(atPath: url.path) else { return }
+        guard presets.engineForSlicing != nil, presets.isReady, document.isReady else {
+            // Engine not ready (e.g. preset load failure): KEEP the file —
+            // deleting the session backup over an unrelated startup failure
+            // would be destructive; the next healthy launch restores it.
+            return
+        }
         if await openProject(url) {
             status.report(.document, "session restored from autosave")
         } else {
-            // A corrupt autosave must not fail every future launch.
+            // The engine was ready and still refused the file: it is
+            // corrupt — a broken autosave must not fail every future launch.
             do {
                 try FileManager.default.removeItem(at: url)
             } catch {
