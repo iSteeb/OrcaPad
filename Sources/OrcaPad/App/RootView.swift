@@ -16,6 +16,7 @@ enum AppTab: Hashable {
 /// content is presentation-only; orchestration lives in AppEnvironment.
 struct RootView: View {
     @Environment(AppEnvironment.self) private var environment
+    @Environment(\.scenePhase) private var scenePhase
     @State private var selectedTab: AppTab = .plate
     @State private var showDebugOverlay = false
     @State private var devicePresses: [Date] = []
@@ -59,6 +60,19 @@ struct RootView: View {
             // Machine selection changed the bed: re-derive the plate grid.
             guard let volume else { return }
             Task { await environment.document.syncBed(volume) }
+        }
+        .onChange(of: environment.slicing.lastOutcome?.jobID) { _, jobID in
+            // Desktop swaps the canvas to the preview when a slice finishes;
+            // OrcaPad selects the Preview tab (the outcome identity — not
+            // the path — drives the reload, so this also covers re-slices).
+            if jobID != nil { selectedTab = .preview }
+        }
+        .onChange(of: scenePhase) { _, phase in
+            // Session autosave: best-effort 3MF snapshot before suspension
+            // (desktop auto-backup subset; restore happens on next launch).
+            if phase == .background {
+                Task { await environment.autosaveSession() }
+            }
         }
         .onOpenURL { url in
             handleOpenURL(url)

@@ -91,6 +91,10 @@ final class GcodePreviewStore {
 
     private(set) var phase: Phase = .idle
     private(set) var toolpath: GcodeToolpath?
+    /// Plate sections of a combined slice-all G-code (empty for single-plate
+    /// results and external files): marker index/name + the layer range it
+    /// occupies in the concatenated toolpath.
+    private(set) var sections: [EngineGcode.PlateSection] = []
     private(set) var loadedPath: String?
     /// Identity of the loaded source (slice job or external open); a new
     /// identity always reloads even when the path is unchanged.
@@ -174,8 +178,37 @@ final class GcodePreviewStore {
         case .success(let toolpath):
             loadedIdentity = identity
             loadedURL = url
+            sections = []
             install(toolpath, path: "\(identity)|\(url.path)")
         case .failure(let failure):
+            phase = .failed(failure)
+        }
+    }
+
+    /// Loads a combined slice-all G-code: every `; ORCA_PLATE` marker
+    /// section is parsed through the engine processor and shifted back to
+    /// its plate's world origin, then concatenated — all plates render side
+    /// by side instead of stacked on the bed origin.
+    func loadPlateSections(
+        url: URL,
+        identity: String,
+        origins: [Int: SIMD3<Float>]
+    ) async {
+        guard !isLoading, loadedIdentity != identity else { return }
+        isLoading = true
+        phase = .loading
+        let result = await BackgroundWork.run(operation: "load gcode plate sections") {
+            try EngineGcode.loadPlateSections(path: url.path, origins: origins)
+        }
+        isLoading = false
+        switch result {
+        case .success(let loaded):
+            loadedIdentity = identity
+            loadedURL = url
+            sections = loaded.sections
+            install(loaded.toolpath, path: "\(identity)|\(url.path)|plates")
+        case .failure(let failure):
+            sections = []
             phase = .failed(failure)
         }
     }
@@ -259,6 +292,14 @@ final class GcodePreviewStore {
 
     func setTopLayerProgress(_ progress: Int) {
         topLayerProgress = min(max(progress, 0), topLayerSegmentCount)
+    }
+
+    /// Slice-all results: jumps the visible layer range onto one plate's
+    /// layers, so the scrubber walks that plate only.
+    func focus(section: EngineGcode.PlateSection) {
+        let last = max(layerCount - 1, 0)
+        let upper = min(max(section.layerRange.upperBound - 1, 0), last)
+        setLayerRange(lower: min(section.layerRange.lowerBound, upper), upper: upper)
     }
 
     func toggleRole(_ role: UInt8) {

@@ -10,6 +10,14 @@ struct SliceProgress: Sendable {
     let message: String
 }
 
+/// One plate of a slice-all result: marker index/name plus the plate's
+/// WORLD origin at slice time (each section's G-code is plate-relative).
+struct SlicePlateOrigin: Sendable {
+    let plateIndex: Int
+    let name: String
+    let origin: SIMD3<Float>
+}
+
 struct CompletedSlice: Sendable {
     /// Unique per slice job: re-slicing to the same output path must still
     /// refresh consumers (Preview) keyed by it.
@@ -22,6 +30,11 @@ struct CompletedSlice: Sendable {
     /// slice-all file): the engine emits plate-RELATIVE G-code (desktop
     /// PartPlate::set_print parity), so the preview shifts it back.
     let plateOrigin: SIMD3<Float>?
+    /// Slice-all: the document's plates (index, name, world origin at slice
+    /// time). The preview splits the ORCA_PLATE marker sections and offsets
+    /// every section back - without this, all plate-relative sections stack
+    /// on the bed origin.
+    let plateSections: [SlicePlateOrigin]
 }
 
 @MainActor
@@ -137,7 +150,8 @@ final class SliceService {
             outputURL: outputURL,
             presetSelection: presetSelection,
             instanceCount: instanceCount,
-            plateOrigin: currentPlateOrigin(input)
+            plateOrigin: currentPlateOrigin(input),
+            plateSections: []
         )
     }
 
@@ -237,7 +251,14 @@ final class SliceService {
             outputURL: outputURL,
             presetSelection: presetSelection,
             instanceCount: instanceCount,
-            plateOrigin: nil  // combined file: marker-separated plate sections
+            plateOrigin: nil,  // combined file: marker-separated plate sections
+            plateSections: input.snapshot.plates.enumerated().map { index, plate in
+                SlicePlateOrigin(
+                    plateIndex: index,
+                    name: plate.name,
+                    origin: plate.origin
+                )
+            }
         )
     }
 
@@ -256,7 +277,8 @@ final class SliceService {
         outputURL: URL,
         presetSelection: PresetSelection?,
         instanceCount: Int,
-        plateOrigin: SIMD3<Float>?
+        plateOrigin: SIMD3<Float>?,
+        plateSections: [SlicePlateOrigin]
     ) {
         activeJobID = nil
         activeJob = nil
@@ -269,7 +291,8 @@ final class SliceService {
                 presetSelection: presetSelection,
                 outputURL: outputURL,
                 result: sliceResult,
-                plateOrigin: plateOrigin
+                plateOrigin: plateOrigin,
+                plateSections: plateSections
             )
             lastOutcome = outcome
             let minutes = Int(sliceResult.timeEstimateSeconds / 60)
@@ -279,7 +302,7 @@ final class SliceService {
             status.report(
                 .slice,
                 "\(instanceCount) instance(s): G-code ready\n" +
-                    "\(kilobytes) KB · ~\(minutes) min print\(warningNote)"
+                    "\(outputURL.lastPathComponent) · \(kilobytes) KB · ~\(minutes) min print\(warningNote)"
             )
         case .failure(let failure):
             if case .bridge(let error) = failure, error.status == .cancelled {

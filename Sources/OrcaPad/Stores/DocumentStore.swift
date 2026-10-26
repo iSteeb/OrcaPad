@@ -200,6 +200,21 @@ final class DocumentStore {
         }
     }
 
+    /// Background-session autosave (desktop auto-backup subset): a fast,
+    /// thumbnail-less 3MF at a fixed Application Support path. Restored once
+    /// on the next launch by AppEnvironment.
+    func saveAutosave(to url: URL, presets: EnginePresets) async {
+        guard let plater, let scene, !isBusy, !scene.objects.isEmpty else { return }
+        isMutating = true
+        let result = await BackgroundWork.run(operation: "autosave project") {
+            try plater.saveProject(path: url.path, presets: presets, thumbnail: nil)
+        }
+        isMutating = false
+        if case .failure(let failure) = result {
+            status.report(.document, failure: failure)
+        }
+    }
+
     func addInstance(to objectID: ObjectID) async {
         guard let mutation = await applyMutation(
             .addInstance(objectID: objectID),
@@ -557,7 +572,7 @@ final class DocumentStore {
     /// bed center) and selects every pasted object.
     func pasteObject(bedCenter: SIMD2<Double>) async {
         var target = bedCenter
-        if let selection, let instance = selectedInstance {
+        if let instance = selectedInstance {
             target = SIMD2(instance.transform.offsetX + 15, instance.transform.offsetY + 15)
         }
         if let mutation = await applyMutation(
@@ -1085,9 +1100,19 @@ final class DocumentStore {
     /// Bed geometry sync: the plate grid derives from the selected machine's
     /// print volume (client-driven; desktop resets plate size on machine
     /// change). The z range is open — every instance rests on the bed, so
-    /// assignment is decided by the X/Y footprint.
+    /// assignment is decided by the X/Y footprint. While the engine is busy
+    /// (e.g. slicing) the new volume is retained and replayed on the next
+    /// install — derived-state maintenance, never dropped (a stale plate
+    /// grid would misplace everything sliced in the meantime).
+    private var pendingBedSync: PrintVolume?
+
     func syncBed(_ volume: PrintVolume) async {
         guard let plater else { return }
+        guard !isBusy else {
+            pendingBedSync = volume
+            status.update(.document, "bed sync pending: engine busy")
+            return
+        }
         let result = await BackgroundWork.run(operation: "sync bed geometry") {
             try plater.setBed(
                 originX: volume.minX, originY: volume.minY,
@@ -1144,6 +1169,56 @@ final class DocumentStore {
             frameRequest += 1
         case .failure(let failure):
             status.report(.document, failure: failure)
+        }
+    }
+
+    // MARK: Move to plate (desktop plate context menu)
+
+    /// Desktop "Move to plate": shifts every instance of the listed objects
+    /// — relative placement preserved — so the group centers on the target
+    /// plate. One undo step; membership re-derives from the new positions.
+    func moveObjectsToPlate(_ objectIDs: [ObjectID], plate: PlateID) async {
+        guard let scene, let target = scene.plate(id: plate) else { return }
+        var center = SIMD2<Double>.zero
+        var instanceCount = 0
+        for id in objectIDs {
+            guard let object = scene.object(id: id) else { continue }
+            for instance in object.instances {
+                center += SIMD2(instance.transform.offsetX, instance.transform.offsetY)
+                instanceCount += 1
+            }
+        }
+        guard instanceCount > 0 else {
+            status.report(.document, failure: .invariant(
+                operation: "move to plate",
+                diagnostic: "the objects have no instances"))
+            return
+        }
+        let groupCenter = center / Double(instanceCount)
+        let targetCenter = SIMD2(Double(target.center.x), Double(target.center.y))
+        let delta = targetCenter - groupCenter
+        guard abs(delta.x) > 0.01 || abs(delta.y) > 0.01 else { return }
+        var group: [EnginePlater.GroupTransform] = []
+        var seen = Set<InstanceID>()
+        for id in objectIDs {
+            guard let object = scene.object(id: id) else { continue }
+            for instance in object.instances where seen.insert(instance.id).inserted {
+                var moved = instance.transform
+                moved.offsetX += delta.x
+                moved.offsetY += delta.y
+                group.append(EnginePlater.GroupTransform(
+                    instance: EnginePlater.GroupInstance(
+                        objectID: id, instanceID: instance.id
+                    ),
+                    transform: moved
+                ))
+            }
+        }
+        if await applyMutation(
+            .groupSetTransforms(group, label: "Move to plate"),
+            operation: "move to plate"
+        ) != nil {
+            status.report(.document, "moved to \(target.name)")
         }
     }
 
@@ -1363,5 +1438,10 @@ final class DocumentStore {
         }
         if multiSelection.count <= 1 { multiSelection = [] }
         presentationRevision += 1
+        // Replay a bed sync that arrived while the engine was busy.
+        if let pending = pendingBedSync {
+            pendingBedSync = nil
+            Task { await syncBed(pending) }
+        }
     }
 }

@@ -33,13 +33,19 @@ enum EnginePaths {
     /// Creates the writable data-dir shape required by PresetBundle and links
     /// its read-only system tree to the current app bundle. The symlink must be
     /// recreated every launch because each install changes the bundle UUID.
+    ///
+    /// The data directory lives in Application Support, NOT Documents:
+    /// Documents is Files-app visible (UIFileSharingEnabled for G-code), and
+    /// the writable tree carries print-host API keys
+    /// (user/default/physical_machine) that must not be user-browsable.
     static func preparePresetDataDirectory() throws -> URL {
         let fileManager = FileManager.default
-        let documents = fileManager.urls(
-            for: .documentDirectory,
+        try migrateLegacyDocumentsDataDirectory(fileManager)
+        let support = fileManager.urls(
+            for: .applicationSupportDirectory,
             in: .userDomainMask
         )[0]
-        let dataDirectory = documents.appendingPathComponent(
+        let dataDirectory = support.appendingPathComponent(
             "orcapad-data",
             isDirectory: true
         )
@@ -85,6 +91,43 @@ enum EnginePaths {
         } catch {
             throw EnginePathError.presetDataDirectory(
                 String(reflecting: error)
+            )
+        }
+    }
+
+    /// One-time move of the pre-v0.8 `Documents/orcapad-data` (Files-visible,
+    /// carried API keys and user presets) into Application Support. Only a
+    /// legacy tree with no modern counterpart is moved; a failed move throws
+    /// — presets must not silently load an empty fresh tree while the user's
+    /// printers/presets sit in the old location.
+    private static func migrateLegacyDocumentsDataDirectory(
+        _ fileManager: FileManager
+    ) throws {
+        let documents = fileManager.urls(
+            for: .documentDirectory, in: .userDomainMask
+        )[0]
+        let legacy = documents.appendingPathComponent("orcapad-data", isDirectory: true)
+        let modern = fileManager.urls(
+            for: .applicationSupportDirectory, in: .userDomainMask
+        )[0].appendingPathComponent("orcapad-data", isDirectory: true)
+        var legacyIsDirectory: ObjCBool = false
+        let legacyExists = fileManager.fileExists(
+            atPath: legacy.path, isDirectory: &legacyIsDirectory
+        )
+        guard legacyExists, legacyIsDirectory.boolValue,
+              !fileManager.fileExists(atPath: modern.path)
+        else { return }
+        do {
+            try fileManager.createDirectory(
+                at: modern.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            try fileManager.moveItem(at: legacy, to: modern)
+        } catch {
+            throw EnginePathError.presetDataDirectory(
+                "could not move the legacy Documents/orcapad-data into " +
+                    "Application Support: \(String(reflecting: error)) — the " +
+                    "old tree was left in place"
             )
         }
     }
@@ -135,6 +178,25 @@ enum EnginePaths {
         return directory.appendingPathComponent(trimmed).appendingPathExtension("3mf")
     }
 
+    /// Filesystem-safe base name for outputs derived from an object/scene
+    /// name: 3MF object names are arbitrary strings and may contain "/",
+    /// ":" or control characters (an unsanitized name nests a path and the
+    /// slice fails at export with a confusing IO error).
+    static func sanitizedBaseName(_ name: String) -> String {
+        var result = ""
+        for character in name {
+            if character.isLetter || character.isNumber ||
+                " -_.()[]+".contains(character) {
+                result.append(character)
+            } else {
+                result.append("-")
+            }
+        }
+        let trimmed = result.trimmingCharacters(in: CharacterSet(charactersIn: " .-"))
+        let capped = String(trimmed.prefix(80))
+        return capped.isEmpty ? "plater" : capped
+    }
+
     static func gcodeOutputURL(sceneName: String) throws -> URL {
         let fileManager = FileManager.default
         let documents = fileManager.urls(
@@ -153,10 +215,33 @@ enum EnginePaths {
         } catch {
             throw EnginePathError.gcodeDirectory(String(reflecting: error))
         }
-        let baseName = (sceneName as NSString).deletingPathExtension
-        let outputName = baseName.isEmpty ? "plater" : baseName
-        return directory
-            .appendingPathComponent(outputName)
+        let baseName = sanitizedBaseName((sceneName as NSString).deletingPathExtension)
+        // Never silently overwrite a previous slice: every result gets its
+        // own file (name, name-2, name-3 …). The G-code folder is visible in
+        // Files, so previous results stay available until the user deletes
+        // them — no last-slice-wins data loss.
+        var candidate = directory
+            .appendingPathComponent(baseName)
             .appendingPathExtension("gcode")
+        var ordinal = 2
+        while fileManager.fileExists(atPath: candidate.path) {
+            candidate = directory
+                .appendingPathComponent("\(baseName)-\(ordinal)")
+                .appendingPathExtension("gcode")
+            ordinal += 1
+        }
+        return candidate
+    }
+
+    /// `Application Support/Autosave/autosave.3mf` — the lightweight
+    /// background-session snapshot (desktop project auto-backup subset).
+    /// Not in Documents: it is engine state, not a user deliverable.
+    static func autosaveURL() -> URL {
+        FileManager.default.urls(
+            for: .applicationSupportDirectory, in: .userDomainMask
+        )[0]
+        .appendingPathComponent("Autosave", isDirectory: true)
+        .appendingPathComponent("autosave")
+        .appendingPathExtension("3mf")
     }
 }

@@ -49,6 +49,26 @@ final class PrintHostService {
         self.status = status
     }
 
+    /// Digest credentials for PrusaLink (user "maker", the printer's API
+    /// key as the password) — carried per upload, never in static state.
+    private struct DigestCredentials: Sendable {
+        let user: String
+        let password: String
+    }
+
+    /// Everything one upload needs beyond its main request: the desktop
+    /// hosts' surrounding calls (FlashAir prepare/setdir, Duet start-print)
+    /// and optional digest credentials. Per-invocation by construction —
+    /// a failed upload can never leak requests into the next one (the old
+    /// static storage executed a stale Duet start command against the old
+    /// host during an unrelated later upload).
+    private struct UploadPlan: Sendable {
+        let request: URLRequest
+        let preRequests: [URLRequest]
+        let startRequest: URLRequest?
+        let digest: DigestCredentials?
+    }
+
     /// Uploads `gcode` to `printer`. `startPrint` mirrors the desktop
     /// checkbox (select-and-print / Moonraker print flag).
     func upload(
@@ -66,23 +86,31 @@ final class PrintHostService {
         do {
             // Reading a multi-megabyte G-code file must not block the main
             // actor; the request builder is pure and nonisolated.
-            let request = try await Task.detached(priority: .userInitiated) {
+            let plan = try await Task.detached(priority: .userInitiated) {
                 try Self.request(for: printer, file: gcode, startPrint: startPrint)
             }.value
+            let session: URLSession
+            if let digest = plan.digest {
+                session = Self.digestSession(user: digest.user, password: digest.password)
+            } else {
+                session = .shared
+            }
+            // A session built for this upload is torn down when it ends —
+            // credentials and connections never outlive the request.
+            let createdSession = plan.digest != nil ? session : nil
+            defer { createdSession?.finishTasksAndInvalidate() }
             status.report(.device, "\(printer.name): uploading \(gcode.lastPathComponent)…")
             // Desktop multi-step hosts: FlashAir prepares the card/dir
             // first (FlashAir.cpp), Duet starts the print after the upload
             // (Duet.cpp rr_gcode). Both steps surface failures loudly.
-            for pre in Self.pendingPreRequests {
-                let (_, preResponse) = try await URLSession.shared.data(for: pre)
+            for pre in plan.preRequests {
+                let (_, preResponse) = try await session.data(for: pre)
                 if let http = preResponse as? HTTPURLResponse,
                    !(200..<300).contains(http.statusCode) {
                     throw UploadError.http(status: http.statusCode, host: printer.hostType)
                 }
             }
-            Self.pendingPreRequests = []
-            let session = printer.hostType == "prusalink" ? Self.digestSession : .shared
-            let (data, response) = try await session.data(for: request)
+            let (data, response) = try await session.data(for: plan.request)
             if let http = response as? HTTPURLResponse,
                !(200..<300).contains(http.statusCode) {
                 throw UploadError.http(status: http.statusCode, host: printer.hostType)
@@ -90,7 +118,7 @@ final class PrintHostService {
             if printer.hostType == "prusalink", startPrint {
                 // PrusaLink start (OctoPrint.cpp select command):
                 // PUT /api/files/local/<file> {"command":"select","print":true}
-                var select = request.url!
+                var select = plan.request.url!
                 select.append(path: "local/\(gcode.lastPathComponent)")
                 var selectRequest = URLRequest(url: select)
                 selectRequest.httpMethod = "PUT"
@@ -102,16 +130,14 @@ final class PrintHostService {
                     throw UploadError.http(status: http.statusCode, host: printer.hostType)
                 }
             }
-            if let start = Self.startRequest {
-                Self.startRequest = nil
-                let (_, startResponse) = try await URLSession.shared.data(for: start)
+            if let start = plan.startRequest {
+                let (_, startResponse) = try await session.data(for: start)
                 if let http = startResponse as? HTTPURLResponse,
                    !(200..<300).contains(http.statusCode) {
                     // The FILE is uploaded; only the start command failed.
                     throw UploadError.http(status: http.statusCode, host: printer.hostType)
                 }
             }
-            Self.startRequest = nil
             status.report(.device, "\(printer.name): upload complete")
             _ = data // OctoPrint/Moonraker return JSON status; nothing to show yet
             lastReceipt = Receipt(
@@ -138,7 +164,7 @@ final class PrintHostService {
         for printer: EnginePresets.PhysicalPrinterRecord,
         file: URL,
         startPrint: Bool
-    ) throws -> URLRequest {
+    ) throws -> UploadPlan {
         guard let base = URL(string: printer.url), let scheme = base.scheme?.lowercased(),
               scheme == "http" || scheme == "https" else {
             throw UploadError.badURL(printer.url)
@@ -169,21 +195,25 @@ final class PrintHostService {
             request.httpBody = fileData
             request.timeoutInterval = 120
             // Desktop sends the start command as a second request after a
-            // successful upload; OrcaPad queues it in `startRequest`.
-            startRequest = startPrint
-                ? Self.duetStart(base: base, file: file.lastPathComponent)
-                : nil
-            return request
+            // successful upload; carried on the plan, never in statics.
+            return UploadPlan(
+                request: request,
+                preRequests: [],
+                startRequest: startPrint
+                    ? Self.duetStart(base: base, file: file.lastPathComponent) : nil,
+                digest: nil
+            )
         }
 
+        var digest: DigestCredentials?
         if printer.hostType == "prusalink" {
             // PrusaLink (PrusaLink.cpp): OctoPrint-shaped multipart POST to
             // api/files/local over HTTP DIGEST auth (user "maker", the
             // printer's API key as the password).
-            Self.digestUser = "maker"
-            Self.digestPassword = printer.apiKey
+            digest = DigestCredentials(user: "maker", password: printer.apiKey)
         }
 
+        var preRequests: [URLRequest] = []
         if printer.hostType == "flashair" {
             // FlashAir.cpp: prepare (WRITEPROTECT=ON&FTIME), set dir, upload.
             let timestamp = String(Int(Date().timeIntervalSince1970))
@@ -196,7 +226,7 @@ final class PrintHostService {
             var setDir = base
             setDir.append(path: "upload.cgi")
             setDir.append(queryItems: [URLQueryItem(name: "UPDIR", value: "/gcodes")])
-            pendingPreRequests = [prepare, setDir].map { url in
+            preRequests = [prepare, setDir].map { url in
                 var request = URLRequest(url: url)
                 request.httpMethod = "GET"
                 request.timeoutInterval = 30
@@ -246,40 +276,43 @@ final class PrintHostService {
         }
         request.httpBody = body
         request.timeoutInterval = 120
-        return request
+        return UploadPlan(
+            request: request,
+            preRequests: preRequests,
+            startRequest: nil,
+            digest: digest
+        )
     }
 
-    /// Extra requests the desktop hosts send around the main upload
-    /// (FlashAir prepare/setdir) and after it (Duet start).
-    private nonisolated(unsafe) static var pendingPreRequests: [URLRequest] = []
-    private nonisolated(unsafe) static var startRequest: URLRequest?
-    /// PrusaLink digest credentials (user "maker", API key as password);
-    /// URLSession computes the Digest handshake from the credential.
-    private nonisolated(unsafe) static var digestUser: String = ""
-    private nonisolated(unsafe) static var digestPassword: String = ""
-
     /// Session whose delegate answers HTTP digest challenges (PrusaLink).
-    private static let digestSession: URLSession = {
+    /// Built per upload with that upload's credentials — no shared
+    /// mutable auth state outlives the request.
+    private static func digestSession(user: String, password: String) -> URLSession {
         final class DigestDelegate: NSObject, URLSessionDataDelegate, @unchecked Sendable {
+            let user: String
+            let password: String
+            init(user: String, password: String) {
+                self.user = user
+                self.password = password
+            }
             func urlSession(
                 _ session: URLSession,
                 didReceive challenge: URLAuthenticationChallenge
             ) async -> (URLSession.AuthChallengeDisposition, URLCredential?) {
                 guard challenge.protectionSpace.authenticationMethod ==
                         NSURLAuthenticationMethodHTTPDigest,
-                      !digestUser.isEmpty,
                       let prior = challenge.proposedCredential,
                       prior.user != nil  // answering once; URLSession loops otherwise
                 else {
                     return (.performDefaultHandling, nil)
                 }
-                return (.useCredential, URLCredential(user: digestUser, password: digestPassword, persistence: .none))
+                return (.useCredential, URLCredential(user: user, password: password, persistence: .none))
             }
         }
         let configuration = URLSessionConfiguration.ephemeral
         configuration.timeoutIntervalForRequest = 120
-        return URLSession(configuration: configuration, delegate: DigestDelegate(), delegateQueue: nil)
-    }()
+        return URLSession(configuration: configuration, delegate: DigestDelegate(user: user, password: password), delegateQueue: nil)
+    }
 
     private nonisolated static func duetStart(base: URL, file: String) -> URLRequest {
         var url = base

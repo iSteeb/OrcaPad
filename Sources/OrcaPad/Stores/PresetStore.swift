@@ -108,6 +108,21 @@ final class PresetStore {
 
     private let status: StatusCenter
     private var engine: EnginePresets?
+    /// Wired by AppEnvironment: preset operations must REJECT while the
+    /// engine is slicing — without this they silently park on the engine
+    /// mutex for the whole slice and apply minutes later, which reads as
+    /// dead controls (the document commands already reject while busy).
+    var engineIsSlicing: (() -> Bool)?
+
+    var isEngineBusy: Bool { engineIsSlicing?() ?? false }
+
+    /// A real (listed) machine preset is selected. A fresh install sits on
+    /// the engine's "- default -" printer, which is NOT listed and slices
+    /// with raw engine defaults the Bridge itself calls unsafe — UI gates
+    /// Slice on this (desktop solves first-run with the ConfigWizard).
+    var hasListedMachine: Bool {
+        machines.contains { $0.name == selection.machine }
+    }
     private(set) var phase: Phase = .idle
     private(set) var machines: [PresetEntry] = []
     private(set) var filaments: [PresetEntry] = []
@@ -281,6 +296,10 @@ final class PresetStore {
     func select(kind: PresetKind, name: String) async {
         guard let engine, isReady, !isSelecting else {
             status.report(.presets, "preset selection blocked: presets are busy")
+            return
+        }
+        guard !isEngineBusy else {
+            status.report(.presets, "presets: locked while slicing — available again when the slice finishes")
             return
         }
         // Value snapshots for the nonisolated background closure.
@@ -458,13 +477,21 @@ final class PresetStore {
         }
         switch result {
         case .success(let slots): filamentSlots = slots
-        case .failure: filamentSlots = []
+        case .failure(let failure):
+            // Never silently empty the filament bar — the typed failure
+            // reaches the user like every other engine error.
+            filamentSlots = []
+            status.report(.presets, failure: failure)
         }
     }
 
     func addFilament() async {
         guard let engine, isReady, !isSelecting else {
             status.report(.presets, "add filament blocked: presets are busy")
+            return
+        }
+        guard !isEngineBusy else {
+            status.report(.presets, "presets: locked while slicing — available again when the slice finishes")
             return
         }
         isSelecting = true
@@ -488,6 +515,10 @@ final class PresetStore {
             status.report(.presets, "remove filament blocked")
             return
         }
+        guard !isEngineBusy else {
+            status.report(.presets, "presets: locked while slicing — available again when the slice finishes")
+            return
+        }
         isSelecting = true
         defer { isSelecting = false }
         let targetCount = filamentSlots.count - 1
@@ -509,6 +540,10 @@ final class PresetStore {
             status.report(.presets, "filament preset change blocked")
             return
         }
+        guard !isEngineBusy else {
+            status.report(.presets, "presets: locked while slicing — available again when the slice finishes")
+            return
+        }
         isSelecting = true
         defer { isSelecting = false }
         let result = await BackgroundWork.run(operation: "select filament preset") {
@@ -527,6 +562,10 @@ final class PresetStore {
         guard let engine, isReady, !isSelecting,
               slot >= 0, slot < filamentSlots.count else {
             status.report(.presets, "filament colour change blocked")
+            return
+        }
+        guard !isEngineBusy else {
+            status.report(.presets, "presets: locked while slicing — available again when the slice finishes")
             return
         }
         isSelecting = true
@@ -560,6 +599,10 @@ final class PresetStore {
             status.report(.presets, "save preset blocked: presets are busy")
             return
         }
+        guard !isEngineBusy else {
+            status.report(.presets, "presets: locked while slicing — available again when the slice finishes")
+            return
+        }
         isSelecting = true
         defer { isSelecting = false }
         let result = await BackgroundWork.run(operation: "save user preset") {
@@ -578,6 +621,10 @@ final class PresetStore {
     func deleteUserPreset(kind: PresetKind, name: String) async {
         guard let engine, isReady, !isSelecting else {
             status.report(.presets, "delete preset blocked: presets are busy")
+            return
+        }
+        guard !isEngineBusy else {
+            status.report(.presets, "presets: locked while slicing — available again when the slice finishes")
             return
         }
         isSelecting = true
@@ -668,6 +715,10 @@ final class PresetStore {
             status.report(.presets, "plate type change blocked: presets are busy")
             return
         }
+        guard !isEngineBusy else {
+            status.report(.presets, "presets: locked while slicing — available again when the slice finishes")
+            return
+        }
         let machine = selection.machine
         let result = await BackgroundWork.run(operation: "set plate type") {
             try engine.setBedType(value).get()
@@ -704,6 +755,10 @@ final class PresetStore {
             status.report(.presets, "setting change blocked: presets are busy")
             return
         }
+        guard !isEngineBusy else {
+            status.report(.presets, "presets: locked while slicing — available again when the slice finishes")
+            return
+        }
         let result = await BackgroundWork.run(operation: "set config value") {
             try engine.setValue(
                 kind: kind,
@@ -731,6 +786,10 @@ final class PresetStore {
             status.report(.presets, "value reset blocked: presets are busy")
             return
         }
+        guard !isEngineBusy else {
+            status.report(.presets, "presets: locked while slicing — available again when the slice finishes")
+            return
+        }
         let result = await BackgroundWork.run(operation: "reset config value") {
             try engine.resetValue(kind: kind, key: key).get()
             return (
@@ -751,6 +810,10 @@ final class PresetStore {
     func resetKind(_ kind: PresetKind) async {
         guard let engine, isReady, !isSelecting else {
             status.report(.presets, "reset blocked: presets are busy")
+            return
+        }
+        guard !isEngineBusy else {
+            status.report(.presets, "presets: locked while slicing — available again when the slice finishes")
             return
         }
         let result = await BackgroundWork.run(operation: "reset preset kind") {

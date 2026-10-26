@@ -35,6 +35,16 @@ final class ResolvedConfigService {
 
     func load(presets: PresetStore) async {
         guard case .idle = phase else { return }
+        // The resolved-config read enters the engine: during a slice it
+        // would park on the engine mutex for the whole slice — reject with
+        // an explanation instead (same policy as preset operations).
+        guard !presets.isEngineBusy else {
+            phase = .failed(.invariant(
+                operation: "load resolved config",
+                diagnostic: "locked while slicing \u{2014} available again when the slice finishes"
+            ))
+            return
+        }
         phase = .loading
         // Capture the engine handle on the main actor; the detached closure
         // must not touch isolated store state.

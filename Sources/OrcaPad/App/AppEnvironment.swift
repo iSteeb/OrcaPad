@@ -25,21 +25,79 @@ final class AppEnvironment {
         slicing = SliceService(status: status)
         printHost = PrintHostService(status: status)
         printers = PrinterStore(status: status)
+        // Preset operations must REJECT (not silently queue) while the
+        // engine is slicing — they would park on the engine mutex for the
+        // whole slice and apply minutes later.
+        presets.engineIsSlicing = { [weak self] in
+            self?.document.isSlicing ?? false
+        }
+    }
+
+    // MARK: Session autosave (desktop auto-backup subset)
+
+    /// Writes a lightweight 3MF snapshot of the current session when the
+    /// app leaves the foreground, and clears it when the plate is empty —
+    /// an app kill or iOS eviction then never loses work. Restored once on
+    /// the next launch (`bootstrap`). Best effort: a backgrounding process
+    /// gets only a short grace window.
+    func autosaveSession() async {
+        guard let engine = presets.engineForSlicing, presets.isReady,
+              document.isReady, !document.isBusy,
+              let scene = document.scene else { return }
+        let url = EnginePaths.autosaveURL()
+        let manager = FileManager.default
+        guard !scene.objects.isEmpty else {
+            // An empty plate restores nothing: clear any stale autosave so
+            // the next launch starts clean.
+            if manager.fileExists(atPath: url.path) {
+                do {
+                    try manager.removeItem(at: url)
+                } catch {
+                    status.report(.document, failure: AppFailure.wrap(
+                        error, operation: "clear session autosave"))
+                }
+            }
+            return
+        }
+        await presets.withExclusiveSession {
+            await document.saveAutosave(to: url, presets: engine)
+        }
+    }
+
+    private func restoreAutosaveIfNeeded() async {
+        let url = EnginePaths.autosaveURL()
+        guard FileManager.default.fileExists(atPath: url.path) else { return }
+        if await openProject(url) {
+            status.report(.document, "session restored from autosave")
+        } else {
+            // A corrupt autosave must not fail every future launch.
+            do {
+                try FileManager.default.removeItem(at: url)
+            } catch {
+                status.report(.document, failure: AppFailure.wrap(
+                    error, operation: "discard broken autosave"))
+            }
+        }
     }
 
     /// Desktop "Open project": the document AND the preset session change
     /// together, so the preset store is held exclusive for the duration.
-    func openProject(_ url: URL) async {
+    /// Returns whether the engine committed the open.
+    @discardableResult
+    func openProject(_ url: URL) async -> Bool {
         if !document.isReady || !presets.isReady { await bootstrap() }
         guard let engine = presets.engineForSlicing, presets.isReady, document.isReady else {
             status.report(.document, "open project blocked: engine is not ready")
-            return
+            return false
         }
+        var opened = false
         await presets.withExclusiveSession {
             if await document.openProject(from: url, presets: engine) {
                 await presets.reloadFromEngine()
+                opened = true
             }
         }
+        return opened
     }
 
     func saveProject(named name: String) async {
@@ -63,5 +121,6 @@ final class AppEnvironment {
         if let volume = presets.printVolume {
             await document.syncBed(volume)
         }
+        await restoreAutosaveIfNeeded()
     }
 }
