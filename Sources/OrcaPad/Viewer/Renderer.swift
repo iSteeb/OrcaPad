@@ -101,6 +101,8 @@ final class Renderer: NSObject, MTKViewDelegate {
     private var litBlendPipeline: MTLRenderPipelineState!
     private var linePipeline: MTLRenderPipelineState!
     private var pcBlendPipeline: MTLRenderPipelineState!
+    /// Selection outline (inverted hull, front faces culled).
+    private var outlinePipeline: MTLRenderPipelineState!
     private var depthState: MTLDepthStencilState!
     private var translucentDepthState: MTLDepthStencilState!
     private var overlayDepthState: MTLDepthStencilState!
@@ -124,6 +126,8 @@ final class Renderer: NSObject, MTKViewDelegate {
         let indexCount: Int
         let bboxMin: SIMD3<Float>   // object-local (packed) space
         let bboxMax: SIMD3<Float>
+        /// Inverted-hull selection outline width (object-space mm).
+        let outlineWidth: Float
         let pickPositions: [SIMD3<Float>]  // packed viewer-space (pre-instance)
         let pickIndices: [UInt32]
         var instances: [InstanceDraw]
@@ -220,6 +224,9 @@ final class Renderer: NSObject, MTKViewDelegate {
 
     private static let objectColor = SIMD4<Float>(0.96, 0.52, 0.11, 1)
     private static let selectedColor = SIMD4<Float>(0.16, 0.80, 0.95, 1)
+    /// Selection-outline shell (brighter than the selection tint so it
+    /// reads against both the object and the dark background).
+    private static let outlineColor = SIMD4<Float>(0.42, 0.93, 1.0, 1)
     /// Desktop draws non-printable instances greyed out.
     private static let unprintableColor = SIMD4<Float>(0.42, 0.42, 0.44, 1)
     /// Selected volume/part highlight (desktop GLVolume selection tint).
@@ -245,6 +252,12 @@ final class Renderer: NSObject, MTKViewDelegate {
         normalSign: 1
     )
     private var lineUniforms = LineUniforms(mvp: .init(diagonal: .one))
+    private var outlineUniforms = OutlineUniforms(
+        mvp: .init(diagonal: .one),
+        model: .init(diagonal: .one),
+        color: SIMD4<Float>(0.42, 0.93, 1.0, 1),
+        width: 0.3
+    )
 
     // FPS tracking
     private var frameTimes: [CFTimeInterval] = []
@@ -321,6 +334,18 @@ final class Renderer: NSObject, MTKViewDelegate {
         litBlendPipeline = try device.makeRenderPipelineState(descriptor: blendDesc)
 
         linePipeline = try device.makeRenderPipelineState(descriptor: lineDesc)
+
+        // Selection outline: the lit vertex layout, expanded along normals
+        // and front-face culled (inverted hull) — see Shaders.vertexOutline.
+        let outlineDesc = MTLRenderPipelineDescriptor()
+        outlineDesc.label = "outline"
+        outlineDesc.vertexFunction = try function(library, "vertexOutline")
+        outlineDesc.fragmentFunction = try function(library, "fragmentFlat")
+        outlineDesc.vertexDescriptor = Renderer.pncVertexDescriptor()
+        outlineDesc.rasterSampleCount = view.sampleCount
+        outlineDesc.colorAttachments[0].pixelFormat = view.colorPixelFormat
+        outlineDesc.depthAttachmentPixelFormat = view.depthStencilPixelFormat
+        outlinePipeline = try device.makeRenderPipelineState(descriptor: outlineDesc)
 
         // Flat-color triangles with blending (Flatten-gizmo planes and other
         // translucent overlays): same vertexFlat/fragmentFlat pair, blended.
@@ -541,6 +566,11 @@ final class Renderer: NSObject, MTKViewDelegate {
                 bounds.minimum = simd_min(bounds.minimum, position)
                 bounds.maximum = simd_max(bounds.maximum, position)
             }
+            // Selection-outline shell width: a small fraction of the
+            // object's extent, clamped (desktop draws a crisp selection
+            // silhouette; the inverted hull approximates it).
+            let extent = simd_distance(bounds.minimum, bounds.maximum)
+            let outlineWidth = max(0.12, min(extent * 0.006, 2.0))
             rebuilt.append(RenderObject(
                 objectID: sceneObject.id,
                 meshRevision: sceneObject.mesh.revision,
@@ -549,6 +579,7 @@ final class Renderer: NSObject, MTKViewDelegate {
                 indexCount: geometry.idx.count,
                 bboxMin: bounds.minimum,
                 bboxMax: bounds.maximum,
+                outlineWidth: outlineWidth,
                 pickPositions: positions,
                 pickIndices: geometry.idx,
                 instances: instances,
@@ -1314,6 +1345,36 @@ final class Renderer: NSObject, MTKViewDelegate {
 
         // Objects × instances — uploaded vertices are viewer-space, recentred
         // (identity model base); each instance applies its own transform.
+        // Before them: the selection outline shell (inverted hull — the
+        // object's own front faces occlude the expanded back faces, leaving
+        // a silhouette halo; depth-written so it participates in occlusion).
+        if objects.contains(where: { $0.instances.contains(where: \.selected) }) {
+            encoder.pushDebugGroup("selection-outline")
+            encoder.setRenderPipelineState(outlinePipeline)
+            encoder.setDepthStencilState(depthState)
+            for obj in objects where obj.indexCount > 0 {
+                encoder.setVertexBuffer(obj.vb, offset: 0, index: 0)
+                for inst in obj.instances where inst.selected {
+                    // A mirrored (left-handed) matrix flips winding: cull the
+                    // other face set so the shell stays a halo.
+                    encoder.setCullMode(inst.mirrored ? .back : .front)
+                    outlineUniforms.mvp = viewProj * inst.model
+                    outlineUniforms.model = inst.model
+                    outlineUniforms.color = Renderer.outlineColor
+                    outlineUniforms.width = obj.outlineWidth
+                    var ou = outlineUniforms
+                    encoder.setVertexBytes(
+                        &ou, length: MemoryLayout<OutlineUniforms>.stride, index: 1)
+                    encoder.setFragmentBytes(
+                        &ou, length: MemoryLayout<OutlineUniforms>.stride, index: 1)
+                    encoder.drawIndexedPrimitives(
+                        type: .triangle, indexCount: obj.indexCount, indexType: .uint32,
+                        indexBuffer: obj.ib, indexBufferOffset: 0)
+                }
+            }
+            encoder.setCullMode(.none)
+            encoder.popDebugGroup()
+        }
         encoder.pushDebugGroup("objects")
         encoder.setRenderPipelineState(litPipeline)
         encoder.setDepthStencilState(depthState)
@@ -1550,4 +1611,13 @@ struct CubeUniforms {
 
 struct LineUniforms {
     var mvp: simd_float4x4
+}
+
+/// Field order MUST stay identical to `OutlineUniforms` in Shaders.swift
+/// (runtime-compiled MSL; see LESSONS).
+struct OutlineUniforms {
+    var mvp: simd_float4x4
+    var model: simd_float4x4
+    var color: SIMD4<Float>
+    var width: Float
 }

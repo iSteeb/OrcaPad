@@ -75,5 +75,26 @@ enum Shaders {
     fragment float4 fragmentFlat(VOutFlat in [[stage_in]]) {
         return in.color;
     }
+
+    // --- Selection outline (inverted hull — desktop's selection halo) ---
+    // The selected mesh is drawn once more, expanded along its normals with
+    // FRONT faces culled, before the opaque pass: the shell survives depth
+    // testing only around the object's silhouette, producing a clean
+    // outline without a post-process pass.
+    struct OutlineUniforms {
+        float4x4 mvp;
+        float4x4 model;
+        float4 color;
+        float width; // object-space expansion (mm)
+    };
+
+    vertex VOutFlat vertexOutline(VIn in [[stage_in]],
+                                  constant OutlineUniforms &u [[buffer(1)]]) {
+        VOutFlat out;
+        float3 expanded = in.position + normalize(in.normal) * u.width;
+        out.position = u.mvp * float4(expanded, 1.0);
+        out.color = u.color;
+        return out;
+    }
     """
 }

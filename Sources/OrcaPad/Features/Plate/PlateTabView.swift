@@ -232,6 +232,7 @@ struct PlateTabView: View {
         .fileImporter(
             isPresented: $importPresented,
             allowedContentTypes: importMode == .project ? ImportTypes.projects : ImportTypes.models,
+            allowsMultipleSelection: importMode == .model,
             onCompletion: handleImport
         )
         .sheet(isPresented: $objectsPresented) { objectsList }
@@ -510,6 +511,60 @@ struct PlateTabView: View {
                     guard let engine = environment.presets.engineForSlicing else { return }
                     Task { await document.orientAll(presets: engine) }
                 }
+                // Desktop keeps Slice on the main plater toolbar — the whole
+                // import/arrange/transform loop lives in this tab, and a
+                // tab switch should not be part of every iteration.
+                if environment.slicing.isSlicing {
+                    Button {
+                        environment.slicing.cancel()
+                    } label: {
+                        HStack(spacing: 6) {
+                            ProgressView(
+                                value: Double(environment.slicing.progress?.percent ?? 0),
+                                total: 100
+                            )
+                            .frame(width: 56)
+                            Image(systemName: "xmark.circle.fill")
+                        }
+                        .frame(height: 44)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Cancel slicing")
+                } else {
+                    Menu {
+                        Button {
+                            Task {
+                                await environment.slicing.run(
+                                    document: document, presets: environment.presets)
+                            }
+                        } label: {
+                            Label("Slice plate", systemImage: "scissors")
+                        }
+                        if document.plates.count > 1 {
+                            Button {
+                                Task {
+                                    await environment.slicing.runAll(
+                                        document: document, presets: environment.presets)
+                                }
+                            } label: {
+                                Label("Slice all plates", systemImage: "square.stack.3d.up.fill")
+                            }
+                        }
+                    } label: {
+                        ChromeToolLabel(symbol: "scissors", label: "Slice")
+                            .foregroundStyle(Color.white)
+                            .background(Color.accentColor, in: RoundedRectangle(cornerRadius: 10))
+                    } primaryAction: {
+                        Task {
+                            await environment.slicing.run(
+                                document: document, presets: environment.presets)
+                        }
+                    }
+                    .disabled(
+                        document.scene?.objects.isEmpty != false ||
+                            document.isBusy || environment.presets.isSelecting
+                    )
+                }
                 Divider().frame(height: 28)
                 ForEach(Array(GizmoMode.allCases.enumerated()), id: \.offset) { _, mode in
                     Button {
@@ -591,13 +646,18 @@ struct PlateTabView: View {
         return base.isEmpty ? "OrcaPad project" : base
     }
 
-    private func handleImport(_ result: Result<URL, any Error>) {
+    private func handleImport(_ result: Result<[URL], any Error>) {
         if case .volume(let role, let objectID) = importMode,
-            case .success(let url) = result {
-            Task { await document.addVolume(from: url, role: role, objectID: objectID) }
+            case .success(let urls) = result {
+            // Desktop "Load..." per volume: every picked file becomes one
+            // volume of that role on the object.
+            for url in urls {
+                Task { await document.addVolume(from: url, role: role, objectID: objectID) }
+            }
             return
         }
-        if importMode == .project, case .success(let url) = result {
+        if importMode == .project, case .success(let urls) = result {
+            guard let url = urls.first else { return }
             if document.scene?.objects.isEmpty == false {
                 replaceConfirmation = url
             } else {
@@ -606,18 +666,23 @@ struct PlateTabView: View {
             return
         }
         switch result {
-        case .success(let url):
+        case .success(let urls):
+            // Desktop multi-select import: every picked model file lands on
+            // the working plate, sequentially (each import is its own undo
+            // step, exactly like picking them one by one).
             Task {
                 if !document.isReady {
                     await environment.bootstrap()
                 }
                 guard document.isReady else { return }
-                let bedCenter = document.currentPlateCenter
-                    ?? environment.presets.printVolume.map {
-                        SIMD2<Double>($0.centerX, $0.centerY)
-                    }
-                    ?? .zero
-                await document.importModel(from: url, bedCenter: bedCenter)
+                for url in urls {
+                    let bedCenter = document.currentPlateCenter
+                        ?? environment.presets.printVolume.map {
+                            SIMD2<Double>($0.centerX, $0.centerY)
+                        }
+                        ?? .zero
+                    await document.importModel(from: url, bedCenter: bedCenter)
+                }
             }
         case .failure(let error):
             environment.status.report(
@@ -894,6 +959,27 @@ extension PlateTabView {
                 }
             } label: {
                 Label("Mirror", systemImage: "arrow.left.and.right.righttriangle.left.righttriangle.right")
+            }
+            if document.plates.count > 1 {
+                // Desktop plate context menu: send an object to another
+                // plate without dragging it across the plate grid.
+                Menu {
+                    ForEach(document.plates) { plate in
+                        Button {
+                            Task {
+                                await document.moveObjectsToPlate([object.id], plate: plate.id)
+                            }
+                        } label: {
+                            if plate.id == document.currentPlate?.id {
+                                Label(plate.name, systemImage: "checkmark")
+                            } else {
+                                Text("\(plate.name) · \(plate.objectCount)")
+                            }
+                        }
+                    }
+                } label: {
+                    Label("Move to plate", systemImage: "square.stack.3d.up")
+                }
             }
             Divider()
             let printable = object.instances.allSatisfy(\.printable)

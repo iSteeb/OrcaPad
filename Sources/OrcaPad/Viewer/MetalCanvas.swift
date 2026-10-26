@@ -393,10 +393,15 @@ struct MetalCanvas: UIViewRepresentable {
             renderer: Renderer
         ) -> DragState {
             let mode = renderer.gizmoMode
-            // Rectangle selection: the drag ALWAYS draws the marquee in this
-            // mode (taps still select).
+            // Rectangle selection: a drag STARTING ON an instance draws the
+            // marquee (drag it outward to enclose a group); dragging empty
+            // space orbits — camera control stays available in every mode,
+            // exactly like desktop (taps still select).
             if mode == .select {
-                return .marquee(start: location)
+                if renderer.pickInstance(at: location, in: view) != nil {
+                    return .marquee(start: location)
+                }
+                return .orbit
             }
             // Finger-drag scale is UNIFORM ONLY (user spec); per-axis
             // scaling lives in the expanded tools panel's numeric fields.

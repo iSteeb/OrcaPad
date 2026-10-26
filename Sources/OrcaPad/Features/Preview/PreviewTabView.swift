@@ -17,6 +17,8 @@ struct PreviewTabView: View {
     /// Last slice job consumed: tab re-appearance must not override an
     /// externally opened file, while every new slice replaces it.
     @State private var consumedSliceJob: UInt64?
+    /// Desktop "Jump to layer": typed layer number.
+    @State private var jumpLayerText = ""
 
     var body: some View {
         Group {
@@ -47,11 +49,26 @@ struct PreviewTabView: View {
             guard let outcome = environment.slicing.lastOutcome,
                   consumedSliceJob != outcome.jobID else { return }
             consumedSliceJob = outcome.jobID
-            await store.load(
-                url: outcome.outputURL,
-                identity: "slice:\(outcome.jobID)",
-                origin: outcome.plateOrigin ?? .zero
-            )
+            if outcome.plateSections.isEmpty {
+                await store.load(
+                    url: outcome.outputURL,
+                    identity: "slice:\(outcome.jobID)",
+                    origin: outcome.plateOrigin ?? .zero
+                )
+            } else {
+                // Combined slice-all file: split at the ; ORCA_PLATE markers,
+                // offset every section back to its plate's world position
+                // (each section is plate-relative — without the offsets all
+                // plates would stack on the bed origin).
+                await store.loadPlateSections(
+                    url: outcome.outputURL,
+                    identity: "slice:\(outcome.jobID)",
+                    origins: Dictionary(
+                        uniqueKeysWithValues: outcome.plateSections.map {
+                            ($0.plateIndex, $0.origin)
+                        })
+                )
+            }
             frameRequest += 1
         }
         .fileImporter(
@@ -158,6 +175,16 @@ struct PreviewTabView: View {
         return String(format: "%d · %.2f", index + 1, layer.z)
     }
 
+    /// Applies the typed layer jump (1-based input, clamped to the stack).
+    private func jumpToLayer() {
+        let trimmed = jumpLayerText.trimmingCharacters(in: .whitespaces)
+        guard let layer = Int(trimmed) else { return }
+        let last = max(store.layerCount - 1, 0)
+        let target = min(max(layer - 1, 0), last)
+        store.setLayerRange(lower: min(store.lowerLayer, target), upper: target)
+        jumpLayerText = ""
+    }
+
     // MARK: Bottom panel: move scrubber + scheme controls
 
     /// Preview chrome: ONE wide, horizontally SCROLLABLE pill with direct
@@ -174,6 +201,25 @@ struct PreviewTabView: View {
                     }
                 } label: {
                     ChromeToolLabel(symbol: "paintpalette", label: "Scheme")
+                }
+                if store.sections.count > 1 {
+                    // Slice-all results: jump the layer range onto one
+                    // plate's layers (the whole plate stack stays rendered).
+                    Menu {
+                        ForEach(Array(store.sections.enumerated()), id: \.offset) { _, section in
+                            Button {
+                                store.focus(section: section)
+                            } label: {
+                                let name = section.name.isEmpty
+                                    ? "Plate \(section.plateIndex + 1)" : section.name
+                                Text(name + " \u{00b7} ~" +
+                                     "\(Int(section.estimatedSeconds / 60)) min")
+                            }
+                        }
+                    } label: {
+                        ChromeToolLabel(symbol: "square.stack.3d.up", label: "Plates")
+                    }
+                    .buttonStyle(.plain)
                 }
                 Divider().frame(height: 28)
                 barToggle("arrow.triangle.swap", "Travel", store.showTravel) {
@@ -252,6 +298,16 @@ struct PreviewTabView: View {
             .lineLimit(1)
             .minimumScaleFactor(0.6)
             .frame(minWidth: 150, alignment: .trailing)
+            // Desktop "Jump to layer": type a layer number, land on it.
+            HStack(spacing: 4) {
+                TextField("Layer", text: $jumpLayerText)
+                    .frame(width: 52)
+                    .multilineTextAlignment(.trailing)
+                    .keyboardType(.numberPad)
+                    .onSubmit(jumpToLayer)
+                Button("Go", action: jumpToLayer)
+                    .buttonStyle(.borderless)
+            }
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
@@ -481,7 +537,8 @@ private struct PreviewDock: View {
     }
 }
 
-private enum GcodeTypes {
+/// G-code file types for preview import and the Device send sheet.
+enum GcodeTypes {
     /// Desktop G-code viewer extensions (`.gcode`, `.g`, `.gco`, `.ngc`).
     static let all: [UTType] = ["gcode", "g", "gco", "ngc"].map { ext in
         guard let type = UTType(filenameExtension: ext, conformingTo: .data) else {

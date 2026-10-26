@@ -28,6 +28,10 @@ final class PrinterWebSession: NSObject {
     private(set) var isLoading = false
     private(set) var failure: LoadFailure?
     private(set) var currentRequest: URLRequest?
+    /// Host of the page being shown: the ONLY web content allowed in-app
+    /// (scoped AGENTS.md exception — OrcaPad's own UI stays native, and the
+    /// printer's page must not turn the view into a general browser).
+    private var allowedHost: String?
 
     override init() {
         let configuration = WKWebViewConfiguration()
@@ -63,6 +67,7 @@ final class PrinterWebSession: NSObject {
     private func load(_ request: URLRequest) {
         currentRequest = request
         failure = nil
+        allowedHost = request.url?.host?.lowercased()
         Self.logger.notice("load \(request.url?.absoluteString ?? "-", privacy: .public)")
         webView.load(request)
     }
@@ -107,6 +112,57 @@ extension PrinterWebSession: WKNavigationDelegate {
         // leave a blank view.
         Self.logger.error("web content process terminated; reloading")
         reload()
+    }
+
+    // MARK: Navigation policy (scoped web exception)
+
+    private func isAllowed(_ url: URL) -> Bool {
+        guard let scheme = url.scheme?.lowercased(),
+              scheme == "http" || scheme == "https" else { return false }
+        guard let host = url.host?.lowercased() else { return false }
+        return host == allowedHost
+    }
+
+    private func openExternally(_ url: URL) async {
+        guard await UIApplication.shared.open(url) == false else { return }
+        Self.logger.notice("system could not open \(url.absoluteString, privacy: .public)")
+    }
+
+    func webView(
+        _ webView: WKWebView,
+        decidePolicyFor navigationAction: WKNavigationAction
+    ) async -> WKNavigationActionPolicy {
+        guard let url = navigationAction.request.url else { return .cancel }
+        if isAllowed(url) { return .allow }
+        // Off-host navigation never renders in-app: followed links open in
+        // Safari, and redirects are refused loudly (printer UIs stream from
+        // their own host; anything else is not the printer's page).
+        if navigationAction.navigationType == .linkActivated {
+            await openExternally(url)
+            return .cancel
+        }
+        fail(NSError(
+            domain: "OrcaPad.PrinterWebView", code: 1,
+            userInfo: [
+                NSLocalizedDescriptionKey:
+                    "blocked a redirect to \(url.host ?? "another host") " +
+                    "— the Device tab shows only \(allowedHost ?? "the printer")"
+            ]
+        ))
+        return .cancel
+    }
+
+    func webView(
+        _ webView: WKWebView,
+        createWebViewWith configuration: WKWebViewConfiguration,
+        for navigationAction: WKNavigationAction,
+        windowFeatures: WKWindowFeatures
+    ) async -> WKWebView? {
+        // target="_blank" and window.open: never a nested in-app browser.
+        if let url = navigationAction.request.url {
+            await openExternally(url)
+        }
+        return nil
     }
 }
 

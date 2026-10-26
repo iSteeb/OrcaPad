@@ -155,6 +155,20 @@ struct PrepareTabView: View {
             preparePill
                 .padding(.horizontal, 12)
                 .padding(.top, 4)
+            if !presets.hasListedMachine {
+                // Fresh install sits on the "- default -" printer; slicing
+                // is refused (SliceService) until a real machine is selected
+                // — show why, instead of a dead button.
+                Label(
+                    "Select a printer under Printer to enable slicing",
+                    systemImage: "exclamationmark.triangle"
+                )
+                .font(.caption)
+                .foregroundStyle(.yellow)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 14)
+                .padding(.top, 6)
+            }
             HStack(spacing: 8) {
                 Image(systemName: "magnifyingglass")
                     .foregroundStyle(.secondary)

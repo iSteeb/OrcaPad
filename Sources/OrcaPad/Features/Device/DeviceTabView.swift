@@ -498,21 +498,37 @@ private struct PrinterManagementSheet: View {
     }
 }
 
-/// Desktop PrintHostSendDialog: upload the last sliced G-code to the
-/// selected printer, optionally starting the print.
+/// Desktop PrintHostSendDialog: upload a G-code to the selected printer,
+/// optionally starting the print. Defaults to the last slice result; any
+/// other G-code can be picked (Documents/G-code keeps every previous
+/// result, visible in Files).
 private struct SendGcodeSheet: View {
     let printer: PrinterStore.Record
 
     @Environment(AppEnvironment.self) private var environment
     @Environment(\.dismiss) private var dismiss
     @State private var startPrint = true
+    @State private var chosen: URL?
+    @State private var pickPresented = false
+
+    private var gcode: URL? { chosen ?? environment.slicing.lastOutcome?.outputURL }
 
     var body: some View {
         NavigationStack {
             Form {
-                if let gcode = environment.slicing.lastOutcome?.outputURL {
+                if let gcode {
                     Section {
-                        LabeledContent("File", value: gcode.lastPathComponent)
+                        HStack {
+                            LabeledContent("File", value: gcode.lastPathComponent)
+                            Spacer()
+                            Button {
+                                pickPresented = true
+                            } label: {
+                                Image(systemName: "folder")
+                            }
+                            .buttonStyle(.borderless)
+                            .accessibilityLabel("Choose a G-code file")
+                        }
                         LabeledContent("Printer", value: printer.name)
                         LabeledContent("Host", value: "\(PrinterHostKind.label(printer.hostType)) · \(printer.url)")
                         Toggle("Start print after upload", isOn: $startPrint)
@@ -546,8 +562,15 @@ private struct SendGcodeSheet: View {
                         }
                     }
                 } else {
-                    Text("Slice a plate first: its G-code can then be sent to \(printer.name).")
-                        .foregroundStyle(.secondary)
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("Slice a plate first, or pick an existing G-code file to send to \(printer.name).")
+                            .foregroundStyle(.secondary)
+                        Button {
+                            pickPresented = true
+                        } label: {
+                            Label("Choose G-code…", systemImage: "folder")
+                        }
+                    }
                 }
             }
             .navigationTitle("Send to printer")
@@ -557,6 +580,15 @@ private struct SendGcodeSheet: View {
                     Button("Done") { dismiss() }
                 }
             }
+            .fileImporter(
+                isPresented: $pickPresented,
+                allowedContentTypes: GcodeTypes.all,
+                onCompletion: { result in
+                    if case .success(let url) = result {
+                        chosen = url
+                    }
+                }
+            )
         }
         .presentationDetents([.medium])
     }
