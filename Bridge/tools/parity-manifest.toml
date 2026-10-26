@@ -689,10 +689,11 @@ note = "color fields, per-extruder vectors and option dependencies are separate 
 id = "prepare.color-widget"
 area = "prepare"
 title = "Color picker for color options"
-status = "missing"
+status = "done"
 source = "src/slic3r/GUI/Field.hpp:class ColourPicker"
+evidence = ["client:isColour", "client:ColorPicker"]
 work = "UI"
-priority = 101
+note = "Colour-valued options (engine *_colour / *_color keys, #rrggbb serialization) get a swatch ColorPicker beside the raw field (vectors stay raw text; the filament bar edits per-slot colours directly)"
 
 [[feature]]
 id = "prepare.per-extruder-values"
@@ -934,10 +935,11 @@ evidence = ["client:enum ToolpathColorMode", "abi:orca_gcode_toolpath"]
 id = "preview.actual-flow"
 area = "preview"
 title = "Actual volumetric flow scheme"
-status = "missing"
+status = "done"
 desktop = ["view:ActualVolumetricFlowRate"]
+evidence = ['client:actualVolumetricRate', "client:actualVolumetricRange"]
 work = "Bridge + UI"
-priority = 206
+note = "Actual-flow color scheme (actual_feedrate x mm3_per_mm, engine GCodeProcessor values, ABI v14 segments) with gradient legend"
 
 [[feature]]
 id = "preview.summary"
@@ -983,10 +985,11 @@ work = "UI"
 id = "preview.one-layer"
 area = "preview"
 title = "One-layer mode"
-status = "missing"
+status = "done"
 source = "src/slic3r/GUI/IMSlider.cpp:one_layer"
+evidence = ["client:oneLayerMode"]
 work = "UI"
-priority = 202
+note = "One-layer toggle in the preview pill: the layer range collapses onto the top handle (the slider then walks single layers)"
 
 [[feature]]
 id = "preview.layer-slider"
@@ -1016,10 +1019,11 @@ evidence = ["client:var showSeams", "client:var showRetractions"]
 id = "preview.wipes-toolchanges"
 area = "preview"
 title = "Wipe and tool-change markers"
-status = "missing"
+status = "done"
 desktop = ["option:Wipes", "option:ToolChanges"]
+evidence = ["client:showWipes", "client:showToolChanges"]
 work = "UI"
-priority = 204
+note = "Wipe moves render as short lines under their own toggle; tool-change points are cross markers (ABI v14 marker segments)"
 
 [[feature]]
 id = "preview.legend"
@@ -1293,10 +1297,11 @@ note = "multi-plate projects round-trip (ABI v27): plate names, locks and member
 id = "files.new-project"
 area = "files"
 title = "New project"
-status = "missing"
+status = "done"
 desktop = ["menu:New Project"]
+evidence = ['client:func newProject\(']
 work = "UI"
-priority = 152
+note = "File menu New project: confirmed destructive action replaces the document session (fresh EnginePlater, plates at the current machine's bed); preset selections persist like desktop"
 
 [[feature]]
 id = "files.export-gcode"

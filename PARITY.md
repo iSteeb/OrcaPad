@@ -17,12 +17,12 @@ Status: ✅ done · 🟡 partial · ❌ missing · ⏸️ deferred · ➖ na. Pa
 | Area | Features | ✅ | 🟡 | ❌ | ⏸️ | ➖ | Parity |
 |---|---|---|---|---|---|---|---|
 | Plate / 3D editor | 64 | 33 | 4 | 19 | 7 | 1 | 56% |
-| Prepare / presets / settings | 25 | 9 | 5 | 11 | 0 | 0 | 46% |
-| Preview / G-code | 17 | 7 | 0 | 10 | 0 | 0 | 41% |
+| Prepare / presets / settings | 25 | 10 | 5 | 10 | 0 | 0 | 50% |
+| Preview / G-code | 17 | 10 | 0 | 7 | 0 | 0 | 59% |
 | Device / printing | 19 | 3 | 1 | 13 | 1 | 1 | 19% |
-| Files / projects / app integration | 12 | 3 | 1 | 7 | 1 | 0 | 29% |
+| Files / projects / app integration | 12 | 4 | 1 | 6 | 1 | 0 | 38% |
 | App / preferences / help | 15 | 1 | 1 | 5 | 0 | 8 | 21% |
-| **Total** | **152** | **56** | **12** | **65** | **9** | **10** | **44%** |
+| **Total** | **152** | **61** | **12** | **60** | **9** | **10** | **47%** |
 
 ### Desktop surface coverage (items)
 
@@ -30,13 +30,13 @@ Status: ✅ done · 🟡 partial · ❌ missing · ⏸️ deferred · ➖ na. Pa
 |---|---|---|---|---|---|---|---|---|
 | 3D editor gizmos (`gizmo`) | Gizmos/GLGizmosManager.hpp EType | 16 | 3 | 1 | 7 | 5 | 0 | 22% |
 | Canvas toolbars (`toolbar`) | GLCanvas3D.cpp _init_*toolbar | 10 | 8 | 0 | 2 | 0 | 0 | 80% |
-| Menu bar (`menu`) | MainFrame.cpp | 75 | 29 | 1 | 23 | 13 | 9 | 45% |
+| Menu bar (`menu`) | MainFrame.cpp | 75 | 30 | 1 | 22 | 13 | 9 | 46% |
 | Right-click menus (`context`) | GUI_Factories.cpp | 81 | 52 | 5 | 20 | 4 | 0 | 67% |
 | Keyboard/mouse actions (`kb`) | KBShortcutsDialog.cpp | 81 | 8 | 43 | 26 | 2 | 2 | 37% |
 | Layer slider menu (`slider`) | IMSlider.cpp | 11 | 1 | 0 | 10 | 0 | 0 | 9% |
 | Plate icons (`plate`) | PartPlate.cpp render_icons | 9 | 7 | 0 | 2 | 0 | 0 | 78% |
-| Preview color schemes (`view`) | libvgcode Types.hpp EViewType | 17 | 14 | 0 | 3 | 0 | 0 | 82% |
-| Preview visibility options (`option`) | libvgcode Types.hpp EOptionType | 9 | 4 | 0 | 5 | 0 | 0 | 44% |
+| Preview color schemes (`view`) | libvgcode Types.hpp EViewType | 17 | 15 | 0 | 2 | 0 | 0 | 88% |
+| Preview visibility options (`option`) | libvgcode Types.hpp EOptionType | 9 | 6 | 0 | 3 | 0 | 0 | 67% |
 | Print hosts (`host`) | PrintConfig.hpp PrintHostType | 16 | 3 | 2 | 11 | 0 | 0 | 25% |
 | File types (`format`) | GUI_App.hpp FileType | 16 | 7 | 0 | 5 | 3 | 1 | 47% |
 | Preferences (`pref`) | Preferences.cpp | 75 | 6 | 4 | 38 | 3 | 24 | 16% |
@@ -69,59 +69,54 @@ Status: ✅ done · 🟡 partial · ❌ missing · ⏸️ deferred · ➖ na. Pa
 22. ❌ **Object labels in the 3D view** · Plate / 3D editor · UI
 23. ❌ **Overhang highlighting** · Plate / 3D editor · UI
 24. 🟡 **Hardware-keyboard shortcuts: 3D editor** · Plate / 3D editor · UI — undo / redo (⌘Z, ⇧⌘Z) and copy / paste (⌘C, ⌘V) so far
-25. ❌ **Color picker for color options** · Prepare / presets / settings · UI
-26. ❌ **Option dependency enable/disable and sanity prompts** · Prepare / presets / settings · Client-reimpl
-27. ❌ **Compare presets** · Prepare / presets / settings · UI
-28. 🟡 **Settings search** · Prepare / presets / settings · UI — per-screen search only; desktop searches every tab
-29. 🟡 **Unsaved-changes prompt on preset switch** · Prepare / presets / settings · Bridge + UI — discard / keep editing only: no transfer of changes onto the new preset
-30. ❌ **Import / export configs and preset bundles** · Prepare / presets / settings · Bridge + UI
-31. ❌ **Create printer / filament preset wizards** · Prepare / presets / settings · Bridge + UI
-32. ❌ **Bed shape, custom bed texture / model** · Prepare / presets / settings · UI
-33. 🟡 **Nozzle diameter selector** · Prepare / presets / settings · UI — nozzle variants are separate printer presets; no nozzle combo
-34. ❌ **Filament ramming parameters editor** · Prepare / presets / settings · UI
-35. ❌ **Filament grouping (multi-nozzle printers)** · Prepare / presets / settings · Bridge + UI
-36. 🟡 **Custom G-code editor with placeholder browser** · Prepare / presets / settings · UI — multiline editor without the placeholder browser
-37. ❌ **Auto slice after changes** · Prepare / presets / settings · UI
-38. ❌ **OrcaCloud preset sync** · Prepare / presets / settings · Client-reimpl
-39. ❌ **Online system-profile updates** · Prepare / presets / settings · Bridge + UI
-40. ❌ **Export objects as STL** · Files / projects / app integration · Bridge + UI
-41. ❌ **New project** · Files / projects / app integration · UI
-42. ❌ **Export sliced 3MF (.gcode.3mf)** · Files / projects / app integration · Bridge + UI
-43. ❌ **Export generic 3MF** · Files / projects / app integration · Bridge + UI
-44. ❌ **Import zip archive** · Files / projects / app integration · UI
-45. ❌ **Recent projects / files** · Files / projects / app integration · UI
-46. 🟡 **Project auto-backup / crash restore** · Files / projects / app integration · Bridge + UI — background 3MF autosave + one-shot launch restore (thumbnail-less, Application Support); no crash-mid-work restore interval
-47. ❌ **Model download links (Printables / MakerWorld / Thingiverse) and downloads folder** · Files / projects / app integration · UI
-48. ❌ **Per-layer filament (color) change + ColorPrint scheme** · Preview / G-code · Bridge + UI — Model::custom_gcode_per_print_z / CustomGCode.cpp are compiled
-49. ❌ **Pause / custom G-code / template at layer** · Preview / G-code · Bridge + UI
-50. ❌ **One-layer mode** · Preview / G-code · UI
-51. ❌ **Wipe and tool-change markers** · Preview / G-code · UI
-52. ❌ **Object shells and center of gravity** · Preview / G-code · UI
-53. ❌ **Actual volumetric flow scheme** · Preview / G-code · Bridge + UI
-54. ❌ **Summary view** · Preview / G-code · UI
-55. ❌ **G-code line window** · Preview / G-code · Bridge + UI
-56. ❌ **Export toolpaths as OBJ** · Preview / G-code · Client-reimpl
-57. ❌ **Hardware-keyboard shortcuts: preview sliders** · Preview / G-code · UI
-58. ❌ **Duet host** · Device / printing · Client-reimpl
-59. ❌ **Repetier host** · Device / printing · Client-reimpl
-60. ❌ **AstroBox host** · Device / printing · Client-reimpl
-61. ❌ **MKS host** · Device / printing · Client-reimpl
-62. ❌ **ESP3D host** · Device / printing · Client-reimpl
-63. ❌ **Creality Print host + LAN discovery** · Device / printing · Client-reimpl
-64. ❌ **Obico host** · Device / printing · Client-reimpl
-65. ❌ **Flashforge host** · Device / printing · Client-reimpl
-66. ❌ **Upload queue** · Device / printing · UI
-67. ❌ **Printer discovery (Bonjour)** · Device / printing · UI
-68. ❌ **SimplyPrint host (cloud auth)** · Device / printing · Client-reimpl
-69. ❌ **ElegooLink host** · Device / printing · Client-reimpl
-70. ❌ **3DPrinterOS host** · Device / printing · Client-reimpl
-71. ❌ **Preferences screen** · App / preferences / help · UI
-72. ❌ **Hardware-keyboard shortcuts: global** · App / preferences / help · UI
-73. 🟡 **Light / dark appearance** · App / preferences / help · UI — dark only
-74. ❌ **Localization** · App / preferences / help · UI — iOS picks the language per app in Settings; OrcaPad strings are English only
-75. ❌ **Viewer quality options (MSAA, FXAA, shadows, SSAO, smooth normals, FPS)** · App / preferences / help · UI
-76. ❌ **Tip of the day** · App / preferences / help · UI
-77. 🟡 **PrusaLink / Prusa Connect hosts** · Device / printing · Client-reimpl — PrusaLink upload + select-and-print done (HTTP digest, user maker, per-upload session); Prusa Connect (cloud) not implemented
+25. ❌ **Option dependency enable/disable and sanity prompts** · Prepare / presets / settings · Client-reimpl
+26. ❌ **Compare presets** · Prepare / presets / settings · UI
+27. 🟡 **Settings search** · Prepare / presets / settings · UI — per-screen search only; desktop searches every tab
+28. 🟡 **Unsaved-changes prompt on preset switch** · Prepare / presets / settings · Bridge + UI — discard / keep editing only: no transfer of changes onto the new preset
+29. ❌ **Import / export configs and preset bundles** · Prepare / presets / settings · Bridge + UI
+30. ❌ **Create printer / filament preset wizards** · Prepare / presets / settings · Bridge + UI
+31. ❌ **Bed shape, custom bed texture / model** · Prepare / presets / settings · UI
+32. 🟡 **Nozzle diameter selector** · Prepare / presets / settings · UI — nozzle variants are separate printer presets; no nozzle combo
+33. ❌ **Filament ramming parameters editor** · Prepare / presets / settings · UI
+34. ❌ **Filament grouping (multi-nozzle printers)** · Prepare / presets / settings · Bridge + UI
+35. 🟡 **Custom G-code editor with placeholder browser** · Prepare / presets / settings · UI — multiline editor without the placeholder browser
+36. ❌ **Auto slice after changes** · Prepare / presets / settings · UI
+37. ❌ **OrcaCloud preset sync** · Prepare / presets / settings · Client-reimpl
+38. ❌ **Online system-profile updates** · Prepare / presets / settings · Bridge + UI
+39. ❌ **Export objects as STL** · Files / projects / app integration · Bridge + UI
+40. ❌ **Export sliced 3MF (.gcode.3mf)** · Files / projects / app integration · Bridge + UI
+41. ❌ **Export generic 3MF** · Files / projects / app integration · Bridge + UI
+42. ❌ **Import zip archive** · Files / projects / app integration · UI
+43. ❌ **Recent projects / files** · Files / projects / app integration · UI
+44. 🟡 **Project auto-backup / crash restore** · Files / projects / app integration · Bridge + UI — background 3MF autosave + one-shot launch restore (thumbnail-less, Application Support); no crash-mid-work restore interval
+45. ❌ **Model download links (Printables / MakerWorld / Thingiverse) and downloads folder** · Files / projects / app integration · UI
+46. ❌ **Per-layer filament (color) change + ColorPrint scheme** · Preview / G-code · Bridge + UI — Model::custom_gcode_per_print_z / CustomGCode.cpp are compiled
+47. ❌ **Pause / custom G-code / template at layer** · Preview / G-code · Bridge + UI
+48. ❌ **Object shells and center of gravity** · Preview / G-code · UI
+49. ❌ **Summary view** · Preview / G-code · UI
+50. ❌ **G-code line window** · Preview / G-code · Bridge + UI
+51. ❌ **Export toolpaths as OBJ** · Preview / G-code · Client-reimpl
+52. ❌ **Hardware-keyboard shortcuts: preview sliders** · Preview / G-code · UI
+53. ❌ **Duet host** · Device / printing · Client-reimpl
+54. ❌ **Repetier host** · Device / printing · Client-reimpl
+55. ❌ **AstroBox host** · Device / printing · Client-reimpl
+56. ❌ **MKS host** · Device / printing · Client-reimpl
+57. ❌ **ESP3D host** · Device / printing · Client-reimpl
+58. ❌ **Creality Print host + LAN discovery** · Device / printing · Client-reimpl
+59. ❌ **Obico host** · Device / printing · Client-reimpl
+60. ❌ **Flashforge host** · Device / printing · Client-reimpl
+61. ❌ **Upload queue** · Device / printing · UI
+62. ❌ **Printer discovery (Bonjour)** · Device / printing · UI
+63. ❌ **SimplyPrint host (cloud auth)** · Device / printing · Client-reimpl
+64. ❌ **ElegooLink host** · Device / printing · Client-reimpl
+65. ❌ **3DPrinterOS host** · Device / printing · Client-reimpl
+66. ❌ **Preferences screen** · App / preferences / help · UI
+67. ❌ **Hardware-keyboard shortcuts: global** · App / preferences / help · UI
+68. 🟡 **Light / dark appearance** · App / preferences / help · UI — dark only
+69. ❌ **Localization** · App / preferences / help · UI — iOS picks the language per app in Settings; OrcaPad strings are English only
+70. ❌ **Viewer quality options (MSAA, FXAA, shadows, SSAO, smooth normals, FPS)** · App / preferences / help · UI
+71. ❌ **Tip of the day** · App / preferences / help · UI
+72. 🟡 **PrusaLink / Prusa Connect hosts** · Device / printing · Client-reimpl — PrusaLink upload + select-and-print done (HTTP digest, user maker, per-upload session); Prusa Connect (cloud) not implemented
 
 **Deferred:** STEP / SVG / Draco import (deferred by user 2026-10-07: STEP/SVG need OpenCASCADE, DRC needs draco in the closure); Mesh boolean (deferred by user 2026-10-07 (CGAL PMP / mcut closure)); Fix model (mesh repair) (uses the CGAL repair closure deferred with mesh boolean (user, 2026-10-07)); Support painting (AGENTS.md: painting tools wait until the core loop ships (TriangleSelector.cpp is compiled)); Seam painting (AGENTS.md: painting tools wait until the core loop ships); Fuzzy-skin painting (AGENTS.md: painting tools wait until the core loop ships); Multi-material (color) painting (AGENTS.md: MMU segmentation waits until the core loop ships); Calibration menu (temperature, flow, PA, retraction, max flow, VFA, cornering, input shaping) (deferred by user 2026-10-07: calibration models are .drc, so draco must enter the closure first); Export objects as Draco (deferred by user 2026-10-07 (draco))
 
@@ -198,6 +193,7 @@ Status: ✅ done · 🟡 partial · ❌ missing · ⏸️ deferred · ➖ na. Pa
 
 | Feature | Status | Desktop | OrcaPad evidence | Notes |
 |---|---|---|---|---|
+| Color picker for color options | ✅ | `src/slic3r/GUI/Field.hpp` | `client:isColour`, `client:ColorPicker` | Colour-valued options (engine *_colour / *_color keys, #rrggbb serialization) get a swatch ColorPicker beside the raw field (vectors stay raw text; the filament bar edits per-slot colours directly) |
 | Flushing volumes | ✅ | **dialog**: WipingDialog; **pref**: Auto flush after changing... | `client:struct FlushingVolumesSheet` | Desktop WipingDialog parity on the machine preset: the N x N purge matrix with slot-color headers + flush multiplier (FlushingVolumesSheet from the filament bar); writes flush_volumes_matrix/flush_multiplier through the preset value contract; config finalization guarantees a valid matrix at slice time |
 | Per-extruder vector values | ✅ | `src/slic3r/GUI/Tab.cpp` | `client:struct PerElementVectorEditor`, `client:case perElement` | Multi-element numeric vectors render one slot-numbered field per element (desktop per-extruder columns) recombining the CSV serialization; one-element vectors stay scalar editors; string vectors keep the raw text field |
 | Physical printers (host, URL, API key; engine-stored) | ✅ | **dialog**: PhysicalPrinterDialog | `abi:orca_physical_printer_upsert`, `abi:orca_physical_printer_list`, `client:PhysicalPrinterEditor` | — |
@@ -214,7 +210,6 @@ Status: ✅ done · 🟡 partial · ❌ missing · ⏸️ deferred · ➖ na. Pa
 | Unsaved-changes prompt on preset switch | 🟡 | **dialog**: UnsavedChangesDialog | `client:confirmationDialog` | Gap: discard / keep editing only: no transfer of changes onto the new preset · Work: Bridge + UI |
 | Auto slice after changes | ❌ | **pref**: Auto slice after changes | — | Work: UI |
 | Bed shape, custom bed texture / model | ❌ | **dialog**: BedShapeDialog; **format**: FT_TEX | — | Work: UI |
-| Color picker for color options | ❌ | `src/slic3r/GUI/Field.hpp` | — | Work: UI |
 | Compare presets | ❌ | **dialog**: DiffPresetDialog, FullCompareDialog | — | Work: UI |
 | Create printer / filament preset wizards | ❌ | **dialog**: CreateFilamentPresetDialog, CreatePrinterPresetDialog, CreatePresetForPrinterDialog, CreatePresetSuccessfulDialog, EditFilamentPresetDialog | — | Work: Bridge + UI |
 | Filament grouping (multi-nozzle printers) | ❌ | **plate**: Filament grouping; **dialog**: FilamentMapDialog | — | Work: Bridge + UI |
@@ -228,23 +223,23 @@ Status: ✅ done · 🟡 partial · ❌ missing · ⏸️ deferred · ➖ na. Pa
 
 | Feature | Status | Desktop | OrcaPad evidence | Notes |
 |---|---|---|---|---|
+| Actual volumetric flow scheme | ✅ | **view**: ActualVolumetricFlowRate | `client:actualVolumetricRate`, `client:actualVolumetricRange` | Actual-flow color scheme (actual_feedrate x mm3_per_mm, engine GCodeProcessor values, ABI v14 segments) with gradient legend |
 | Color schemes (feature, speed, height, width, flow, fan, temperature, layer time, PA, accel, jerk, tool) | ✅ | **view**: FeatureType, Speed, ActualSpeed, Height, Width, VolumetricFlowRate, LayerTimeLinear, LayerTimeLogarithmic +6 | `client:enum ToolpathColorMode`, `abi:orca_gcode_toolpath` | — |
 | Jump to layer | ✅ | **slider**: Jump to Layer | `client:func jumpToLayer\(` | — |
 | Layer range slider + move scrubber | ✅ | `src/slic3r/GUI/IMSlider.hpp` | `client:struct LayerRangeSlider` | — |
 | Legend: feature toggles, time share, filament/cost totals, normal + stealth time | ✅ | `src/slic3r/GUI/GCodeViewer.cpp` | `client:private var legend`, `client:estimatedStealthSeconds`, `client:costPerKG` | — |
+| One-layer mode | ✅ | `src/slic3r/GUI/IMSlider.cpp` | `client:oneLayerMode` | One-layer toggle in the preview pill: the layer range collapses onto the top handle (the slider then walks single layers) |
 | Open external G-code (viewer mode) | ✅ | **format**: FT_GCODE | `abi:orca_gcode_load`, `client:fileImporter` | — |
 | Seams, retractions, unretractions | ✅ | **option**: Seams, Retractions, Unretractions | `client:var showSeams`, `client:var showRetractions` | — |
 | Travel moves | ✅ | **option**: Travels | `client:var showTravel` | — |
-| Actual volumetric flow scheme | ❌ | **view**: ActualVolumetricFlowRate | — | Work: Bridge + UI |
+| Wipe and tool-change markers | ✅ | **option**: Wipes, ToolChanges | `client:showWipes`, `client:showToolChanges` | Wipe moves render as short lines under their own toggle; tool-change points are cross markers (ABI v14 marker segments) |
 | Export toolpaths as OBJ | ❌ | **menu**: Export toolpaths as OBJ | — | Work: Client-reimpl |
 | G-code line window | ❌ | **menu**: Show G-code Window | — | Work: Bridge + UI |
 | Hardware-keyboard shortcuts: preview sliders | ❌ | **kb**: Vertical slider - Move active thumb Up, Vertical slider - Move active thumb Down, Horizontal slider - Move active thumb Left, Horizontal slider - Move active thumb Right, Horizontal slider - Move to start position, Horizontal slider - Move to last position, Move slider 5x faster, On/Off one layer mode of the vertical slider +1 | — | Work: UI |
 | Object shells and center of gravity | ❌ | `src/slic3r/GUI/GCodeViewer.hpp` | — | Work: UI |
-| One-layer mode | ❌ | `src/slic3r/GUI/IMSlider.cpp` | — | Work: UI |
 | Pause / custom G-code / template at layer | ❌ | **slider**: Add Pause, Delete Pause, Add Custom G-code, Edit Custom G-code, Delete Custom G-code, Add Custom Template, Delete Custom Template; **option**: PausePrints +1 | — | Work: Bridge + UI |
 | Per-layer filament (color) change + ColorPrint scheme | ❌ | **view**: ColorPrint; **slider**: Change Filament, Filament, Delete Filament Change; **option**: ColorChanges | — | Work: Bridge + UI · Model::custom_gcode_per_print_z / CustomGCode.cpp are compiled |
 | Summary view | ❌ | **view**: Summary | — | Work: UI |
-| Wipe and tool-change markers | ❌ | **option**: Wipes, ToolChanges | — | Work: UI |
 
 ## Device / printing
 
@@ -276,6 +271,7 @@ Status: ✅ done · 🟡 partial · ❌ missing · ⏸️ deferred · ➖ na. Pa
 |---|---|---|---|---|
 | 3MF project open / save (presets, plate type, thumbnail) | ✅ | **menu**: Open Project, Save Project as, Save Project; **format**: FT_PROJECT; **dialog**: Newer3mfVersionDialog | `abi:orca_project_open`, `abi:orca_project_save`, `client:func saveProject\(` | multi-plate projects round-trip (ABI v27): plate names, locks and membership persist; per-plate print settings remain single-plate (plate.plate-settings) |
 | Export / share G-code | ✅ | **menu**: Export, Export G-code | `client:ShareLink` | — |
+| New project | ✅ | **menu**: New Project | `client:func newProject\(` | File menu New project: confirmed destructive action replaces the document session (fresh EnginePlater, plates at the current machine's bed); preset selections persist like desktop |
 | Open-in from Files / Mail (document types) | ✅ | **pref**: Associate 3MF files to OrcaSlicer, Associate STL files to OrcaSlicer, Associate STEP files to OrcaSlicer, Associate DRC files to OrcaSlicer | `plist:CFBundleDocumentTypes`, `plist:UTImportedTypeDeclarations`, `client:onOpenURL`, `client:func handleOpenURL` | document types for STL/OBJ/AMF/3MF; models import onto the current plate, 3MF opens as a project (replace confirmation); STEP/DRC remain deferred with the CAD closure |
 | Project auto-backup / crash restore | 🟡 | **pref**: Auto backup | `client:func autosaveSession\(`, `client:func saveAutosave\(`, `client:func restoreAutosaveIfNeeded\(` | Gap: background 3MF autosave + one-shot launch restore (thumbnail-less, Application Support); no crash-mid-work restore interval · Work: Bridge + UI |
 | Export generic 3MF | ❌ | **menu**: Export Generic 3MF | — | Work: Bridge + UI |
@@ -283,7 +279,6 @@ Status: ✅ done · 🟡 partial · ❌ missing · ⏸️ deferred · ➖ na. Pa
 | Export sliced 3MF (.gcode.3mf) | ❌ | **menu**: Export plate sliced file, Export all plate sliced file; **format**: FT_GCODE_3MF | — | Work: Bridge + UI |
 | Import zip archive | ❌ | **menu**: Import Zip Archive; **format**: FT_ZIP; **dialog**: FileArchiveDialog | — | Work: UI |
 | Model download links (Printables / MakerWorld / Thingiverse) and downloads folder | ❌ | **pref**: {link_association:prusaslicer}, {link_association:bambustudio}, {link_association:cura}, Downloads folder; **dialog**: DownloadDialog, DownloadProgressDialog | — | Work: UI |
-| New project | ❌ | **menu**: New Project | — | Work: UI |
 | Recent projects / files | ❌ | **menu**: Recent files; **pref**: Maximum recent files, Add STL/STEP files to recent files list | — | Work: UI |
 | Export objects as Draco | ⏸️ | **menu**: Export all objects as one DRC, Export all objects as DRCs; **context**: Export as one DRC, Export as DRCs; **pref**: Quality level for Draco export | — | Work: Closure · deferred by user 2026-10-07 (draco) |
 
@@ -376,7 +371,7 @@ Status: ✅ done · 🟡 partial · ❌ missing · ⏸️ deferred · ➖ na. Pa
 | `menu:Keyboard Shortcuts` | src/slic3r/GUI/MainFrame.cpp:2563 | app.keyboard | ❌ |
 | `menu:Left` | src/slic3r/GUI/MainFrame.cpp:2665 | plate.camera-views | ✅ |
 | `menu:Max flowrate` | src/slic3r/GUI/MainFrame.cpp:3337 | device.calibration | ⏸️ |
-| `menu:New Project` | src/slic3r/GUI/MainFrame.cpp:2687 | files.new-project | ❌ |
+| `menu:New Project` | src/slic3r/GUI/MainFrame.cpp:2687 | files.new-project | ✅ |
 | `menu:New Window` | src/slic3r/GUI/MainFrame.cpp:225 | app.desktop-window | ➖ |
 | `menu:Open Network Test` | src/slic3r/GUI/MainFrame.cpp:2580 | app.network-test | ➖ |
 | `menu:Open Project` | src/slic3r/GUI/MainFrame.cpp:2693 | files.project | ✅ |
@@ -598,7 +593,7 @@ Status: ✅ done · 🟡 partial · ❌ missing · ⏸️ deferred · ➖ na. Pa
 | `plate:Unlock current plate` | src/slic3r/GUI/PartPlate.cpp:1151 | plate.multi-plate | ✅ |
 | `view:Acceleration` | src/libvgcode/include/Types.hpp:98 | preview.schemes | ✅ |
 | `view:ActualSpeed` | src/libvgcode/include/Types.hpp:86 | preview.schemes | ✅ |
-| `view:ActualVolumetricFlowRate` | src/libvgcode/include/Types.hpp:90 | preview.actual-flow | ❌ |
+| `view:ActualVolumetricFlowRate` | src/libvgcode/include/Types.hpp:90 | preview.actual-flow | ✅ |
 | `view:ColorPrint` | src/libvgcode/include/Types.hpp:84 | preview.color-print | ❌ |
 | `view:FanSpeed` | src/libvgcode/include/Types.hpp:93 | preview.schemes | ✅ |
 | `view:FeatureType` | src/libvgcode/include/Types.hpp:83 | preview.schemes | ✅ |
@@ -618,10 +613,10 @@ Status: ✅ done · 🟡 partial · ❌ missing · ⏸️ deferred · ➖ na. Pa
 | `option:PausePrints` | src/libvgcode/include/Types.hpp:175 | preview.pause-custom-gcode | ❌ |
 | `option:Retractions` | src/libvgcode/include/Types.hpp:170 | preview.markers | ✅ |
 | `option:Seams` | src/libvgcode/include/Types.hpp:172 | preview.markers | ✅ |
-| `option:ToolChanges` | src/libvgcode/include/Types.hpp:173 | preview.wipes-toolchanges | ❌ |
+| `option:ToolChanges` | src/libvgcode/include/Types.hpp:173 | preview.wipes-toolchanges | ✅ |
 | `option:Travels` | src/libvgcode/include/Types.hpp:168 | preview.travel | ✅ |
 | `option:Unretractions` | src/libvgcode/include/Types.hpp:171 | preview.markers | ✅ |
-| `option:Wipes` | src/libvgcode/include/Types.hpp:169 | preview.wipes-toolchanges | ❌ |
+| `option:Wipes` | src/libvgcode/include/Types.hpp:169 | preview.wipes-toolchanges | ✅ |
 | `host:ht3DPrinterOS` | src/libslic3r/PrintConfig.hpp:80 | device.host-3dprinteros | ❌ |
 | `host:htAstroBox` | src/libslic3r/PrintConfig.hpp:80 | device.host-astrobox | ❌ |
 | `host:htCrealityPrint` | src/libslic3r/PrintConfig.hpp:80 | device.host-crealityprint | ❌ |

@@ -72,7 +72,8 @@ struct SettingsPageModel: Identifiable, Sendable {
                 enumValues: option.enumValues ?? [],
                 enumLabels: option.enumLabels ?? [],
                 value: value,
-                isModified: modified.contains(key)
+                isModified: modified.contains(key),
+                isColour: key.hasSuffix("_colour") || key.hasSuffix("_color")
             )
         }
 

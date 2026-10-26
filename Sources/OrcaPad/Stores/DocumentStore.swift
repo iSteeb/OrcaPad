@@ -242,6 +242,40 @@ final class DocumentStore {
         )
     }
 
+    /// Desktop "New project": a fresh document session (plates at the
+    /// current machine's bed, empty history). The preset selection is kept —
+    /// desktop does not reset profiles on New.
+    func newProject(bed: PrintVolume?) async {
+        guard !isBusy else {
+            status.report(.document, "new project blocked: document is busy")
+            return
+        }
+        isMutating = true
+        let result = await BackgroundWork.run(operation: "new project") {
+            let plater = try EnginePlater()
+            if let bed {
+                _ = try plater.setBed(
+                    originX: bed.minX, originY: bed.minY,
+                    width: bed.width, depth: bed.depth, height: 1000.0
+                )
+            }
+            return (plater, try plater.snapshot())
+        }
+        isMutating = false
+        switch result {
+        case .success(let fresh):
+            plater = fresh.0
+            selection = nil
+            multiSelection = []
+            clearFlattenPlanes()
+            install(fresh.1)
+            frameRequest += 1
+            status.report(.document, "new project")
+        case .failure(let failure):
+            status.report(.document, failure: failure)
+        }
+    }
+
     // MARK: History / object list (desktop Edit menu, object list)
 
     func undo() async {

@@ -11,6 +11,8 @@ import simd
 /// gradient for scalar color modes.
 enum ToolpathPalette {
     static let travel = SIMD4<Float>(0.40, 0.44, 0.52, 1)
+    /// Wipe moves: faintly warmer than travel so both stay secondary.
+    static let wipe = SIMD4<Float>(0.50, 0.46, 0.34, 1)
 
     static func color(role: UInt8) -> SIMD4<Float> {
         switch role {
@@ -62,6 +64,10 @@ struct ToolpathBuildKey: Equatable {
     let showTravel: Bool
     let showSeams: Bool
     let showRetractions: Bool
+    /// Desktop visibility options: wipe moves (lines) and tool-change
+    /// markers (points).
+    let showWipes: Bool
+    let showToolChanges: Bool
     let bed: EngineBed
 }
 
@@ -230,6 +236,7 @@ final class ToolpathRenderer: NSObject, MTKViewDelegate {
                 switch segment.moveType {
                 case .seam: visible = key.showSeams
                 case .retract, .unretract: visible = key.showRetractions
+                case .toolChange: visible = key.showToolChanges
                 default: visible = false
                 }
                 if visible {
@@ -245,6 +252,14 @@ final class ToolpathRenderer: NSObject, MTKViewDelegate {
                         VertexPC(position: p + SIMD3(0, s, 0), color: color),
                     ])
                     markers += 1
+                }
+            } else if segment.moveType == .wipe {
+                // Desktop "Wipe" visibility option: wipe moves are short
+                // LINE segments (not markers) with their own toggle.
+                if key.showWipes {
+                    travelVertices.append(VertexPC(position: viewer(segment.start), color: ToolpathPalette.wipe))
+                    travelVertices.append(VertexPC(position: viewer(segment.end), color: ToolpathPalette.wipe))
+                    travelled += 1
                 }
             } else if key.showTravel {
                 travelVertices.append(VertexPC(position: viewer(segment.start), color: ToolpathPalette.travel))
@@ -280,6 +295,7 @@ final class ToolpathRenderer: NSObject, MTKViewDelegate {
         case .seam: return SIMD4(1.0, 0.55, 0.0, 1)
         case .retract: return SIMD4(0.95, 0.25, 0.25, 1)
         case .unretract: return SIMD4(0.3, 0.85, 0.3, 1)
+        case .toolChange: return SIMD4(0.65, 0.45, 1.0, 1)
         default: return SIMD4(0.4, 0.6, 1.0, 1)
         }
     }
@@ -307,6 +323,7 @@ final class ToolpathRenderer: NSObject, MTKViewDelegate {
         case .fanSpeed: return ToolpathPalette.gradient(normalized(segment.fanSpeed, store.fanRange))
         case .temperature: return ToolpathPalette.gradient(normalized(segment.temperature, store.temperatureRange))
         case .volumetricRate: return ToolpathPalette.gradient(normalized(segment.volumetricRate, store.volumetricRange))
+        case .actualVolumetricRate: return ToolpathPalette.gradient(normalized(segment.actualVolumetricRate, store.actualVolumetricRange))
         case .actualSpeed: return ToolpathPalette.gradient(normalized(segment.actualFeedrate, store.actualSpeedRange))
         case .layerTime: return ToolpathPalette.gradient(normalized(segment.layerDuration, store.layerTimeRange))
         case .layerTimeLog: return ToolpathPalette.gradient(normalizedLog(segment.layerDuration, store.layerTimeRange))

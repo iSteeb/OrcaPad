@@ -15,6 +15,7 @@ enum ToolpathColorMode: String, CaseIterable, Identifiable, Sendable {
     case fanSpeed = "Fan Speed"
     case temperature = "Temperature"
     case volumetricRate = "Flow"
+    case actualVolumetricRate = "Actual Flow"
     case actualSpeed = "Actual Speed"
     case layerTime = "Layer Time"
     case layerTimeLog = "Layer Time (log)"
@@ -33,6 +34,7 @@ enum ToolpathColorMode: String, CaseIterable, Identifiable, Sendable {
         case .fanSpeed: return "%"
         case .temperature: return "°C"
         case .volumetricRate: return "mm³/s"
+        case .actualVolumetricRate: return "mm³/s"
         case .layerTime, .layerTimeLog, .pressureAdvance: return "s"
         case .acceleration: return "mm/s²"
         case .jerk: return "mm/s"
@@ -109,6 +111,7 @@ final class GcodePreviewStore {
     private(set) var fanRange: ClosedRange<Float> = 0...1
     private(set) var temperatureRange: ClosedRange<Float> = 0...1
     private(set) var volumetricRange: ClosedRange<Float> = 0...1
+    private(set) var actualVolumetricRange: ClosedRange<Float> = 0...1
     private(set) var actualSpeedRange: ClosedRange<Float> = 0...1
     private(set) var layerTimeRange: ClosedRange<Float> = 0...1
     private(set) var pressureAdvanceRange: ClosedRange<Float> = 0...1
@@ -129,6 +132,16 @@ final class GcodePreviewStore {
     /// (point moves exported by ABI v14).
     var showSeams = true
     var showRetractions = false
+    /// Desktop visibility options: wipe moves and tool-change markers.
+    var showWipes = false
+    var showToolChanges = true
+    /// Desktop "One layer mode": the layer range collapses onto the top
+    /// handle (the slider then walks single layers).
+    var oneLayerMode = false {
+        didSet {
+            if oneLayerMode { setLayerRange(lower: upperLayer, upper: upperLayer) }
+        }
+    }
 
     var estimatedStealthSeconds: Float { toolpath?.estimatedStealthSeconds ?? 0 }
     var extruderStats: [ExtruderStats] { toolpath?.extruders ?? [] }
@@ -224,6 +237,7 @@ final class GcodePreviewStore {
         var height = (Float.infinity, -Float.infinity)
         var width = (Float.infinity, -Float.infinity)
         var volumetric = (Float.infinity, -Float.infinity)
+        var actualVolumetric = (Float.infinity, -Float.infinity)
         var actualSpeed = (Float.infinity, -Float.infinity)
         var layerTime = (Float.infinity, -Float.infinity)
         var pressureAdvance = (Float.infinity, -Float.infinity)
@@ -242,6 +256,7 @@ final class GcodePreviewStore {
             height = (min(height.0, segment.height), max(height.1, segment.height))
             width = (min(width.0, segment.width), max(width.1, segment.width))
             volumetric = (min(volumetric.0, segment.volumetricRate), max(volumetric.1, segment.volumetricRate))
+            actualVolumetric = (min(actualVolumetric.0, segment.actualVolumetricRate), max(actualVolumetric.1, segment.actualVolumetricRate))
             actualSpeed = (min(actualSpeed.0, segment.actualFeedrate), max(actualSpeed.1, segment.actualFeedrate))
             layerTime = (min(layerTime.0, segment.layerDuration), max(layerTime.1, segment.layerDuration))
             pressureAdvance = (min(pressureAdvance.0, segment.pressureAdvance), max(pressureAdvance.1, segment.pressureAdvance))
@@ -266,6 +281,7 @@ final class GcodePreviewStore {
         fanRange = range(fan)
         temperatureRange = range(temperature)
         volumetricRange = range(volumetric)
+        actualVolumetricRange = range(actualVolumetric)
         actualSpeedRange = range(actualSpeed)
         layerTimeRange = range(layerTime)
         pressureAdvanceRange = range(pressureAdvance)
@@ -283,7 +299,8 @@ final class GcodePreviewStore {
     func setLayerRange(lower: Int, upper: Int) {
         let last = max(layerCount - 1, 0)
         let clampedUpper = min(max(upper, 0), last)
-        let clampedLower = min(max(lower, 0), clampedUpper)
+        var clampedLower = min(max(lower, 0), clampedUpper)
+        if oneLayerMode { clampedLower = clampedUpper }
         let upperChanged = clampedUpper != upperLayer
         lowerLayer = clampedLower
         upperLayer = clampedUpper

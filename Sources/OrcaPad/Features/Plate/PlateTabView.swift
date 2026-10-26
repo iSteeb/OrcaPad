@@ -31,6 +31,7 @@ struct PlateTabView: View {
     @State private var renameText = ""
     @State private var deleteAllConfirmation = false
     @State private var aboutPresented = false
+    @State private var newProjectConfirmation = false
     @State private var parameterTablePresented = false
     @State private var plateRenameTarget: PlateID?
     @State private var plateRenameText = ""
@@ -264,6 +265,19 @@ struct PlateTabView: View {
         } message: {
             Text("Saved as a 3MF project in Files ▸ OrcaPad ▸ Projects (opens in OrcaSlicer and Bambu Studio).")
         }
+        .confirmationDialog(
+            "Start a new project?",
+            isPresented: $newProjectConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("New project", role: .destructive) {
+                Task {
+                    await document.newProject(bed: environment.presets.printVolume)
+                }
+            }
+        } message: {
+            Text("The plate is cleared and the undo history is discarded. Printer, filament and process selections stay.")
+        }
     }
 
     private enum ImportMode: Equatable {
@@ -402,6 +416,11 @@ struct PlateTabView: View {
                         }
                     } label: {
                         Label("Add shape", systemImage: "cube")
+                    }
+                    Button {
+                        newProjectConfirmation = true
+                    } label: {
+                        Label("New project…", systemImage: "plus")
                     }
                     Button {
                         importMode = .project

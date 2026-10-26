@@ -284,6 +284,26 @@ struct SettingsEditorRowView: View {
     @State private var editingMultiline = false
     @State private var multilineDraft = ""
 
+    /// The row's value as a single swatch colour when it IS one (plain or
+    /// engine-quoted `#rrggbb`); nil keeps the raw text editor only.
+    private var colourValue: Color? {
+        var token = row.value.trimmingCharacters(in: .whitespaces)
+        if token.hasPrefix("\"") && token.hasSuffix("\"") && token.count >= 2 {
+            token = String(token.dropFirst().dropLast())
+        }
+        return Color(hex: token)
+    }
+
+    /// #rrggbb from a Color (uppercase, engine serialization).
+    private static func hexString(_ colour: Color) -> String {
+        var red: CGFloat = 0, green: CGFloat = 0, blue: CGFloat = 0, alpha: CGFloat = 0
+        UIColor(colour).getRed(&red, green: &green, blue: &blue, alpha: &alpha)
+        func part(_ value: CGFloat) -> String {
+            String(format: "%02X", min(max(Int((value * 255).rounded()), 0), 255))
+        }
+        return "#" + part(red) + part(green) + part(blue)
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
@@ -383,18 +403,31 @@ struct SettingsEditorRowView: View {
             }
             .buttonStyle(.bordered)
         case .numeric, .text:
-            TextField("value", text: $draft)
-                .onSubmit(submit)
-                .font(.callout.monospaced())
-                .multilineTextAlignment(.trailing)
-                .frame(maxWidth: row.editorKind == .numeric ? 110 : 220)
-                .keyboardType(row.editorKind == .numeric ? .numbersAndPunctuation : .default)
-                .autocorrectionDisabled()
-                .textInputAutocapitalization(.never)
-                .foregroundStyle(
-                    rejection != nil ? Color.red
-                        : (row.isModified ? Color.accentColor : Color.secondary)
-                )
+            HStack(spacing: 8) {
+                if row.isColour, let colour = colourValue {
+                    // Desktop colour options (filament_colour & co): a swatch
+                    // picker beside the raw field; vectors stay raw text.
+                    ColorPicker("", selection: Binding(
+                        get: { colour },
+                        set: { newColour in
+                            onCommit(Self.hexString(newColour))
+                        }
+                    ), supportsOpacity: false)
+                    .labelsHidden()
+                }
+                TextField("value", text: $draft)
+                    .onSubmit(submit)
+                    .font(.callout.monospaced())
+                    .multilineTextAlignment(.trailing)
+                    .frame(maxWidth: row.editorKind == .numeric ? 110 : 220)
+                    .keyboardType(row.editorKind == .numeric ? .numbersAndPunctuation : .default)
+                    .autocorrectionDisabled()
+                    .textInputAutocapitalization(.never)
+                    .foregroundStyle(
+                        rejection != nil ? Color.red
+                            : (row.isModified ? Color.accentColor : Color.secondary)
+                    )
+            }
         }
     }
 

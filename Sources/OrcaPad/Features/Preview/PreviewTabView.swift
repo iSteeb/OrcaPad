@@ -120,6 +120,8 @@ struct PreviewTabView: View {
                     showTravel: store.showTravel,
                     showSeams: store.showSeams,
                     showRetractions: store.showRetractions,
+                    showWipes: store.showWipes,
+                    showToolChanges: store.showToolChanges,
                     bed: bed
                 ),
                 drawRange: ToolpathDrawRange(
@@ -230,6 +232,15 @@ struct PreviewTabView: View {
                 }
                 barToggle("arrow.uturn.left.circle", "Retract", store.showRetractions) {
                     store.showRetractions.toggle()
+                }
+                barToggle("hand.draw", "Wipe", store.showWipes) {
+                    store.showWipes.toggle()
+                }
+                barToggle("wrench.and.screwdriver", "Tool", store.showToolChanges) {
+                    store.showToolChanges.toggle()
+                }
+                barToggle("1.circle", "1 layer", store.oneLayerMode) {
+                    store.oneLayerMode.toggle()
                 }
                 barToggle("list.bullet.rectangle", "Legend", showLegend) {
                     showLegend.toggle()
@@ -358,6 +369,8 @@ struct PreviewTabView: View {
                 gradientLegend(store.temperatureRange, unit: store.colorMode.unit, digits: 0)
             case .volumetricRate:
                 gradientLegend(store.volumetricRange, unit: store.colorMode.unit, digits: 1)
+            case .actualVolumetricRate:
+                gradientLegend(store.actualVolumetricRange, unit: store.colorMode.unit, digits: 1)
             case .actualSpeed:
                 gradientLegend(store.actualSpeedRange, unit: store.colorMode.unit, digits: 0)
             case .layerTime, .layerTimeLog:
@@ -510,6 +523,7 @@ private struct PreviewDock: View {
         case .fanSpeed: return "Fan"
         case .temperature: return "Temp"
         case .volumetricRate: return "Flow"
+        case .actualVolumetricRate: return "Act.Flow"
         case .actualSpeed: return "Actual"
         case .layerTime: return "Time"
         case .layerTimeLog: return "Log"

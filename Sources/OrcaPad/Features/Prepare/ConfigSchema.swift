@@ -157,6 +157,9 @@ struct SettingsEditorRow: Identifiable, Sendable {
     let enumLabels: [String]
     let value: String
     let isModified: Bool
+    /// Colour-valued options (desktop shows a swatch editor): keys the
+    /// engine names *_colour / *_color with #rrggbb serializations.
+    let isColour: Bool
 
     var id: String { key }
 
@@ -246,7 +249,8 @@ extension SettingsEditorRow {
             enumValues: schema.enumValues ?? [],
             enumLabels: schema.enumLabels ?? [],
             value: value,
-            isModified: isModified
+            isModified: isModified,
+            isColour: schema.key.hasSuffix("_colour") || schema.key.hasSuffix("_color")
         )
     }
 }
