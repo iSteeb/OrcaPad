@@ -543,9 +543,10 @@ evidence = ["abi:orca_plater_plate_add", "abi:orca_plater_plate_delete",
             "abi:orca_plater_plate_move_to_front", "abi:orca_plater_plate_duplicate",
             "abi:orca_plater_plate_select", "abi:orca_plater_set_bed",
             "client:struct PlateBar", 'client:func selectPlate\(',
-            "abi:orca_plater_slice_all_to_gcode", 'client:func runAll\(']
+            "abi:orca_plater_slice_all_to_gcode", 'client:func runAll\(',
+            'client:func moveObjectsToPlate\(', 'client:func loadPlateSections\(']
 work = "Bridge + UI"
-note = "ABI v27 plates + ABI v28 slice-all: Bridge-owned plate grid (desktop layout: ceil-sqrt columns, 1.2x stride, max 36), derived membership by position with locked-plate pins, arrange overflow fills new plates, 3MF roundtrip keeps names/locks/membership; per-plate slicing is plate-relative (desktop PartPlate::set_print parity: engine plate origin + index + name); orca_plater_slice_all_to_gcode slices every non-empty plate in order into one G-code with ; ORCA_PLATE begin/end markers, aggregated report + scaled progress; client Slice menu offers Slice All Plates when >1 plate; desktop's 'Select All Plates' selection command is covered by the existing canvas select-all"
+note = "ABI v27 plates + ABI v28 slice-all: Bridge-owned plate grid (desktop layout: ceil-sqrt columns, 1.2x stride, max 36), derived membership by position with locked-plate pins, arrange overflow fills new plates, 3MF roundtrip keeps names/locks/membership; per-plate slicing is plate-relative (desktop PartPlate::set_print parity: engine plate origin + index + name); orca_plater_slice_all_to_gcode slices every non-empty plate in order into one G-code with ; ORCA_PLATE begin/end markers, aggregated report + scaled progress (ABI v32: marker-safe names, output assembled in a temp + atomic rename so a failed run keeps the previous file); the preview splits the marker sections and offsets each back to its plate's world origin (Plates menu jumps the layer range onto one plate); desktop's 'Move to plate' context command and its plate menu parity; desktop's 'Select All Plates' selection command is covered by the existing canvas select-all"
 
 [[feature]]
 id = "plate.plate-settings"
@@ -624,10 +625,11 @@ priority = 46
 id = "plate.selected-outline"
 area = "plate"
 title = "Selected-object outline"
-status = "missing"
+status = "done"
 desktop = ["menu:Show Selected Outline (beta)"]
+evidence = ["client:outlinePipeline", "client:vertexOutline", "client:selection-outline"]
 work = "UI"
-priority = 47
+note = "Inverted-hull silhouette (desktop's selection halo): the selected mesh is re-drawn expanded along its normals with front faces culled before the opaque pass, so the shell survives depth testing only around the object's outline; width scales with object extent; mirrored instances flip the culled face set"
 
 [[feature]]
 id = "plate.keyboard"
@@ -972,10 +974,10 @@ priority = 201
 id = "preview.jump-to-layer"
 area = "preview"
 title = "Jump to layer"
-status = "missing"
+status = "done"
 desktop = ["slider:Jump to Layer"]
+evidence = ['client:func jumpToLayer\(']
 work = "UI"
-priority = 203
 
 [[feature]]
 id = "preview.one-layer"
@@ -1362,10 +1364,13 @@ priority = 156
 id = "files.backup"
 area = "files"
 title = "Project auto-backup / crash restore"
-status = "missing"
+status = "partial"
 desktop = ["pref:Auto backup"]
+evidence = ['client:func autosaveSession\(', 'client:func saveAutosave\(',
+            'client:func restoreAutosaveIfNeeded\(']
 work = "Bridge + UI"
 priority = 157
+gap = "background 3MF autosave + one-shot launch restore (thumbnail-less, Application Support); no crash-mid-work restore interval"
 
 [[feature]]
 id = "files.open-in"

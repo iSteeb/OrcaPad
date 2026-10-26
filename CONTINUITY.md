@@ -92,6 +92,33 @@
 
 ## PROGRESS
 
+- [2026-10-26 CODE] Review-fix sweep (comprehensive audit of Bridge +
+  client): ABI v31->v32. Bridge: orca_presets_set_value now parses into a
+  clone and returns typed INVALID_CONFIGURATION on parse failure (upstream
+  deserializers write 0 into numeric values when extraction fails);
+  custom G-code binds to the SELECTED plate (model.curr_plate_index synced
+  with the Bridge current plate — Print::apply used to consume plate 0's
+  codes for every plate); single-plate slices set {plate_name}; slice-all
+  assembles in a temp + atomic rename (a failed run keeps the previous
+  output, never a partial file) with marker-safe plate names; set_bed under
+  the engine mutex; physical-printer upsert REPLACES preset ties. Facade:
+  copy/cut no longer rejected by the revision guard (clipboard ops take no
+  revision — copy was broken on every non-empty document); new
+  EngineGcode.loadPlateSections splits ORCA_PLATE marker files and offsets
+  each plate back to its world origin. Client: first-run Slice guard until
+  a listed printer is selected; preset/resolved-config ops reject with a
+  message while slicing (they used to silently queue on the engine mutex);
+  per-file G-code naming (sanitized, never overwritten) + Send-any-file;
+  slice-all preview sections + Plates menu + jump-to-layer; Slice button on
+  the Plate pill + auto-jump to Preview on completion; marquee-mode orbit;
+  Move-to-plate object menu; inverted-hull selection outline; multi-file
+  import; background 3MF autosave + launch restore; writable data dir
+  moved to Application Support (API keys out of Files-visible Documents,
+  legacy tree migrated once); print-host uploads carry per-plan state (no
+  static leaks across hosts); Device web view locked to the printer's own
+  host (links open in Safari). Gates: host 51,491 PASS, core archive
+  rebuilt, xtool green 0 warnings, audit PASS, parity 42% (54 done).
+
 - [2026-10-15 CODE] ABI v31 + C10 (multi-filament, parity 51 done 40%):
   filament slots/count/per-slot preset+colour API, FilamentBar, object
   extruder assignment + slot tinting, FlushingVolumesSheet,
@@ -157,6 +184,14 @@
   host key is `host_type`.
 
 ## OUTCOMES
+
+- [2026-10-26] Review-fix sweep complete (parity 40%->42%, 51->54 done):
+  every bug from the Bridge+client audit fixed - copy/cut, silent preset
+  value reverts, slice-all preview overlap + partial outputs, print-host
+  static-state leaks, per-plate custom G-code, first-run slice guard,
+  preset-ops-while-slicing messaging, selection outline, move-to-plate,
+  autosave, API keys out of Files-visible storage, printer-web host lock.
+  Awaiting device verification via TestFlight.
 
 - [2026-10-19] UI round 7: SETUP WIZARD (desktop ConfigWizard parity, the
   user's 'global filter' intent): SetupWizardSheet from the Prepare pill

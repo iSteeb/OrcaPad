@@ -390,3 +390,19 @@ in ~/xtool-cheatsheet.md — link, don't duplicate.)
   axis focus.
 - Never clamp UI to "what desktop does" when the user's model differs -
   the plate grid and the touch manipulation flow are OrcaPad's own.
+
+### Review-fix sweep lessons (2026-10-26)
+- Upstream `ConfigOption::deserialize` for numeric options writes 0 into
+  the value when stream extraction fails (`iss >> value` + return
+  `!iss.fail()`): a "failed" parse still dirties the option. Parse into a
+  clone and commit via `set_key_value` only on success — never trust a
+  post-failure option, and never ignore the bool return.
+- Facade-level invariants must account for operations that take no
+  revision: the clipboard copies (`orca_plater_object_copy(s)`) have no
+  `out_revision`, so an unconditional revision-equality guard after every
+  `apply` rejected every copy on a non-empty document. The C contract
+  tests cannot catch Swift-facade bugs — when a mutation is a pure read,
+  skip the guard.
+- Slice-all output must be assembled in a temp and atomically renamed: a
+  mid-run failure (typed error or cancel) otherwise leaves a truncated
+  multi-plate G-code that Preview will load and the Device tab can send.
