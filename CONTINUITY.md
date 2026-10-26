@@ -2,6 +2,11 @@
 
 ## PLAN
 
+- [2026-10-26 USER] Roadmap: release 0.10 with Waves 0-2 (claims, UI wins,
+  output/export) + ALL THREE flagships (custom G-code at layers, cut tool,
+  config/preset-bundle import-export). PAINTING (seam/support/fuzzy/MMU)
+  UNLOCKED for 0.11 — the 0.10 core-loop completion is the unlock event
+  (AGENTS non-goal rule). CAD/parametric stays deferred.
 - [2026-10-15 USER] Approved plan (execute -> release-0.5.0):
   A1 camera reset = fit focused bed; A2 general config finalization at the
   Bridge slice boundary (desktop full_config semantics: per-filament vector

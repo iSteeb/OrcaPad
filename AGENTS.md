@@ -25,7 +25,9 @@ scope changes; LESSONS.md on every corrected mistake.
   printer's OWN web interface (desktop PrinterWebView parity); OrcaPad's
   own UI stays native.
 - Skip the exotic tools (seam/support painting, MMU segmentation, CAD editing)
-  until the core loop is complete and shipped. See PLANS.md phases.
+  until the core loop is complete and shipped. [USER 2026-10-26: painting is
+  UNLOCKED for 0.11 once 0.10 (core loop complete) ships; CAD editing stays
+  deferred.] See PLANS.md phases.
 - iPad-first. iPhone gets a companion treatment later, not a shrunk plater.
 
 ## Repository map (structure is normative)

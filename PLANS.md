@@ -359,3 +359,17 @@ Deferred until the core loop and architecture are complete: seam/support
 painting, MMU segmentation painting, and CAD/parametric editing. Remote desktop
 UI streaming is not planned. iPhone, watch, tv, and vision remain separate
 product decisions; appropriate desktop feature parity is still the destination.
+
+## Roadmap to 0.10 / 0.11 [USER 2026-10-26]
+
+- **0.10 — core loop complete** (unlocks painting per the non-goals rule):
+  Waves 0-2 (claim shipped hosts + About; new project, one-layer mode,
+  wipe/tool-change markers, volumetric-flow scheme, color picker; export
+  STL / .gcode.3mf / generic 3MF, recent projects) plus the three
+  flagships: custom G-code at layers (pause / custom / colour change +
+  colorPrint preview), the cut tool, and config/preset-bundle
+  import-export. Target: 53%+ parity.
+- **0.11 — painting suite** (deferred no longer): seam / support /
+  fuzzy-skin painting + MMU segmentation via TriangleSelector facet state
+  through the Bridge, a touch brush gizmo, facet rendering, and slicer
+  consumption. CAD/parametric editing stays deferred.

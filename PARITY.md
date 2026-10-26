@@ -19,10 +19,10 @@ Status: ✅ done · 🟡 partial · ❌ missing · ⏸️ deferred · ➖ na. Pa
 | Plate / 3D editor | 64 | 33 | 4 | 19 | 7 | 1 | 56% |
 | Prepare / presets / settings | 25 | 9 | 5 | 11 | 0 | 0 | 46% |
 | Preview / G-code | 17 | 7 | 0 | 10 | 0 | 0 | 41% |
-| Device / printing | 19 | 2 | 0 | 15 | 1 | 1 | 11% |
+| Device / printing | 19 | 3 | 1 | 13 | 1 | 1 | 19% |
 | Files / projects / app integration | 12 | 3 | 1 | 7 | 1 | 0 | 29% |
-| App / preferences / help | 15 | 0 | 1 | 6 | 0 | 8 | 7% |
-| **Total** | **152** | **54** | **11** | **68** | **9** | **10** | **42%** |
+| App / preferences / help | 15 | 1 | 1 | 5 | 0 | 8 | 21% |
+| **Total** | **152** | **56** | **12** | **65** | **9** | **10** | **44%** |
 
 ### Desktop surface coverage (items)
 
@@ -30,17 +30,17 @@ Status: ✅ done · 🟡 partial · ❌ missing · ⏸️ deferred · ➖ na. Pa
 |---|---|---|---|---|---|---|---|---|
 | 3D editor gizmos (`gizmo`) | Gizmos/GLGizmosManager.hpp EType | 16 | 3 | 1 | 7 | 5 | 0 | 22% |
 | Canvas toolbars (`toolbar`) | GLCanvas3D.cpp _init_*toolbar | 10 | 8 | 0 | 2 | 0 | 0 | 80% |
-| Menu bar (`menu`) | MainFrame.cpp | 75 | 27 | 1 | 25 | 13 | 9 | 42% |
+| Menu bar (`menu`) | MainFrame.cpp | 75 | 29 | 1 | 23 | 13 | 9 | 45% |
 | Right-click menus (`context`) | GUI_Factories.cpp | 81 | 52 | 5 | 20 | 4 | 0 | 67% |
 | Keyboard/mouse actions (`kb`) | KBShortcutsDialog.cpp | 81 | 8 | 43 | 26 | 2 | 2 | 37% |
 | Layer slider menu (`slider`) | IMSlider.cpp | 11 | 1 | 0 | 10 | 0 | 0 | 9% |
 | Plate icons (`plate`) | PartPlate.cpp render_icons | 9 | 7 | 0 | 2 | 0 | 0 | 78% |
 | Preview color schemes (`view`) | libvgcode Types.hpp EViewType | 17 | 14 | 0 | 3 | 0 | 0 | 82% |
 | Preview visibility options (`option`) | libvgcode Types.hpp EOptionType | 9 | 4 | 0 | 5 | 0 | 0 | 44% |
-| Print hosts (`host`) | PrintConfig.hpp PrintHostType | 16 | 2 | 0 | 14 | 0 | 0 | 12% |
+| Print hosts (`host`) | PrintConfig.hpp PrintHostType | 16 | 3 | 2 | 11 | 0 | 0 | 25% |
 | File types (`format`) | GUI_App.hpp FileType | 16 | 7 | 0 | 5 | 3 | 1 | 47% |
 | Preferences (`pref`) | Preferences.cpp | 75 | 6 | 4 | 38 | 3 | 24 | 16% |
-| Dialogs and windows (`dialog`) | src/slic3r/GUI/**/*.hpp | 116 | 14 | 3 | 29 | 13 | 57 | 26% |
+| Dialogs and windows (`dialog`) | src/slic3r/GUI/**/*.hpp | 116 | 16 | 3 | 27 | 13 | 57 | 30% |
 | Settings pages (`settings`) | Tab.cpp via settings-layout.json | 19 | 19 | 0 | 0 | 0 | 0 | 100% |
 
 ## Remaining work (priority order)
@@ -102,28 +102,26 @@ Status: ✅ done · 🟡 partial · ❌ missing · ⏸️ deferred · ➖ na. Pa
 55. ❌ **G-code line window** · Preview / G-code · Bridge + UI
 56. ❌ **Export toolpaths as OBJ** · Preview / G-code · Client-reimpl
 57. ❌ **Hardware-keyboard shortcuts: preview sliders** · Preview / G-code · UI
-58. ❌ **PrusaLink / Prusa Connect hosts** · Device / printing · Client-reimpl
-59. ❌ **Duet host** · Device / printing · Client-reimpl
-60. ❌ **Repetier host** · Device / printing · Client-reimpl
-61. ❌ **FlashAir host** · Device / printing · Client-reimpl
-62. ❌ **AstroBox host** · Device / printing · Client-reimpl
-63. ❌ **MKS host** · Device / printing · Client-reimpl
-64. ❌ **ESP3D host** · Device / printing · Client-reimpl
-65. ❌ **Creality Print host + LAN discovery** · Device / printing · Client-reimpl
-66. ❌ **Obico host** · Device / printing · Client-reimpl
-67. ❌ **Flashforge host** · Device / printing · Client-reimpl
-68. ❌ **Upload queue** · Device / printing · UI
-69. ❌ **Printer discovery (Bonjour)** · Device / printing · UI
-70. ❌ **SimplyPrint host (cloud auth)** · Device / printing · Client-reimpl
-71. ❌ **ElegooLink host** · Device / printing · Client-reimpl
-72. ❌ **3DPrinterOS host** · Device / printing · Client-reimpl
-73. ❌ **Preferences screen** · App / preferences / help · UI
-74. ❌ **Hardware-keyboard shortcuts: global** · App / preferences / help · UI
-75. ❌ **About and third-party licenses** · App / preferences / help · UI
-76. 🟡 **Light / dark appearance** · App / preferences / help · UI — dark only
-77. ❌ **Localization** · App / preferences / help · UI — iOS picks the language per app in Settings; OrcaPad strings are English only
-78. ❌ **Viewer quality options (MSAA, FXAA, shadows, SSAO, smooth normals, FPS)** · App / preferences / help · UI
-79. ❌ **Tip of the day** · App / preferences / help · UI
+58. ❌ **Duet host** · Device / printing · Client-reimpl
+59. ❌ **Repetier host** · Device / printing · Client-reimpl
+60. ❌ **AstroBox host** · Device / printing · Client-reimpl
+61. ❌ **MKS host** · Device / printing · Client-reimpl
+62. ❌ **ESP3D host** · Device / printing · Client-reimpl
+63. ❌ **Creality Print host + LAN discovery** · Device / printing · Client-reimpl
+64. ❌ **Obico host** · Device / printing · Client-reimpl
+65. ❌ **Flashforge host** · Device / printing · Client-reimpl
+66. ❌ **Upload queue** · Device / printing · UI
+67. ❌ **Printer discovery (Bonjour)** · Device / printing · UI
+68. ❌ **SimplyPrint host (cloud auth)** · Device / printing · Client-reimpl
+69. ❌ **ElegooLink host** · Device / printing · Client-reimpl
+70. ❌ **3DPrinterOS host** · Device / printing · Client-reimpl
+71. ❌ **Preferences screen** · App / preferences / help · UI
+72. ❌ **Hardware-keyboard shortcuts: global** · App / preferences / help · UI
+73. 🟡 **Light / dark appearance** · App / preferences / help · UI — dark only
+74. ❌ **Localization** · App / preferences / help · UI — iOS picks the language per app in Settings; OrcaPad strings are English only
+75. ❌ **Viewer quality options (MSAA, FXAA, shadows, SSAO, smooth normals, FPS)** · App / preferences / help · UI
+76. ❌ **Tip of the day** · App / preferences / help · UI
+77. 🟡 **PrusaLink / Prusa Connect hosts** · Device / printing · Client-reimpl — PrusaLink upload + select-and-print done (HTTP digest, user maker, per-upload session); Prusa Connect (cloud) not implemented
 
 **Deferred:** STEP / SVG / Draco import (deferred by user 2026-10-07: STEP/SVG need OpenCASCADE, DRC needs draco in the closure); Mesh boolean (deferred by user 2026-10-07 (CGAL PMP / mcut closure)); Fix model (mesh repair) (uses the CGAL repair closure deferred with mesh boolean (user, 2026-10-07)); Support painting (AGENTS.md: painting tools wait until the core loop ships (TriangleSelector.cpp is compiled)); Seam painting (AGENTS.md: painting tools wait until the core loop ships); Fuzzy-skin painting (AGENTS.md: painting tools wait until the core loop ships); Multi-material (color) painting (AGENTS.md: MMU segmentation waits until the core loop ships); Calibration menu (temperature, flow, PA, retraction, max flow, VFA, cornering, input shaping) (deferred by user 2026-10-07: calibration models are .drc, so draco must enter the closure first); Export objects as Draco (deferred by user 2026-10-07 (draco))
 
@@ -252,20 +250,20 @@ Status: ✅ done · 🟡 partial · ❌ missing · ⏸️ deferred · ➖ na. Pa
 
 | Feature | Status | Desktop | OrcaPad evidence | Notes |
 |---|---|---|---|---|
+| FlashAir host | ✅ | **host**: htFlashAir | `client:upload\.cgi`, `client:WRITEPROTECT` | FlashAir.cpp parity: the three-step upload.cgi flow (WRITEPROTECT=ON&FTIME prepare, UPDIR=/gcodes, then the multipart upload) as pre-requests on the upload plan |
 | Printer web UI in the Device tab (Mainsail / Fluidd / OctoPrint) | ✅ | `src/slic3r/GUI/PrinterWebView.hpp` | `client:final class PrinterWebSession`, `client:func webUIURL\(for`, `bridge:print_host_webui`, `abi:orca_physical_printer_list`, `client:struct PrinterSidebar`, `client:func refreshStatuses` | scoped AGENTS.md exception (user, 2026-10-07); device UI URL = print_host_webui (ABI v17). All-printers support (desktop device page): PrinterSidebar lists EVERY configured printer with live reachability (4 s probes, 10 s polling) and one-tap switching; compact widths get a chip bar |
 | Send G-code to OctoPrint / Moonraker (upload + start) | ✅ | **host**: htOctoPrint, htMoonraker; **dialog**: PrintHostSendDialog | `client:case "octoprint"`, `client:case "moonraker"`, `client:func upload\(` | — |
+| PrusaLink / Prusa Connect hosts | 🟡 | **host**: htPrusaLink, htPrusaConnect | `client:prusalink`, `client:DigestCredentials` | Gap: PrusaLink upload + select-and-print done (HTTP digest, user maker, per-upload session); Prusa Connect (cloud) not implemented · Work: Client-reimpl |
 | 3DPrinterOS host | ❌ | **host**: ht3DPrinterOS | — | Work: Client-reimpl |
 | AstroBox host | ❌ | **host**: htAstroBox | — | Work: Client-reimpl |
 | Creality Print host + LAN discovery | ❌ | **host**: htCrealityPrint; **dialog**: CrealityDiscoveryDialog | — | Work: Client-reimpl |
 | Duet host | ❌ | **host**: htDuet | — | Work: Client-reimpl |
 | ElegooLink host | ❌ | **host**: htElegooLink | — | Work: Client-reimpl |
 | ESP3D host | ❌ | **host**: htESP3D | — | Work: Client-reimpl |
-| FlashAir host | ❌ | **host**: htFlashAir | — | Work: Client-reimpl |
 | Flashforge host | ❌ | **host**: htFlashforge | — | Work: Client-reimpl |
 | MKS host | ❌ | **host**: htMKS | — | Work: Client-reimpl |
 | Obico host | ❌ | **host**: htObico | — | Work: Client-reimpl |
 | Printer discovery (Bonjour) | ❌ | **dialog**: BonjourDialog, IPListDialog | — | Work: UI |
-| PrusaLink / Prusa Connect hosts | ❌ | **host**: htPrusaLink, htPrusaConnect | — | Work: Client-reimpl |
 | Repetier host | ❌ | **host**: htRepetier | — | Work: Client-reimpl |
 | SimplyPrint host (cloud auth) | ❌ | **host**: htSimplyPrint; **dialog**: PrinterCloudAuthDialog | — | Work: Client-reimpl |
 | Upload queue | ❌ | **dialog**: PrintHostQueueDialog | — | Work: UI |
@@ -293,8 +291,8 @@ Status: ✅ done · 🟡 partial · ❌ missing · ⏸️ deferred · ➖ na. Pa
 
 | Feature | Status | Desktop | OrcaPad evidence | Notes |
 |---|---|---|---|---|
+| About and third-party licenses | ✅ | **menu**: {_L(about_title)}@init_menubar_as_editor, {about_title}@generate_help_menu; **dialog**: AboutDialog, CopyrightsDialog | `client:struct AboutView` | In-app About + third-party licenses (Gate E W3): AboutView from the Plate File menu, carries the exact-build source link (ORCAPAD_SOURCE_REF) and the license inventory |
 | Light / dark appearance | 🟡 | **pref**: Enable dark mode | `client:preferredColorScheme\(\.dark\)` | Gap: dark only · Work: UI |
-| About and third-party licenses | ❌ | **menu**: {_L(about_title)}@init_menubar_as_editor, {about_title}@generate_help_menu; **dialog**: AboutDialog, CopyrightsDialog | — | Work: UI |
 | Hardware-keyboard shortcuts: global | ❌ | **menu**: Keyboard Shortcuts; **dialog**: KBShortcutsDialog; **kb**: New Project, Open Project, Save Project, Save Project as, Import geometry data from STL/STEP/3MF/OBJ/AMF files, Export plate sliced file +11 | — | Work: UI |
 | Localization | ❌ | **pref**: Language | — | Work: UI · iOS picks the language per app in Settings; OrcaPad strings are English only |
 | Preferences screen | ❌ | **menu**: Preferences; **dialog**: PreferencesDialog; **pref**: Units, Default page, Load behaviour, Don't warn when loading 3MF with modified G-code, Store full source file paths in projects, Show shared profiles notification +9 | — | Work: UI |
@@ -414,8 +412,8 @@ Status: ✅ done · 🟡 partial · ❌ missing · ⏸️ deferred · ➖ na. Pa
 | `menu:Use Orthogonal View` | src/slic3r/GUI/MainFrame.cpp:3064 | plate.camera-projection | ❌ |
 | `menu:Use Perspective View` | src/slic3r/GUI/MainFrame.cpp:3058 | plate.camera-projection | ❌ |
 | `menu:VFA` | src/slic3r/GUI/MainFrame.cpp:3405 | device.calibration | ⏸️ |
-| `menu:{_L(about_title)}@init_menubar_as_editor` | src/slic3r/GUI/MainFrame.cpp:3261 | app.about | ❌ |
-| `menu:{about_title}@generate_help_menu` | src/slic3r/GUI/MainFrame.cpp:2608 | app.about | ❌ |
+| `menu:{_L(about_title)}@init_menubar_as_editor` | src/slic3r/GUI/MainFrame.cpp:3261 | app.about | ✅ |
+| `menu:{about_title}@generate_help_menu` | src/slic3r/GUI/MainFrame.cpp:2608 | app.about | ✅ |
 | `context:Add Handy models` | src/slic3r/GUI/GUI_Factories.cpp:1391 | plate.handy-models | ❌ |
 | `context:Add instance` | src/slic3r/GUI/GUI_Factories.cpp:2011 | plate.instances | ✅ |
 | `context:Add Models` | src/slic3r/GUI/GUI_Factories.cpp:1393 | plate.import | ✅ |
@@ -630,14 +628,14 @@ Status: ✅ done · 🟡 partial · ❌ missing · ⏸️ deferred · ➖ na. Pa
 | `host:htDuet` | src/libslic3r/PrintConfig.hpp:80 | device.host-duet | ❌ |
 | `host:htElegooLink` | src/libslic3r/PrintConfig.hpp:80 | device.host-elegoolink | ❌ |
 | `host:htESP3D` | src/libslic3r/PrintConfig.hpp:80 | device.host-esp3d | ❌ |
-| `host:htFlashAir` | src/libslic3r/PrintConfig.hpp:80 | device.host-flashair | ❌ |
+| `host:htFlashAir` | src/libslic3r/PrintConfig.hpp:80 | device.host-flashair | ✅ |
 | `host:htFlashforge` | src/libslic3r/PrintConfig.hpp:80 | device.host-flashforge | ❌ |
 | `host:htMKS` | src/libslic3r/PrintConfig.hpp:80 | device.host-mks | ❌ |
 | `host:htMoonraker` | src/libslic3r/PrintConfig.hpp:80 | device.upload | ✅ |
 | `host:htObico` | src/libslic3r/PrintConfig.hpp:80 | device.host-obico | ❌ |
 | `host:htOctoPrint` | src/libslic3r/PrintConfig.hpp:80 | device.upload | ✅ |
-| `host:htPrusaConnect` | src/libslic3r/PrintConfig.hpp:80 | device.host-prusalink | ❌ |
-| `host:htPrusaLink` | src/libslic3r/PrintConfig.hpp:80 | device.host-prusalink | ❌ |
+| `host:htPrusaConnect` | src/libslic3r/PrintConfig.hpp:80 | device.host-prusalink | 🟡 |
+| `host:htPrusaLink` | src/libslic3r/PrintConfig.hpp:80 | device.host-prusalink | 🟡 |
 | `host:htRepetier` | src/libslic3r/PrintConfig.hpp:80 | device.host-repetier | ❌ |
 | `host:htSimplyPrint` | src/libslic3r/PrintConfig.hpp:80 | device.host-simplyprint | ❌ |
 | `format:FT_3MF` | src/slic3r/GUI/GUI_App.hpp:96 | plate.import | ✅ |
@@ -731,7 +729,7 @@ Status: ✅ done · 🟡 partial · ❌ missing · ⏸️ deferred · ➖ na. Pa
 | `pref:{link_association:bambustudio}` | src/slic3r/GUI/Preferences.cpp:1956 | files.model-links | ❌ |
 | `pref:{link_association:cura}` | src/slic3r/GUI/Preferences.cpp:1959 | files.model-links | ❌ |
 | `pref:{link_association:prusaslicer}` | src/slic3r/GUI/Preferences.cpp:1953 | files.model-links | ❌ |
-| `dialog:AboutDialog` | src/slic3r/GUI/AboutDialog.hpp:57 | app.about | ❌ |
+| `dialog:AboutDialog` | src/slic3r/GUI/AboutDialog.hpp:57 | app.about | ✅ |
 | `dialog:AMSMaterialsSetting` | src/slic3r/GUI/AMSMaterialsSetting.hpp:96 | device.bambu | ➖ |
 | `dialog:AmsReplaceMaterialDialog` | src/slic3r/GUI/AmsMappingPopup.hpp:445 | device.bambu | ➖ |
 | `dialog:AMSSetting` | src/slic3r/GUI/AMSSetting.hpp:29 | device.bambu | ➖ |
@@ -744,7 +742,7 @@ Status: ✅ done · 🟡 partial · ❌ missing · ⏸️ deferred · ➖ na. Pa
 | `dialog:ConfigWizard` | src/slic3r/GUI/ConfigWizard.hpp:18 | prepare.setup-wizard | ✅ |
 | `dialog:ConfirmBeforeSendDialog` | src/slic3r/GUI/ReleaseNote.hpp:243 | device.bambu | ➖ |
 | `dialog:ConnectPrinterDialog` | src/slic3r/GUI/ConnectPrinter.hpp:24 | device.bambu | ➖ |
-| `dialog:CopyrightsDialog` | src/slic3r/GUI/AboutDialog.hpp:26 | app.about | ❌ |
+| `dialog:CopyrightsDialog` | src/slic3r/GUI/AboutDialog.hpp:26 | app.about | ✅ |
 | `dialog:Cornering_Test_Dlg` | src/slic3r/GUI/calib_dlg.hpp:167 | device.calibration | ⏸️ |
 | `dialog:CrealityDiscoveryDialog` | src/slic3r/GUI/CrealityDiscoveryDialog.hpp:26 | device.host-crealityprint | ❌ |
 | `dialog:CreateFilamentPresetDialog` | src/slic3r/GUI/CreatePresetsDialog.hpp:20 | prepare.create-presets | ❌ |

@@ -1121,10 +1121,11 @@ priority = 311
 id = "device.host-prusalink"
 area = "device"
 title = "PrusaLink / Prusa Connect hosts"
-status = "missing"
+status = "partial"
 desktop = ["host:htPrusaLink", "host:htPrusaConnect"]
+evidence = ['client:prusalink', 'client:DigestCredentials']
 work = "Client-reimpl"
-priority = 300
+gap = "PrusaLink upload + select-and-print done (HTTP digest, user maker, per-upload session); Prusa Connect (cloud) not implemented"
 
 [[feature]]
 id = "device.host-duet"
@@ -1148,10 +1149,11 @@ priority = 302
 id = "device.host-flashair"
 area = "device"
 title = "FlashAir host"
-status = "missing"
+status = "done"
 desktop = ["host:htFlashAir"]
+evidence = ['client:upload\.cgi', 'client:WRITEPROTECT']
 work = "Client-reimpl"
-priority = 303
+note = "FlashAir.cpp parity: the three-step upload.cgi flow (WRITEPROTECT=ON&FTIME prepare, UPDIR=/gcodes, then the multipart upload) as pre-requests on the upload plan"
 
 [[feature]]
 id = "device.host-astrobox"
@@ -1460,11 +1462,12 @@ priority = 401
 id = "app.about"
 area = "app"
 title = "About and third-party licenses"
-status = "missing"
+status = "done"
 desktop = ["menu:{_L(about_title)}@init_menubar_as_editor", "menu:{about_title}@generate_help_menu",
            "dialog:AboutDialog", "dialog:CopyrightsDialog"]
+evidence = ['client:struct AboutView']
 work = "UI"
-priority = 402
+note = "In-app About + third-party licenses (Gate E W3): AboutView from the Plate File menu, carries the exact-build source link (ORCAPAD_SOURCE_REF) and the license inventory"
 
 [[feature]]
 id = "app.tips"
