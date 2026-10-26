@@ -448,6 +448,32 @@ public final class EnginePlater: @unchecked Sendable {
         }
     }
 
+    /// Desktop "Add SVG" v1: standalone raised SVG object (ABI v38).
+    public func addSVGObject(
+        path: String, depthMM: Double, bedCenter: SIMD2<Double>
+    ) throws -> MutationResult {
+        try lock.withLock {
+            var mutationRevision: UInt64 = 0
+            var rawObjectID: UInt64 = 0
+            let result = path.withCString { pointer in
+                orca_plater_add_svg_object(
+                    handle, pointer, depthMM, bedCenter.x, bedCenter.y,
+                    &rawObjectID, &mutationRevision)
+            }
+            try BridgeResult.consume(result, operation: "add svg object")
+            let scene = try snapshotLocked()
+            guard scene.revision.rawValue == mutationRevision else {
+                throw BridgeError.local(
+                    .internalInvariant, operation: "add svg object",
+                    diagnostic: "revision mismatch after add svg")
+            }
+            return MutationResult(
+                snapshot: scene,
+                createdObjectID: try Self.objectID(rawObjectID, operation: "add svg object"),
+                createdObjectCount: 1)
+        }
+    }
+
     /// The selected plate's custom G-code ticks, ascending print_z.
     public func customGcodes() throws -> [CustomGcodeItem] {
         try lock.withLock {

@@ -28,6 +28,8 @@ struct PreviewTabView: View {
     /// Board §wave-b/4: toolpath → OBJ export, shared through the system
     /// sheet (the URL only exists after a background write).
     @State private var sharingOBJ: ShareURL?
+    /// Board cycle-0.15: desktop "Total Estimation" panel as a sheet.
+    @State private var summaryPresented = false
 
     /// Identifiable URL wrapper so `.sheet(item:)` can present the share
     /// sheet for an export that finished asynchronously.
@@ -108,6 +110,9 @@ struct PreviewTabView: View {
         .sheet(item: $sharingOBJ) { share in
             ActivityShareSheet(items: [share.url])
                 .presentationDetents([.medium, .large])
+        }
+        .sheet(isPresented: $summaryPresented) {
+            PreviewSummarySheet(store: store)
         }
         .alert("Custom G-code", isPresented: $customTextPresented) {
             TextField("G-code (e.g. M300 S440 P200)", text: $customText)
@@ -361,6 +366,13 @@ struct PreviewTabView: View {
                     ChromeToolLabel(symbol: "viewfinder", label: "Frame")
                 }
                 .buttonStyle(.plain)
+                // Board cycle-0.15: desktop Total Estimation panel.
+                Button {
+                    summaryPresented = true
+                } label: {
+                    ChromeToolLabel(symbol: "timer", label: "Summary")
+                }
+                .buttonStyle(.plain)
                 Divider().frame(height: 28)
                 Button {
                     openPresented = true
@@ -584,12 +596,6 @@ struct PreviewTabView: View {
                 }
             }
         }
-
-        private func formatDuration(_ seconds: Float) -> String {
-            let total = Int(seconds.rounded())
-            let hours = total / 3600, minutes = (total % 3600) / 60
-            return hours > 0 ? "\(hours)h \(minutes)m" : "\(minutes)m \(total % 60)s"
-        }
     /// Desktop legend parity: per-feature time and share of extrusion time.
     private func roleTime(_ summary: GcodePreviewStore.RoleSummary) -> String {
         let minutes = Int((summary.timeSeconds / 60).rounded())
@@ -702,6 +708,131 @@ private struct PreviewDock: View {
             in: RoundedRectangle(cornerRadius: 10)
         )
         .contentShape(Rectangle())
+    }
+}
+
+/// "1h 23m" / "23m 45s" — desktop estimation formatting (shared by the
+/// legend and the summary sheet).
+private func formatDuration(_ seconds: Float) -> String {
+    let total = Int(seconds.rounded())
+    let hours = total / 3600, minutes = (total % 3600) / 60
+    return hours > 0 ? "\(hours)h \(minutes)m" : "\(minutes)m \(total % 60)s"
+}
+
+/// Desktop "Total Estimation" panel parity (board cycle-0.15): normal +
+/// silent time, per-extruder filament length/weight/cost and per-plate
+/// times. Read-only view over the already-parsed toolpath — no engine calls.
+private struct PreviewSummarySheet: View {
+    let store: GcodePreviewStore
+
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            List {
+                if let toolpath = store.toolpath {
+                    timeSection(toolpath)
+                    filamentSection
+                    if store.sections.count > 1 {
+                        platesSection(toolpath)
+                    }
+                    if let url = store.loadedURL {
+                        Section {
+                            LabeledContent("File", value: url.lastPathComponent)
+                                .font(.caption)
+                                .lineLimit(1)
+                        }
+                    }
+                }
+            }
+            .navigationTitle("Summary")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }
+                }
+            }
+        }
+        .presentationDetents([.medium, .large])
+    }
+
+    private func timeSection(_ toolpath: GcodeToolpath) -> some View {
+        Section("Time") {
+            LabeledContent("Estimated", value: formatDuration(toolpath.estimatedSeconds))
+            if toolpath.estimatedStealthSeconds > 0 {
+                LabeledContent("Silent mode", value: formatDuration(toolpath.estimatedStealthSeconds))
+            }
+            LabeledContent("Extruding", value: formatDuration(store.extrusionSeconds))
+            LabeledContent("Layers", value: "\(store.layerCount)")
+        }
+    }
+
+    private var filamentSection: some View {
+        Group {
+            if !store.extruderStats.isEmpty {
+                Section("Filament") {
+                    ForEach(Array(store.extruderStats.enumerated()), id: \.offset) { index, stats in
+                        extruderRow(index, stats)
+                    }
+                    totalsRow
+                }
+            }
+        }
+    }
+
+    /// One extruder's usage: length, weight (when the density is known) and
+    /// cost (weight × cost per kg) — the legend's math, laid out as rows.
+    private func extruderRow(_ index: Int, _ stats: ExtruderStats) -> some View {
+        HStack(alignment: .firstTextBaseline) {
+            Text("T\(index)")
+                .font(.subheadline.weight(.medium))
+                .monospaced()
+            Spacer()
+            VStack(alignment: .trailing, spacing: 2) {
+                Text(String(format: "%.2f m", stats.lengthM))
+                if stats.densityGCm3 > 0 {
+                    Text(String(format: "%.1f g", stats.weightG))
+                }
+                if stats.costPerKG > 0 && stats.weightG > 0 {
+                    Text(String(format: "%.2f €", stats.weightG / 1000 * Double(stats.costPerKG)))
+                }
+            }
+            .font(.callout.monospacedDigit())
+            .foregroundStyle(.secondary)
+        }
+    }
+
+    @ViewBuilder
+    private var totalsRow: some View {
+        let length = store.extruderStats.map(\.lengthM).reduce(0, +)
+        let weight = store.extruderStats.map(\.weightG).reduce(0, +)
+        let cost = store.extruderStats.reduce(0) {
+            $0 + ($1.weightG / 1000 * Double($1.costPerKG))
+        }
+        VStack(alignment: .trailing, spacing: 2) {
+            Text(String(format: "%.2f m", length))
+            if store.extruderStats.contains(where: { $0.densityGCm3 > 0 }) {
+                Text(String(format: "%.1f g", weight))
+            }
+            if store.extruderStats.contains(where: { $0.costPerKG > 0 && $0.weightG > 0 }) {
+                Text(String(format: "%.2f €", cost))
+            }
+        }
+        .font(.callout.monospacedDigit().weight(.semibold))
+        .frame(maxWidth: .infinity, alignment: .trailing)
+    }
+
+    /// Slice-all results: one time row per plate section.
+    private func platesSection(_ toolpath: GcodeToolpath) -> some View {
+        Section("Plates") {
+            ForEach(store.sections, id: \.plateIndex) { section in
+                LabeledContent(
+                    section.name.isEmpty ? "Plate \(section.plateIndex + 1)" : section.name,
+                    value: formatDuration(section.estimatedSeconds)
+                )
+            }
+            LabeledContent("Total", value: formatDuration(toolpath.estimatedSeconds))
+        }
     }
 }
 

@@ -456,8 +456,10 @@ note = "Emboss.cpp is compiled; needs iOS font access"
 id = "plate.svg-part"
 area = "plate"
 title = "SVG emboss part"
-status = "missing"
+status = "partial"
 desktop = ["gizmo:Svg", "context:Edit SVG"]
+evidence = ["abi:orca_plater_add_svg_object", "client:Add SVG"]
+gap = "standalone raised SVG OBJECT done (engine NSVGUtils + Emboss pipeline, ABI v38, mm-unit + depth contract-tested); attaching an SVG as an embossed PART of an existing object is not implemented"
 work = "Bridge + UI"
 priority = 40
 note = "NSVGUtils + Emboss are compiled (no OCCT needed for SVG parts)"
@@ -588,11 +590,11 @@ evidence = ["client:enum CameraViewPreset", "client:func applyCameraView"]
 id = "plate.camera-projection"
 area = "plate"
 title = "Perspective / orthographic camera, camera style"
-status = "missing"
+status = "done"
+evidence = ["client:isOrthographic", "client:orthographic"]
 desktop = ["menu:Use Perspective View", "menu:Use Orthogonal View", "menu:Auto Perspective",
            "pref:Camera style", "pref:Use free camera"]
 work = "UI"
-priority = 42
 
 [[feature]]
 id = "plate.navigator"
@@ -607,30 +609,28 @@ priority = 43
 id = "plate.gridlines"
 area = "plate"
 title = "Bed gridlines"
-status = "partial"
+status = "done"
 desktop = ["menu:Show Gridlines"]
-evidence = ["client:grid"]
-gap = "grid is always shown; no toggle"
+evidence = ["client:setGridlinesVisible"]
 work = "UI"
-priority = 44
 
 [[feature]]
 id = "plate.labels"
 area = "plate"
 title = "Object labels in the 3D view"
-status = "missing"
+status = "done"
+evidence = ["client:ObjectLabelsOverlay", "client:publishLabels"]
 desktop = ["menu:Show Labels", "context:Show Labels"]
 work = "UI"
-priority = 45
 
 [[feature]]
 id = "plate.overhang"
 area = "plate"
 title = "Overhang highlighting"
-status = "missing"
+status = "done"
+evidence = ["client:rebuildOverhang"]
 desktop = ["menu:Show Overhang"]
 work = "UI"
-priority = 46
 
 [[feature]]
 id = "plate.selected-outline"
@@ -779,12 +779,11 @@ evidence = ["abi:orca_presets_set_bed_type", "client:struct PlateTypeRow"]
 id = "prepare.nozzle"
 area = "prepare"
 title = "Nozzle diameter selector"
-status = "partial"
+status = "done"
 source = "src/slic3r/GUI/Plater.cpp:nozzle_diameter"
-evidence = ["client:struct GroupedPickerList"]
-gap = "nozzle variants are separate printer presets; no nozzle combo"
+evidence = ["client:parseNozzle", "client:nozzleFamily"]
 work = "UI"
-priority = 112
+note = "Prepare printer page: sibling presets sharing the family prefix with different X.X nozzle suffixes offer a nozzle menu (selection through the normal preset path)"
 
 [[feature]]
 id = "prepare.multi-filament"
@@ -881,8 +880,8 @@ area = "prepare"
 title = "Custom G-code editor with placeholder browser"
 status = "partial"
 desktop = ["dialog:EditGCodeDialog"]
-evidence = ["client:multiline"]
-gap = "multiline editor without the placeholder browser"
+evidence = ["client:multiline", "client:GcodePlaceholders"]
+gap = "browser inserts at the END of the draft — iOS 17 TextEditor exposes no cursor position"
 work = "UI"
 priority = 115
 
@@ -961,10 +960,10 @@ note = "Actual-flow color scheme (actual_feedrate x mm3_per_mm, engine GCodeProc
 id = "preview.summary"
 area = "preview"
 title = "Summary view"
-status = "missing"
+status = "done"
+evidence = ["client:PreviewSummarySheet"]
 desktop = ["view:Summary"]
 work = "UI"
-priority = 207
 
 [[feature]]
 id = "preview.color-print"
@@ -1481,7 +1480,9 @@ note = "iOS picks the language per app in Settings; OrcaPad strings are English 
 id = "app.render-quality"
 area = "app"
 title = "Viewer quality options (MSAA, FXAA, shadows, SSAO, smooth normals, FPS)"
-status = "missing"
+status = "partial"
+evidence = ["client:viewerMSAA"]
+gap = "MSAA 4x/1x toggle + FPS readout toggle done; FXAA/SSAO/shadows/smooth-normals are not implemented"
 desktop = ["pref:MSAA Multiplier", "pref:FXAA post-processing", "pref:Phong shading", "pref:Shadows",
            "pref:Smooth normals", "pref:SSAO ambient occlusion", "pref:FPS cap", "pref:Show FPS overlay"]
 work = "UI"

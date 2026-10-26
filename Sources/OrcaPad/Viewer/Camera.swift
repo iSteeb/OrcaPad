@@ -19,6 +19,22 @@ enum Math {
         ))
     }
 
+    /// Desktop camera parity (Camera.hpp:77 "false" -> ortho,
+    /// "true" -> perspective; both apply_projection overloads
+    /// Camera.hpp:136-138): the ortho frustum keeps the perspective view's
+    /// apparent size at the orbit target, so toggling does not jump. Metal
+    /// NDC z runs 0..1; w stays 1 so picking/projection math is unchanged.
+    static func orthographic(
+        halfHeight: Float, aspect: Float, near: Float, far: Float
+    ) -> simd_float4x4 {
+        simd_float4x4(columns: (
+            simd_float4(1 / (halfHeight * aspect), 0, 0, 0),
+            simd_float4(0, 1 / halfHeight, 0, 0),
+            simd_float4(0, 0, -1 / (far - near), 0),
+            simd_float4(0, 0, -near / (far - near), 1)
+        ))
+    }
+
     static func lookAt(eye: simd_float3, center: simd_float3, up: simd_float3) -> simd_float4x4 {
         let f = simd_normalize(center - eye)
         let r = simd_normalize(simd_cross(f, up))
@@ -156,6 +172,11 @@ final class OrbitCamera {
     let near: Float = 1
     let far: Float = 5000
 
+    /// Projection kind (desktop "Perspective" canvas-menu toggle,
+    /// GLCanvas3D.cpp:9228 -> use_perspective_camera; MainFrame.cpp:3063
+    /// "Use Orthogonal View"). Session state, never persisted here.
+    var isOrthographic = false
+
     var eye: simd_float3 {
         let cp = cos(pitch)
         return target + distance * simd_float3(cp * cos(yaw), sin(pitch), cp * sin(yaw))
@@ -170,7 +191,17 @@ final class OrbitCamera {
     }
 
     func projection(aspect: Float) -> simd_float4x4 {
-        Math.perspective(fovY: fovY, aspect: aspect, near: near, far: far)
+        if isOrthographic {
+            // Match the perspective apparent size at the orbit target
+            // (2·d·tan(fov/2)); zoom (distance) then scales ortho too.
+            return Math.orthographic(
+                halfHeight: distance * tan(fovY * 0.5),
+                aspect: aspect,
+                near: near,
+                far: far
+            )
+        }
+        return Math.perspective(fovY: fovY, aspect: aspect, near: near, far: far)
     }
 
     func orbit(dx: Float, dy: Float) {

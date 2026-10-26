@@ -7,7 +7,7 @@ extern "C" {
 #endif
 
 /// Version of the C ABI contract in this header. Callers verify it at runtime.
-#define ORCA_BRIDGE_ABI_VERSION ((uint32_t)37)
+#define ORCA_BRIDGE_ABI_VERSION ((uint32_t)38)
 
 typedef int32_t orca_status_code;
 #define ORCA_STATUS_OK                     ((orca_status_code)0)
@@ -370,6 +370,18 @@ void orca_hull_mesh_dispose(orca_hull_mesh *mesh);
 orca_result orca_plater_object_hull(orca_plater *plater,
                                     orca_object_id object_id,
                                     orca_hull_mesh *out);
+
+/// Desktop "Add SVG" v1 (standalone raised SVG object, flat base): parses
+/// the SVG in millimetres (nanosvg, engine NSVGUtils), tessellates its
+/// paths and extrudes `depth_mm` through the Emboss pipeline. One undo
+/// step; returns the new object id.
+orca_result orca_plater_add_svg_object(orca_plater *plater,
+                                       const char *svg_path,
+                                       double depth_mm,
+                                       double bed_center_x,
+                                       double bed_center_y,
+                                       orca_object_id *out_object_id,
+                                       orca_revision *out_revision);
 
 /// Desktop "Add Text" v1 (standalone raised text object, flat base):
 /// loads the font file at `font_path` (TTF/TTC bytes, stb_truetype in the

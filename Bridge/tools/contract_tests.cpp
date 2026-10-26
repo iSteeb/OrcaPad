@@ -276,7 +276,7 @@ static void test_md5_shim() {
 
 static void test_abi_version() {
     CHECK_EQ(orca_bridge_abi_version(), ORCA_BRIDGE_ABI_VERSION);
-    CHECK_EQ(ORCA_BRIDGE_ABI_VERSION, 37);
+    CHECK_EQ(ORCA_BRIDGE_ABI_VERSION, 38);
 }
 
 struct ProgressRecord {
@@ -3328,7 +3328,52 @@ static void test_arrange_orient(const std::string &dir, const std::string &data_
     orca_plater_free(plater);
 }
 
-// ABI v37: object hull / COG + text emboss
+// ABI v38: SVG emboss (standalone raised object)
+static void test_svg(const std::string &dir) {
+    orca_plater *plater = nullptr;
+    GUARD(g0, orca_plater_new(&plater));
+    expect_ok(g0, "plater_new");
+    // minimal 20x10 mm rectangle SVG
+    const std::string svg = dir + "/rect.svg";
+    {
+        FILE *file = fopen(svg.c_str(), "w");
+        CHECK(file != nullptr);
+        if (file) {
+            fprintf(file,
+                "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"20mm\" "
+                "height=\"10mm\" viewBox=\"0 0 20 10\">"
+                "<path d=\"M0 0 H20 V10 H0 Z\" fill=\"#000\"/></svg>");
+            fclose(file);
+        }
+    }
+    orca_object_id id = 0;
+    orca_revision revision = 0;
+    GUARD(g1, orca_plater_add_svg_object(plater, svg.c_str(), 2.0,
+                                         100.0, 100.0, &id, &revision));
+    expect_ok(g1, "add svg object");
+    CHECK(id != 0);
+    {
+        orca_scene_snapshot snap = take_snapshot(plater);
+        CHECK_EQ(snap.object_count, 1);
+        CHECK(snap.objects[0].index_count >= 12);   // solid prism
+        // z extent ~= depth 2mm (instance rests it on the bed)
+        CHECK_NEAR(snap.objects[0].bbox_max[2] - snap.objects[0].bbox_min[2],
+                   2.0f, 0.1f);
+        // xy extent ~= the SVG rect (20x10) in mm
+        CHECK_NEAR(snap.objects[0].bbox_max[0] - snap.objects[0].bbox_min[0],
+                   20.0f, 0.5f);
+        orca_scene_snapshot_dispose(&snap);
+    }
+    GUARD(x1, orca_plater_add_svg_object(plater, (dir + "/no.svg").c_str(),
+                                         2.0, 0, 0, &id, &revision));
+    expect_code(x1, ORCA_STATUS_IO_FAILURE, "svg missing file");
+    GUARD(x2, orca_plater_add_svg_object(plater, svg.c_str(), 0.0,
+                                         0, 0, &id, &revision));
+    expect_code(x2, ORCA_STATUS_INVALID_ARGUMENT, "svg zero depth");
+    orca_plater_free(plater);
+}
+
+// ABI v37: object hull / COG + text emboss// ABI v37: object hull / COG + text emboss
 static void test_hull_and_text(const std::string &dir) {
     orca_plater *plater = nullptr;
     GUARD(g0, orca_plater_new(&plater));
@@ -4563,6 +4608,7 @@ int main() {
     test_config_io(dir, data_dir);
     test_painting(dir);
     test_hull_and_text(dir);
+    test_svg(dir);
     test_project_roundtrip(dir, data_dir);
     test_user_presets(data_dir);
     test_physical_printers(data_dir);

@@ -42,6 +42,7 @@ struct PlateTabView: View {
     @State private var textContent = "OrcaPad"
     @State private var textSize: Double = 10
     @State private var textDepth: Double = 2
+    @State private var svgImportPresented = false
     @State private var cutAxis: EngineAxis = .z
     @State private var cutFraction: Double = 0.5
     @State private var cutKeep: EnginePlater.CutKeep = .bothAsParts
@@ -52,6 +53,19 @@ struct PlateTabView: View {
     /// Board §wave-b/5: object shells + COG overlay (View menu, session
     /// state like the desktop View menu — not persisted).
     @State private var showShells = false
+    /// Viewer options (View menu; desktop canvas view-menu parity,
+    /// GLCanvas3D.cpp:9205-9257 — Overhangs / Perspective / Gridlines /
+    /// Labels; MSAA + FPS readout are OrcaPad quality options). Session
+    /// state like the desktop View menu — not persisted.
+    @State private var cameraPerspective = true
+    @State private var showObjectLabels = false
+    @State private var showOverhang = false
+    /// Default 55° (board spec; the desktop painter gizmo exposes the same
+    /// 0..90 range as a slider, GLGizmoFdmSupports.cpp:402).
+    @State private var overhangThresholdDegrees: Double = 55
+    @State private var showGridlines = true
+    @State private var viewerMSAA = true
+    @State private var showFPS = true
 
     private var document: DocumentStore { environment.document }
 
@@ -250,6 +264,12 @@ struct PlateTabView: View {
                     }
                 }
 
+            // 3D object labels (View menu): SwiftUI chips exactly over the
+            // canvas — same full-screen frame, so the renderer's projected
+            // view points transfer 1:1. Never intercepts canvas gestures.
+            ObjectLabelsOverlay()
+                .ignoresSafeArea()
+
             VStack {
                 // One wide pill bar (all former left-rail + top controls):
                 // Undo / Redo | Menu (file + objects) | Arrange | Tools.
@@ -321,6 +341,15 @@ struct PlateTabView: View {
         } message: {
             Text("The plate is cleared and the undo history is discarded. Printer, filament and process selections stay.")
         }
+        .fileImporter(
+            isPresented: $svgImportPresented,
+            allowedContentTypes: [UTType(filenameExtension: "svg") ?? .data],
+            onCompletion: { result in
+                if case .success(let url) = result {
+                    Task { await document.addSVGObject(from: url, depthMM: 2.0) }
+                }
+            }
+        )
         .sheet(isPresented: $textPresented) {
             AddTextSheet(
                 text: $textContent, size: $textSize, depth: $textDepth
@@ -387,7 +416,13 @@ struct PlateTabView: View {
                             ui.getRed(&red, green: &green, blue: &blue, alpha: &alpha)
                             return SIMD4<Float>(Float(red), Float(green), Float(blue), 1)
                         },
-                    paintTriangles: gizmoMode == .paint ? document.paintTriangles : []
+                    paintTriangles: gizmoMode == .paint ? document.paintTriangles : [],
+                    overhangEnabled: showOverhang,
+                    overhangThresholdDegrees: overhangThresholdDegrees,
+                    cameraPerspective: cameraPerspective,
+                    showLabels: showObjectLabels,
+                    showGridlines: showGridlines,
+                    showFPS: showFPS
                 ),
                 manipulation: CanvasManipulation(
                     onSelect: { document.select(objectID: $0, instanceID: $1) },
@@ -436,6 +471,10 @@ struct PlateTabView: View {
                 }
                 )
             )
+            // MSAA rebuild: pipelines are compiled for the view's sample
+            // count, so the toggle recreates the canvas instead of mutating
+            // the live MTKView (which would invalidate every pipeline).
+            .id(viewerMSAA)
         } else {
             Color(red: 0.075, green: 0.078, blue: 0.093)
         }
@@ -501,6 +540,11 @@ struct PlateTabView: View {
                         textPresented = true
                     } label: {
                         Label("Add Text\u{2026}", systemImage: "textformat")
+                    }
+                    Button {
+                        svgImportPresented = true
+                    } label: {
+                        Label("Add SVG\u{2026}", systemImage: "square.on.square.squareshape.controlhandles")
                     }
                     // Desktop "Add Handy models" (MenuFactory parity):
                     // one-tip bundled test prints. OrcaPad ships three tiny
@@ -613,7 +657,48 @@ struct PlateTabView: View {
                             }
                         }
                         Divider()
+                        // Desktop canvas view menu (GLCanvas3D.cpp:9205-9257):
+                        // Overhangs / Perspective / Gridlines / Labels toggles
+                        // ("Use Orthogonal View" radio items also exist at
+                        // MainFrame.cpp:3063-3064).
+                        Toggle("Perspective camera", isOn: $cameraPerspective)
+                        Toggle("Labels", isOn: $showObjectLabels)
+                        Toggle("Overhangs", isOn: $showOverhang)
+                        // Threshold as 5° steps in a submenu: iOS menus cannot
+                        // host an interactive Slider row (the menu dismisses
+                        // on first touch), so the desktop slider
+                        // (GLGizmoFdmSupports.cpp:402) becomes discrete picks.
+                        Menu {
+                            ForEach(
+                                Array(stride(from: 30, through: 85, by: 5)),
+                                id: \.self
+                            ) { degrees in
+                                Button {
+                                    overhangThresholdDegrees = Double(degrees)
+                                } label: {
+                                    if Double(degrees) == overhangThresholdDegrees {
+                                        Label("\(degrees)°", systemImage: "checkmark")
+                                    } else {
+                                        Text("\(degrees)°")
+                                    }
+                                }
+                            }
+                        } label: {
+                            Label(
+                                "Overhang threshold · \(Int(overhangThresholdDegrees))°",
+                                systemImage: "angle"
+                            )
+                        }
+                        .disabled(!showOverhang)
+                        Toggle("Gridlines", isOn: $showGridlines)
+                        Divider()
                         Toggle("Shells + COG", isOn: $showShells)
+                        Divider()
+                        // Viewer quality (OrcaPad): MSAA flips the canvas'
+                        // sample count — pipelines are built per count, so
+                        // the canvas is rebuilt (see `.id(viewerMSAA)`).
+                        Toggle("MSAA (4×)", isOn: $viewerMSAA)
+                        Toggle("FPS readout", isOn: $showFPS)
                     } label: {
                         Label("View", systemImage: "camera")
                     }

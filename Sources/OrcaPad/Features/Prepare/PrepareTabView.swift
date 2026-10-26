@@ -247,7 +247,10 @@ struct PrepareTabView: View {
             HStack(spacing: 4) {
                 Button {
                     let order: [SettingsModeFilter] = [.simple, .advanced, .expert]
-                    setMode(order[(order.firstIndex(of: modeFilter).map { ($0 + 1) % order.count } ?? 0)])
+                    setMode(
+                        order[(order.firstIndex(of: modeFilter).map { ($0 + 1) % order.count } ?? 0)],
+                        for: activeKind
+                    )
                 } label: {
                     ChromeToolLabel(
                         symbol: modeFilter.symbol,
@@ -393,10 +396,26 @@ struct PrepareTabView: View {
         }
     }
 
-    private func setMode(_ filter: SettingsModeFilter) {
-        kindModes[activeKind] = filter
-        UserDefaults.standard.set(filter.rawValue, forKey: "prepare.mode.\(activeKind)")
-        activePage = nil
+    private func setMode(_ filter: SettingsModeFilter, for kind: PresetKind) {
+        kindModes[kind] = filter
+        UserDefaults.standard.set(filter.rawValue, forKey: "prepare.mode.\(kind)")
+        if kind == activeKind { activePage = nil }
+    }
+
+    /// Cross-kind search jump (board cycle-0.15): reveal the owning kind +
+    /// page. When the matched option would be hidden at that kind's current
+    /// mode level, the level is elevated to Expert (desktop search unhides
+    /// options too) so the destination row is actually visible.
+    private func jumpToSetting(kind: PresetKind, key: String, page: String) {
+        let filter = kindModes[kind] ?? .simple
+        if case .success(let index) = ConfigSchema.index,
+           let option = index[key],
+           !ConfigSchema.isVisible(mode: option.mode ?? 0, filter: filter) {
+            setMode(.expert, for: kind)
+        }
+        activeKind = kind
+        activePage = page
+        search = ""
     }
 
     /// Kind buttons SWITCH THE PAGE (the pill drives the main view); each
@@ -496,30 +515,45 @@ struct PrepareTabView: View {
     /// Filament / Process: their categorized list + their settings.
     private var settingsList: some View {
         List {
-            switch activeKind {
-            case .machine:
-                presetPickerSection(.machine)
-                printerInfoSection
-                settingsSections(.machine)
-            case .filament:
-                presetPickerSection(.filament)
-                settingsSections(.filament)
-            case .process:
-                presetPickerSection(.process)
-                processActionsSection
-                settingsSections(.process)
-            }
-
-            Section {
-                NavigationLink {
-                    ResolvedConfigView(presets: presets)
-                } label: {
-                    Label("Resolved configuration", systemImage: "doc.text.magnifyingglass")
+            if trimmedSearch.isEmpty {
+                switch activeKind {
+                case .machine:
+                    presetPickerSection(.machine)
+                    printerInfoSection
+                    settingsSections(.machine)
+                case .filament:
+                    presetPickerSection(.filament)
+                    settingsSections(.filament)
+                case .process:
+                    presetPickerSection(.process)
+                    processActionsSection
+                    settingsSections(.process)
                 }
-            } footer: {
-                sliceFooter
+
+                Section {
+                    NavigationLink {
+                        ResolvedConfigView(presets: presets)
+                    } label: {
+                        Label("Resolved configuration", systemImage: "doc.text.magnifyingglass")
+                    }
+                } footer: {
+                    sliceFooter
+                }
+            } else {
+                // Board cycle-0.15: cross-kind search — while the query is
+                // non-empty, grouped results across ALL THREE kinds replace
+                // the per-page filter; tapping jumps to kind + page.
+                SettingsSearchResults(
+                    presets: presets,
+                    query: trimmedSearch,
+                    onJump: jumpToSetting
+                )
             }
         }
+    }
+
+    private var trimmedSearch: String {
+        search.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     /// Current selection + inline EXPANDABLE categorized preset list.
@@ -568,6 +602,11 @@ struct PrepareTabView: View {
     /// Printer-only info rows: plate type + print volume.
     private var printerInfoSection: some View {
         Section("Printer") {
+            // Board cycle-0.15: sibling nozzle presets of the same printer
+            // family ("<family> <diameter> nozzle" vendor naming).
+            if let family = nozzleFamily {
+                nozzleRow(family)
+            }
             if let bedType = presets.bedType {
                 PlateTypeRow(state: bedType) { value in
                     Task { await presets.setBedType(value) }
@@ -582,6 +621,90 @@ struct PrepareTabView: View {
                 }
             }
         }
+    }
+
+    // MARK: Nozzle selector (board cycle-0.15)
+
+    /// One nozzle diameter offered by the current printer family.
+    private struct NozzleVariant: Identifiable {
+        let diameter: Double
+        let label: String
+        let presetName: String
+        var id: String { presetName }
+    }
+
+    /// The sibling machine presets sharing one printer family name (the
+    /// text before the "<diameter> nozzle" suffix).
+    private struct NozzleFamily {
+        let variants: [NozzleVariant]  // ascending diameter
+        let currentLabel: String
+    }
+
+    /// Parses "<family> <diameter> nozzle" (desktop vendor convention,
+    /// e.g. "Afinia H+1(HS) 0.4 nozzle", occasionally trailing spaces).
+    /// Names without that exact suffix ("… 0.4 nozzle PoopTool") have no
+    /// nozzle family and return nil.
+    private static func parseNozzle(name: String) -> (family: String, label: String, diameter: Double)? {
+        let trimmed = name.trimmingCharacters(in: .whitespaces)
+        guard trimmed.lowercased().hasSuffix("nozzle") else { return nil }
+        let body = String(trimmed.dropLast("nozzle".count))
+            .trimmingCharacters(in: .whitespaces)
+        guard let separator = body.lastIndex(of: " ") else { return nil }
+        let label = String(body[body.index(after: separator)...])
+            .trimmingCharacters(in: .whitespaces)
+        let family = String(body[..<separator]).trimmingCharacters(in: .whitespaces)
+        guard let diameter = Double(label.replacingOccurrences(of: ",", with: ".")),
+              !family.isEmpty else { return nil }
+        return (family, label, diameter)
+    }
+
+    /// The current machine's nozzle sibling set — shown only when the
+    /// family actually offers more than the selected diameter (each sibling
+    /// is a full machine preset; switching goes through the normal preset
+    /// select path, unsaved-changes guard included).
+    private var nozzleFamily: NozzleFamily? {
+        let current = presets.selection.machine
+        guard let parsed = Self.parseNozzle(name: current) else { return nil }
+        let variants = presetList(for: .machine)
+            .compactMap { entry -> NozzleVariant? in
+                guard let match = Self.parseNozzle(name: entry.name),
+                      match.family == parsed.family
+                else { return nil }
+                return NozzleVariant(
+                    diameter: match.diameter,
+                    label: match.label,
+                    presetName: entry.name
+                )
+            }
+            .sorted { $0.diameter < $1.diameter }
+        guard variants.contains(where: { $0.diameter != parsed.diameter }) else { return nil }
+        return NozzleFamily(variants: variants, currentLabel: parsed.label)
+    }
+
+    private func nozzleRow(_ family: NozzleFamily) -> some View {
+        Menu {
+            Picker("Nozzle", selection: Binding(
+                get: { presets.selection.machine },
+                set: { requestSelect(.machine, $0) }
+            )) {
+                ForEach(family.variants) { variant in
+                    Text("\(variant.label) mm").tag(variant.presetName)
+                }
+            }
+        } label: {
+            LabeledContent {
+                HStack(spacing: 4) {
+                    Text("\(family.currentLabel) mm")
+                        .foregroundStyle(.secondary)
+                    Image(systemName: "chevron.up.chevron.down")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(.tertiary)
+                }
+            } label: {
+                Label("Nozzle", systemImage: "circle.circle")
+            }
+        }
+        .disabled(presets.isSelecting)
     }
 
     private var processActionsSection: some View {
@@ -610,7 +733,9 @@ struct PrepareTabView: View {
         SettingsPagesSections(
             kind: kind,
             filter: kindModes[kind] ?? .simple,
-            search: search,
+            // Search routes through the cross-kind results list above; the
+            // page itself always renders unfiltered here.
+            search: "",
             externalSelectedPage: Binding(
                 get: { activePage },
                 set: { activePage = $0 }

@@ -927,6 +927,34 @@ final class DocumentStore {
         clearPreview()
     }
 
+    /// Desktop "Add SVG": flat raised SVG object at the plate center.
+    func addSVGObject(from source: URL, depthMM: Double) async {
+        guard let plater, !isBusy else {
+            status.report(.document, "add svg blocked: document is busy")
+            return
+        }
+        isMutating = true
+        let center = currentPlateCenter ?? SIMD2<Double>(0, 0)
+        let result = await BackgroundWork.run(operation: "add svg object") {
+            let sandbox = try EnginePaths.copyImportIntoSandbox(source, kind: "model")
+            return try plater.addSVGObject(
+                path: sandbox.path, depthMM: depthMM, bedCenter: center)
+        }
+        isMutating = false
+        switch result {
+        case .success(let mutation):
+            install(mutation.snapshot)
+            if let id = mutation.createdObjectID,
+               let instance = mutation.snapshot.object(id: id)?.instances.first?.id {
+                selection = InstanceSelection(objectID: id, instanceID: instance)
+            }
+            frameRequest += 1
+            status.report(.document, "SVG added")
+        case .failure(let failure):
+            status.report(.document, failure: failure)
+        }
+    }
+
     // MARK: Object shells + COG (ABI v37)
 
     /// Hull + centroid of every object (IMPL-B contract shim, coordinator

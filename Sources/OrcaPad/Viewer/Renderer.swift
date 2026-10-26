@@ -124,6 +124,8 @@ final class Renderer: NSObject, MTKViewDelegate {
     // Scene objects (GPU buffers + CPU picking copies + instance matrices)
     private struct RenderObject {
         let objectID: ObjectID
+        /// Desktop object-list name (3D labels, GLCanvas3D.cpp Labels::render).
+        let name: String
         let meshRevision: UInt64
         let vb: MTLBuffer
         let ib: MTLBuffer
@@ -174,6 +176,176 @@ final class Renderer: NSObject, MTKViewDelegate {
     /// in the active layer, colored by paint state.
     private var paintOverlay: [VertexPC] = []
     private var paintOverlayCount = 0
+
+    // MARK: Viewer options (Plate View menu, desktop canvas "hamburger"
+    // view menu parity — GLCanvas3D.cpp:9205-9257: Overhangs / Perspective /
+    // Gridlines / Labels; MSAA + FPS readout are OrcaPad quality options)
+
+    /// Overhang highlighting (desktop "Overhangs" toggle,
+    /// GLCanvas3D.cpp:9205 -> show_view3D_overhang -> m_slope.globalUse,
+    /// GLCanvas3D.hpp:1144). Threshold in degrees from vertical (board
+    /// default 55; the desktop painter gizmo exposes a 0..90 slider,
+    /// GLGizmoFdmSupports.cpp:402, and derives it from support settings in
+    /// 3DScene.cpp:972+ otherwise).
+    private var overhangEnabled = false
+    private var overhangThresholdDegrees: Double = 55
+    /// World-space overhang triangles (per instance, current plate only),
+    /// rebuilt per revision/threshold change — never per frame.
+    private var overhangBuffer: MTLBuffer?
+    private var overhangVertexCount = 0
+
+    /// Bed gridlines visibility (desktop "Gridlines" toggle,
+    /// GLCanvas3D.cpp:9245 -> GUI_App.hpp:382 toggle_show_plate_gridlines;
+    /// the plate draw itself is gated at PartPlate.cpp:3383).
+    private var gridlinesVisible = true
+
+    /// 3D object labels (desktop "Labels" toggle, GLCanvas3D.cpp:9253 ->
+    /// Plater.cpp:4494 show_view3D_labels). Published to the SwiftUI
+    /// overlay through ObjectLabelCenter each frame while on.
+    private var labelsEnabled = false
+
+    /// FPS readout visibility (OrcaPad viewer quality option; the desktop
+    /// GLCanvas3D FPS counter is debug-only, GLCanvas3D.hpp:400-417).
+    private var fpsVisible = true
+
+    /// Desktop overhang tint: the slope shader mixes the fragment color
+    /// 50/50 with LightRed at alpha 0.8 (gouraud.fs:147-151 / phong.fs:197,
+    /// `world_normal_z < slope.normal_z - EPSILON`). OrcaPad draws a flat
+    /// translucent red overlay pass instead (no MSL change).
+    private static let overhangColor = SIMD4<Float>(0.95, 0.30, 0.25, 0.55)
+
+    func setOverhang(enabled: Bool, thresholdDegrees: Double) {
+        let thresholdChanged = thresholdDegrees != overhangThresholdDegrees
+        overhangThresholdDegrees = thresholdDegrees
+        if enabled != overhangEnabled {
+            overhangEnabled = enabled
+            rebuildOverhang()
+        } else if enabled, thresholdChanged {
+            rebuildOverhang()
+        }
+    }
+
+    func setGridlinesVisible(_ visible: Bool) {
+        gridlinesVisible = visible
+    }
+
+    func setLabelsEnabled(_ enabled: Bool) {
+        labelsEnabled = enabled
+        if !enabled {
+            ObjectLabelCenter.shared.update([])
+        }
+    }
+
+    func setFPSVisible(_ visible: Bool) {
+        guard visible != fpsVisible else { return }
+        fpsVisible = visible
+        publishStatus()
+    }
+
+    /// Recomputes the overhang overlay from the applied scene: for every
+    /// instance on the CURRENT PLATE, each merged-mesh facet whose world
+    /// normal points further down than the threshold slope gets a red
+    /// translucent triangle. Desktop test (engine z-up, z = viewer y):
+    /// slope.normal_z = -cos(90° - θ) = -sin θ, facet overhang iff
+    /// normal.z < slope.normal_z (GLCanvas3D.hpp Slope::set_normal_angle,
+    /// 3DScene.hpp:531-532) — in the viewer frame: n·(0,-1,0) > sin θ.
+    private func rebuildOverhang() {
+        overhangBuffer = nil
+        overhangVertexCount = 0
+        guard overhangEnabled else { return }
+        let limit = Float(sin(overhangThresholdDegrees * .pi / 180))
+        var vertices: [VertexPC] = []
+        vertices.reserveCapacity(256)
+        for obj in objects {
+            let positions = obj.pickPositions
+            let indices = obj.pickIndices
+            let triangleCount = indices.count / 3
+            guard triangleCount > 0 else { continue }
+            for inst in obj.instances where inst.plate == currentPlateIndex {
+                let model = inst.model
+                func world(_ p: SIMD3<Float>) -> SIMD3<Float> {
+                    let w = model * SIMD4(p.x, p.y, p.z, 1)
+                    return SIMD3(w.x, w.y, w.z)
+                }
+                for triangle in 0..<triangleCount {
+                    let a = positions[Int(indices[triangle * 3])]
+                    let b = positions[Int(indices[triangle * 3 + 1])]
+                    let c = positions[Int(indices[triangle * 3 + 2])]
+                    let wa = world(a), wb = world(b), wc = world(c)
+                    // World geometric normal from the transformed edges; a
+                    // mirrored (left-handed) matrix inverts winding, so the
+                    // outward normal flips with it.
+                    var normal = simd_cross(wb - wa, wc - wa)
+                    let length = simd_length(normal)
+                    guard length > 1e-12 else { continue }
+                    normal = normal / length
+                    if inst.mirrored { normal = -normal }
+                    guard -normal.y > limit else { continue }
+                    let color = Renderer.overhangColor
+                    vertices.append(VertexPC(position: wa, color: color))
+                    vertices.append(VertexPC(position: wb, color: color))
+                    vertices.append(VertexPC(position: wc, color: color))
+                }
+            }
+        }
+        guard !vertices.isEmpty else { return }
+        guard let buffer = device.makeBuffer(
+            bytes: vertices,
+            length: MemoryLayout<VertexPC>.stride * vertices.count,
+            options: .storageModeShared
+        ) else {
+            fail("overhang overlay buffer allocation failed")
+            return
+        }
+        buffer.label = "overhang-overlay"
+        overhangBuffer = buffer
+        overhangVertexCount = vertices.count
+    }
+
+    /// Publishes per-instance name chips to the SwiftUI overlay (desktop
+    /// GLCanvas3D::Labels::render, GLCanvas3D.cpp:743-870: current-plate
+    /// instances only, label = object name + " (N)" for multi-instance
+    /// objects, anchored at the projected world-bbox CENTER, off-screen
+    /// labels skipped, selected ones highlighted).
+    private func publishLabels(in view: MTKView) {
+        guard labelsEnabled else { return }
+        var labels: [ObjectLabel] = []
+        for obj in objects {
+            guard obj.instances.contains(where: { $0.plate == currentPlateIndex })
+            else { continue }
+            let suffix = obj.instances.count > 1
+            for (instanceIndex, inst) in obj.instances.enumerated()
+            where inst.plate == currentPlateIndex {
+                // Instance world bbox: the packed object bbox corners under
+                // the instance model matrix (same pattern as frameScene).
+                var bbMin = SIMD3<Float>(repeating: .infinity)
+                var bbMax = SIMD3<Float>(repeating: -.infinity)
+                for sx in [obj.bboxMin.x, obj.bboxMax.x] {
+                    for sy in [obj.bboxMin.y, obj.bboxMax.y] {
+                        for sz in [obj.bboxMin.z, obj.bboxMax.z] {
+                            let w = inst.model * SIMD4(sx, sy, sz, 1)
+                            bbMin = simd_min(bbMin, SIMD3(w.x, w.y, w.z))
+                            bbMax = simd_max(bbMax, SIMD3(w.x, w.y, w.z))
+                        }
+                    }
+                }
+                let center = (bbMin + bbMax) * 0.5
+                guard let point = projectToScreen(center, in: view),
+                    point.x >= 0, point.x <= view.bounds.width,
+                    point.y >= 0, point.y <= view.bounds.height
+                else { continue }
+                labels.append(ObjectLabel(
+                    instanceID: inst.instanceID,
+                    text: suffix
+                        ? "\(obj.name) (\(instanceIndex + 1))"
+                        : obj.name,
+                    point: point,
+                    selected: inst.selected
+                ))
+            }
+        }
+        ObjectLabelCenter.shared.update(labels)
+    }
 
     // Object shells + COG overlay (Plate View menu, board §wave-b/5):
     // per-object convex-hull wireframe + volume-centroid marker, published
@@ -789,6 +961,7 @@ final class Renderer: NSObject, MTKViewDelegate {
             let outlineWidth = max(0.12, min(extent * 0.006, 2.0))
             rebuilt.append(RenderObject(
                 objectID: sceneObject.id,
+                name: sceneObject.name,
                 meshRevision: sceneObject.mesh.revision,
                 vb: vertexBuffer,
                 ib: indexBuffer,
@@ -874,6 +1047,9 @@ final class Renderer: NSObject, MTKViewDelegate {
                 (objectID: object.objectID, instanceID: $0.instanceID)
             }
         }
+        // Overhang overlay follows the scene (new meshes, transforms and
+        // plate assignment all move facets between slope classes).
+        rebuildOverhang()
         logger.notice(
             "scene revision \(scene.revision.rawValue): \(rebuilt.count) object(s)"
         )
@@ -978,6 +1154,9 @@ final class Renderer: NSObject, MTKViewDelegate {
     /// Returns top-down RGBA8 rows. Uses this renderer's own pipelines, so
     /// the offscreen formats are exactly the canvas formats (BGRA8, depth32,
     /// 4× MSAA). Main-thread confined like everything in the renderer.
+    /// NOTE: the sole caller (ThumbnailService) always builds the renderer
+    /// from its own 4× headless view — independent of the Plate View-menu
+    /// MSAA toggle, which only affects the live canvas' pipelines.
     func renderThumbnail(size: Int, colorFormat: MTLPixelFormat) throws -> [UInt8] {
         var bbMin = SIMD3<Float>(repeating: .infinity)
         var bbMax = SIMD3<Float>(repeating: -.infinity)
@@ -1535,16 +1714,19 @@ final class Renderer: NSObject, MTKViewDelegate {
         let aspect = Float(view.drawableSize.width / max(view.drawableSize.height, 1))
         let viewProj = camera.projection(aspect: aspect) * camera.viewMatrix
 
-        // Grid (bed)
-        lineUniforms.mvp = viewProj
-        encoder.pushDebugGroup("bed")
-        encoder.setRenderPipelineState(linePipeline)
-        encoder.setDepthStencilState(depthState)
-        encoder.setVertexBuffer(gridVB, offset: 0, index: 0)
-        var lu = lineUniforms
-        encoder.setVertexBytes(&lu, length: MemoryLayout<LineUniforms>.stride, index: 1)
-        encoder.drawPrimitives(type: .line, vertexStart: 0, vertexCount: gridVertexCount)
-        encoder.popDebugGroup()
+        // Grid (bed) — desktop "Gridlines" toggle skips the whole plate
+        // grid draw (PartPlate.cpp:3383 gates the plate grid the same way).
+        if gridlinesVisible {
+            lineUniforms.mvp = viewProj
+            encoder.pushDebugGroup("bed")
+            encoder.setRenderPipelineState(linePipeline)
+            encoder.setDepthStencilState(depthState)
+            encoder.setVertexBuffer(gridVB, offset: 0, index: 0)
+            var lu = lineUniforms
+            encoder.setVertexBytes(&lu, length: MemoryLayout<LineUniforms>.stride, index: 1)
+            encoder.drawPrimitives(type: .line, vertexStart: 0, vertexCount: gridVertexCount)
+            encoder.popDebugGroup()
+        }
 
         // Inactive plate outlines (ABI v27): dimmed rectangles beside the
         // rendered bed, drawn on top of the grid but under the objects.
@@ -1701,6 +1883,24 @@ final class Renderer: NSObject, MTKViewDelegate {
             encoder.popDebugGroup()
         }
 
+        // Overhang highlighting (View menu): translucent red world-space
+        // triangles over the opaque objects — the paint-overlay pass
+        // pattern (pcBlendPipeline, depth-tested, not depth-writing).
+        if overhangVertexCount > 0, let overhangBuffer {
+            encoder.pushDebugGroup("overhang")
+            encoder.setRenderPipelineState(pcBlendPipeline)
+            encoder.setDepthStencilState(translucentDepthState)
+            var overhangUniforms = LineUniforms(mvp: viewProj)
+            encoder.setVertexBytes(
+                &overhangUniforms,
+                length: MemoryLayout<LineUniforms>.stride, index: 1)
+            encoder.setVertexBuffer(overhangBuffer, offset: 0, index: 0)
+            encoder.drawPrimitives(
+                type: .triangle, vertexStart: 0,
+                vertexCount: overhangVertexCount)
+            encoder.popDebugGroup()
+        }
+
         // Painted-facet overlay (ABI v36): translucent world-space triangles
         // over the opaque object, depth-tested like desktop painter gizmos.
         if paintOverlayCount > 0 {
@@ -1854,6 +2054,9 @@ final class Renderer: NSObject, MTKViewDelegate {
         commandBuffer.present(drawable)
         commandBuffer.commit()
 
+        // 3D object labels follow the settled camera of THIS frame.
+        publishLabels(in: view)
+
         trackFPS()
     }
 
@@ -1873,8 +2076,10 @@ final class Renderer: NSObject, MTKViewDelegate {
     private func publishStatus() {
         if let err = status.pipelineError {
             onStatus("Metal: ERROR — \(err)")
-        } else {
+        } else if fpsVisible {
             onStatus("Metal: OK · \(status.fps) fps · MSL runtime-compiled")
+        } else {
+            onStatus("Metal: OK · MSL runtime-compiled")
         }
     }
 }

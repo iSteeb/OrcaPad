@@ -139,6 +139,7 @@ void orca_result_dispose(orca_result *result) {
 #include "libslic3r/CutUtils.hpp"
 #include "libslic3r/TriangleSelector.hpp"
 #include "libslic3r/Emboss.hpp"
+#include "libslic3r/NSVGUtils.hpp"
 #include "libslic3r/EmbossShape.hpp"
 #include "libslic3r/TextConfiguration.hpp"
 
@@ -3114,6 +3115,98 @@ orca_result orca_plater_add_text_object(orca_plater *plater,
         if (!instance)
             return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
                                 "engine did not create the text instance");
+        instance->set_offset(Slic3r::Vec3d(bed_center_x, bed_center_y, 0.0));
+        object->ensure_on_bed(false);
+        if (!orcapad_register_object(*plater, *object))
+            return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
+                                "engine returned an invalid or reused object ID");
+        *out_object_id = static_cast<orca_object_id>(object->id().id);
+        *out_revision = mutation.commit();
+        return orcapad_ok();
+    });
+}
+
+/// Desktop "Add SVG" v1 (ABI v38): NSVGUtils parse+tessellate -> Emboss
+/// polygons2model, standalone raised object (same placement as text).
+orca_result orca_plater_add_svg_object(orca_plater *plater,
+                                       const char *svg_path,
+                                       double depth_mm,
+                                       double bed_center_x,
+                                       double bed_center_y,
+                                       orca_object_id *out_object_id,
+                                       orca_revision *out_revision) {
+    constexpr const char *operation = "orca_plater_add_svg_object";
+    if (out_object_id) *out_object_id = 0;
+    if (out_revision) *out_revision = 0;
+    if (!plater)
+        return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation,
+                            "plater handle is null");
+    if (!svg_path || !svg_path[0] || !out_object_id || !out_revision)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "svg path or output pointer is empty");
+    if (!std::isfinite(depth_mm) || depth_mm <= 0.0)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "depth must be positive");
+    struct stat probe;
+    if (stat(svg_path, &probe) != 0)
+        return orcapad_fail(ORCA_STATUS_IO_FAILURE, operation,
+                            "svg file is not accessible");
+    return orcapad_guard(operation, [&]() -> orca_result {
+        if (!orcapad_revision_available(*plater))
+            return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
+                                "document revision is exhausted");
+        // 1) parse (mm) + tessellate every path (desktop NSVGLineParams
+        //    defaults: tolerance 10, max level 10)
+        Slic3r::NSVGimage_ptr image =
+            Slic3r::nsvgParseFromFile(svg_path, "mm", 96.0f);
+        if (!image)
+            return orcapad_fail(ORCA_STATUS_INVALID_MODEL, operation,
+                                "the SVG could not be parsed");
+        Slic3r::ExPolygonsWithIds shapes_with_ids =
+            Slic3r::create_shape_with_ids(*image, Slic3r::NSVGLineParams(10.0));
+        Slic3r::ExPolygons shapes;
+        for (const auto &entry : shapes_with_ids)
+            shapes.insert(shapes.end(), entry.expoly.begin(), entry.expoly.end());
+        if (shapes.empty())
+            return orcapad_fail(ORCA_STATUS_INVALID_MODEL, operation,
+                                "the SVG contains no shapes");
+
+        // 2) extrude — tessellated shapes are in Slic3r SCALED integer
+        // coords (1e6 per mm), so apply the text pipeline's recipe:
+        // ProjectZ(depth/scale) with transform Scaling(scale).
+        const double scale = SCALING_FACTOR;  // scaled units -> mm (libslic3r.h)
+        auto project_z =
+            std::make_unique<Slic3r::Emboss::ProjectZ>(depth_mm / scale);
+        Slic3r::Transform3d transform =
+            Eigen::Translation<double, 3>(0.0, 0.0, -0.015) *
+            Eigen::Scaling(scale);
+        Slic3r::Emboss::ProjectTransform projection(std::move(project_z),
+                                                    transform);
+        Slic3r::TriangleMesh mesh(
+            Slic3r::Emboss::polygons2model(shapes, projection));
+        if (mesh.empty() || mesh.its.vertices.empty())
+            return orcapad_fail(ORCA_STATUS_INVALID_MODEL, operation,
+                                "the SVG mesh came out empty");
+
+        // 3) add as an object resting on the bed
+        OrcapadMutation mutation(*plater, "Add SVG");
+        Slic3r::ModelObject *object = plater->model.add_object();
+        if (!object)
+            return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
+                                "engine did not create the svg object");
+        object->name = boost::filesystem::path(svg_path).stem().string();
+        Slic3r::ModelVolume *volume = object->add_volume(std::move(mesh));
+        if (!volume)
+            return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
+                                "engine did not create the svg volume");
+        volume->name = object->name;
+        volume->source.input_file = svg_path;
+        volume->source.is_from_builtin_objects = true;
+        object->center_around_origin();
+        Slic3r::ModelInstance *instance = object->add_instance();
+        if (!instance)
+            return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
+                                "engine did not create the svg instance");
         instance->set_offset(Slic3r::Vec3d(bed_center_x, bed_center_y, 0.0));
         object->ensure_on_bed(false);
         if (!orcapad_register_object(*plater, *object))

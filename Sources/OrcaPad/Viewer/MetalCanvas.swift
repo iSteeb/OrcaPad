@@ -34,6 +34,21 @@ struct SceneSync {
     var filamentColors: [SIMD4<Float>] = []
     /// Painted-facet overlay (painter gizmo, active layer): world triangles.
     var paintTriangles: [EnginePlater.PaintTriangle] = []
+    /// Viewer options (Plate View menu; desktop canvas view menu parity,
+    /// GLCanvas3D.cpp:9205-9257). Session state, like the camera.
+    /// Overhang highlighting: red translucent facets beyond the threshold
+    /// angle from vertical (desktop "Overhangs" + slope shader).
+    var overhangEnabled = false
+    var overhangThresholdDegrees: Double = 55
+    /// Orthographic camera (desktop "Perspective" toggle,
+    /// GLCanvas3D.cpp:9228; false here = ortho).
+    var cameraPerspective = true
+    /// 3D object name labels (desktop "Labels", GLCanvas3D.cpp:9253).
+    var showLabels = false
+    /// Bed gridlines (desktop "Gridlines", GLCanvas3D.cpp:9245).
+    var showGridlines = true
+    /// FPS readout in the renderer status line (OrcaPad quality option).
+    var showFPS = true
 }
 
 /// Manipulation callbacks from the canvas gestures (engine-space units).
@@ -84,6 +99,10 @@ struct MetalCanvas: UIViewRepresentable {
     let onStatus: (String) -> Void
     var scene: SceneSync
     let manipulation: CanvasManipulation
+    /// MSAA (OrcaPad viewer quality option): sets the MTKView sample count
+    /// at CREATION — pipelines are built for the view's count, so the
+    /// Plate tab rebuilds the canvas (`.id(...)`) when this flips.
+    var msaa: Bool = true
 
     func makeCoordinator() -> Coordinator {
         Coordinator()
@@ -92,7 +111,7 @@ struct MetalCanvas: UIViewRepresentable {
     func makeUIView(context: Context) -> MTKView {
         let view = MTKView(frame: .zero, device: MTLCreateSystemDefaultDevice())
         view.depthStencilPixelFormat = .depth32Float
-        view.sampleCount = 4
+        view.sampleCount = msaa ? 4 : 1
         view.clearColor = MTLClearColor(
             red: 0.075,
             green: 0.078,
@@ -115,6 +134,16 @@ struct MetalCanvas: UIViewRepresentable {
         coordinator.renderer?.setFlattenPlanes(scene.flattenPlanes)
         coordinator.renderer?.setFlattenHighlight(scene.flattenHighlight)
         coordinator.renderer?.setFilamentColors(scene.filamentColors)
+        // Viewer options (View menu): cheap derived state, applied every
+        // update; each setter only recomputes what actually changed.
+        coordinator.renderer?.setOverhang(
+            enabled: scene.overhangEnabled,
+            thresholdDegrees: scene.overhangThresholdDegrees
+        )
+        coordinator.renderer?.camera.isOrthographic = !scene.cameraPerspective
+        coordinator.renderer?.setLabelsEnabled(scene.showLabels)
+        coordinator.renderer?.setGridlinesVisible(scene.showGridlines)
+        coordinator.renderer?.setFPSVisible(scene.showFPS)
         let needsSceneApply =
             scene.snapshot.documentID != coordinator.lastDocumentID ||
             scene.snapshot.revision != coordinator.lastDocumentRevision ||

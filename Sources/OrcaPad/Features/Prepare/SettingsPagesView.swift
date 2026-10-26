@@ -474,25 +474,62 @@ struct SettingsEditorRowView: View {
 
     private var multilineSheet: some View {
         NavigationStack {
-            TextEditor(text: $multilineDraft)
-                .font(.callout.monospaced())
-                .autocorrectionDisabled()
-                .textInputAutocapitalization(.never)
-                .padding(8)
-                .navigationTitle(row.label)
-                .navigationBarTitleDisplayMode(.inline)
-                .toolbar {
-                    ToolbarItem(placement: .cancellationAction) {
-                        Button("Cancel") { editingMultiline = false }
-                    }
-                    ToolbarItem(placement: .confirmationAction) {
-                        Button("Save") {
-                            let serialized = ConfigStringCodec.escape(multilineDraft)
-                            if serialized != row.value { onCommit(serialized) }
-                            editingMultiline = false
+            VStack(spacing: 0) {
+                TextEditor(text: $multilineDraft)
+                    .font(.callout.monospaced())
+                    .autocorrectionDisabled()
+                    .textInputAutocapitalization(.never)
+                    .padding(8)
+                Divider()
+                // Placeholder insertion note (see insertPlaceholder).
+                Text("Placeholders are inserted at the end of the text.")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 4)
+            }
+            .navigationTitle(row.label)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { editingMultiline = false }
+                }
+                // Board cycle-0.15: placeholder browser — common {tokens}
+                // grouped by topic, one tap inserts.
+                ToolbarItem(placement: .primaryAction) {
+                    Menu {
+                        ForEach(GcodePlaceholders.groups) { group in
+                            Menu(group.title) {
+                                ForEach(group.items) { item in
+                                    Button {
+                                        insertPlaceholder(item.token)
+                                    } label: {
+                                        Text("\(item.token) — \(item.summary)")
+                                    }
+                                }
+                            }
                         }
+                    } label: {
+                        Label("Placeholder", systemImage: "curlybraces")
                     }
                 }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Save") {
+                        let serialized = ConfigStringCodec.escape(multilineDraft)
+                        if serialized != row.value { onCommit(serialized) }
+                        editingMultiline = false
+                    }
+                }
+            }
         }
+    }
+
+    /// Inserts a placeholder token at the END of the draft: SwiftUI's
+    /// TextEditor exposes no cursor/selection position on iOS 17 (the
+    /// deployment target), so the document approximation from the spec is
+    /// used — the user moves the token afterwards if needed.
+    private func insertPlaceholder(_ token: String) {
+        multilineDraft.append(token)
     }
 }
