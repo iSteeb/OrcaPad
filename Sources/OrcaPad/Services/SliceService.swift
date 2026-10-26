@@ -53,6 +53,18 @@ final class SliceService {
     }
 
     func run(document: DocumentStore, presets: PresetStore) async {
+        guard presets.hasListedMachine else {
+            // Fresh install: the "- default -" printer slices with raw
+            // engine defaults (relative E, no per-layer reset) — refuse with
+            // directions instead (desktop shows the ConfigWizard first).
+            let failure = AppFailure.invariant(
+                operation: "slice",
+                diagnostic: "select a printer first: Prepare \u{25b8} Printer, then slice"
+            )
+            lastFailure = failure
+            status.report(.slice, failure: failure)
+            return
+        }
         guard let input = document.beginSlicing() else {
             status.report(.slice, "slice blocked: document is not ready or is busy")
             return
@@ -158,6 +170,15 @@ final class SliceService {
     /// Desktop "Slice all": every non-empty plate in order into ONE G-code
     /// file with `; ORCA_PLATE` markers between the plate sections.
     func runAll(document: DocumentStore, presets: PresetStore) async {
+        guard presets.hasListedMachine else {
+            let failure = AppFailure.invariant(
+                operation: "slice all",
+                diagnostic: "select a printer first: Prepare \u{25b8} Printer, then slice"
+            )
+            lastFailure = failure
+            status.report(.slice, failure: failure)
+            return
+        }
         guard let input = document.beginSlicing() else {
             status.report(.slice, "slice blocked: document is not ready or is busy")
             return
