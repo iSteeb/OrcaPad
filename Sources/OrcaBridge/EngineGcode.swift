@@ -232,4 +232,201 @@ public enum EngineGcode {
             extruders: extruders
         )
     }
+
+    // MARK: Combined slice-all G-code (plate sections)
+
+    /// One `; ORCA_PLATE` section of a combined slice-all G-code: the
+    /// document plate it was sliced from and the layer range it occupies in
+    /// the concatenated toolpath.
+    public struct PlateSection: Sendable, Equatable {
+        /// Document plate index, 0-based (the marker line writes it 1-based).
+        public let plateIndex: Int
+        public let name: String
+        public let layerRange: Range<Int>
+        public let estimatedSeconds: Float
+    }
+
+    /// Loads a combined slice-all G-code: splits it at the `; ORCA_PLATE
+    /// ... begin/end` markers, parses every section through the engine
+    /// processor (each section is a complete, self-contained per-plate
+    /// G-code), shifts it back to world coordinates with `origins` (document
+    /// plate index -> plate origin), and concatenates the toolpaths. Without
+    /// this, every plate's plate-relative coordinates would stack onto the
+    /// bed origin in the viewer. Section temp files land in the system temp
+    /// directory (OS-managed) and are not tracked.
+    public static func loadPlateSections(
+        path: String,
+        origins: [Int: SIMD3<Float>]
+    ) throws -> (toolpath: GcodeToolpath, sections: [PlateSection]) {
+        let operation = "load gcode plate sections"
+        let url = URL(fileURLWithPath: path)
+        let text: String
+        do {
+            text = try String(contentsOf: url, encoding: .utf8)
+        } catch {
+            throw BridgeError.local(
+                .ioFailure, operation: operation,
+                diagnostic: "could not read the combined G-code: \(error.localizedDescription)"
+            )
+        }
+
+        // 1) split at the marker lines (marker-safe names: no quotes/newlines)
+        struct RawSection {
+            let plateIndex: Int
+            let name: String
+            var lines: [String]
+        }
+        var open: RawSection?
+        var parsed: [RawSection] = []
+        for lineSubsequence in text.split(separator: "\n", omittingEmptySubsequences: false) {
+            var line = String(lineSubsequence)
+            if line.hasSuffix("\r") { line.removeLast() }
+            guard line.hasPrefix("; ORCA_PLATE") else {
+                open?.lines.append(line)
+                continue
+            }
+            if line.hasSuffix(" begin"), let begin = parsePlateBeginMarker(line) {
+                guard open == nil else {
+                    throw BridgeError.local(
+                        .invalidModel, operation: operation,
+                        diagnostic: "plate marker begins inside a plate section")
+                }
+                open = RawSection(plateIndex: begin.index, name: begin.name, lines: [])
+            } else if line.hasSuffix(" end") {
+                guard let section = open else {
+                    throw BridgeError.local(
+                        .invalidModel, operation: operation,
+                        diagnostic: "plate marker ends without a begin")
+                }
+                parsed.append(section)
+                open = nil
+            } else {
+                open?.lines.append(line)
+            }
+        }
+        guard open == nil else {
+            throw BridgeError.local(
+                .invalidModel, operation: operation,
+                diagnostic: "the last plate section has no end marker")
+        }
+        guard !parsed.isEmpty else {
+            throw BridgeError.local(
+                .invalidModel, operation: operation,
+                diagnostic: "the combined G-code contains no plate markers")
+        }
+
+        // 2) parse every section through the processor and concatenate
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("gcode-sections", isDirectory: true)
+        do {
+            try FileManager.default.createDirectory(
+                at: directory, withIntermediateDirectories: true)
+        } catch {
+            throw BridgeError.local(
+                .ioFailure, operation: operation,
+                diagnostic: "could not create the gcode section temp dir: \(error.localizedDescription)"
+            )
+        }
+
+        var segments: [ToolpathSegment] = []
+        var layers: [ToolpathLayer] = []
+        var seconds: Float = 0
+        var stealthSeconds: Float = 0
+        var printableHeight: Float = 0
+        var extruders: [ExtruderStats] = []
+        var sections: [PlateSection] = []
+        for raw in parsed {
+            let sectionURL = directory.appendingPathComponent(
+                "plate-\(raw.plateIndex)-\(UUID().uuidString).gcode")
+            do {
+                try Data(raw.lines.joined(separator: "\n").utf8).write(to: sectionURL)
+            } catch {
+                throw BridgeError.local(
+                    .ioFailure, operation: operation,
+                    diagnostic: "could not write a gcode section: \(error.localizedDescription)"
+                )
+            }
+            let origin = origins[raw.plateIndex] ?? .zero
+            let toolpath = try loadToolpath(path: sectionURL.path, origin: origin)
+            let layerBase = layers.count
+            layers.append(contentsOf: toolpath.layers.map { layer in
+                ToolpathLayer(
+                    z: layer.z,
+                    firstSegment: layer.firstSegment + segments.count,
+                    segmentCount: layer.segmentCount,
+                    timeSeconds: layer.timeSeconds
+                )
+            })
+            segments.append(contentsOf: toolpath.segments)
+            seconds += toolpath.estimatedSeconds
+            stealthSeconds += toolpath.estimatedStealthSeconds
+            printableHeight = max(printableHeight, toolpath.printableHeight)
+            extruders = Self.mergeExtruders(extruders, toolpath.extruders)
+            sections.append(PlateSection(
+                plateIndex: raw.plateIndex,
+                name: raw.name,
+                layerRange: layerBase..<(layerBase + toolpath.layers.count),
+                estimatedSeconds: toolpath.estimatedSeconds
+            ))
+        }
+        return (
+            GcodeToolpath(
+                segments: segments,
+                layers: layers,
+                estimatedSeconds: seconds,
+                estimatedStealthSeconds: stealthSeconds,
+                printableHeight: printableHeight,
+                extruders: extruders
+            ),
+            sections
+        )
+    }
+
+    /// Combines per-extruder legend stats of concatenated plate sections:
+    /// volumes sum; diameter/density/cost come from a section that actually
+    /// extruded with that tool (the first with a non-zero volume).
+    private static func mergeExtruders(
+        _ base: [ExtruderStats], _ more: [ExtruderStats]
+    ) -> [ExtruderStats] {
+        guard !base.isEmpty else { return more }
+        guard !more.isEmpty else { return base }
+        var merged = base
+        for index in more.indices {
+            guard index < merged.count else {
+                merged.append(more[index])
+                continue
+            }
+            let a = merged[index]
+            let b = more[index]
+            let pick: ExtruderStats = b.volumeMM3 > 0 ? b : a
+            merged[index] = ExtruderStats(
+                filamentDiameterMM: pick.filamentDiameterMM,
+                densityGCm3: pick.densityGCm3,
+                costPerKG: pick.costPerKG,
+                volumeMM3: a.volumeMM3 + b.volumeMM3
+            )
+        }
+        return merged
+    }
+
+    /// `; ORCA_PLATE index=2 total=3 name="Benchy plate" begin` →
+    /// (document plate index 0-based, plate name).
+    private static func parsePlateBeginMarker(_ line: String) -> (index: Int, name: String)? {
+        let fields = line.split(separator: " ", omittingEmptySubsequences: true)
+        var index: Int?
+        var name = ""
+        for field in fields {
+            if field.hasPrefix("index="),
+               let value = Int(field.dropFirst("index=".count)) {
+                index = value - 1  // marker is 1-based
+            }
+            if field.hasPrefix("name=\"") {
+                var value = String(field.dropFirst("name=\"".count))
+                if value.hasSuffix("\"") { value.removeLast() }
+                name = value
+            }
+        }
+        guard let index, index >= 0 else { return nil }
+        return (index, name)
+    }
 }

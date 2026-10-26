@@ -268,6 +268,11 @@ public final class EnginePlater: @unchecked Sendable {
     public func apply(_ mutation: Mutation, presets: EnginePresets? = nil) throws -> MutationResult {
         try lock.withLock {
             var mutationRevision: UInt64 = 0
+            /// Clipboard copies are document READS: they take no revision and
+            /// must not be checked against the snapshot's (the equality
+            /// guard below would reject every copy on a non-empty document —
+            /// mutationRevision stays 0 while the document is at N ≥ 1).
+            var expectsRevisionAdvance = true
             var createdObjectID: ObjectID?
             var createdInstanceID: InstanceID?
             var createdObjectCount = 0
@@ -558,6 +563,7 @@ public final class EnginePlater: @unchecked Sendable {
                 )
 
             case .copyObject(let objectID):
+                expectsRevisionAdvance = false
                 try BridgeResult.consume(
                     orca_plater_object_copy(handle, objectID.rawValue),
                     operation: "copy object \(objectID)"
@@ -743,7 +749,7 @@ public final class EnginePlater: @unchecked Sendable {
                 createdObjectID = try Self.objectID(rawObjectID, operation: "paste object")
 
             case .deleteObjects(let objectIDs):
-                var rawIDs = objectIDs.map(\.rawValue)
+                let rawIDs = objectIDs.map(\.rawValue)
                 try BridgeResult.consume(
                     rawIDs.withUnsafeBufferPointer { buffer in
                         orca_plater_objects_delete(
@@ -755,7 +761,8 @@ public final class EnginePlater: @unchecked Sendable {
                 )
 
             case .copyObjects(let objectIDs):
-                var rawIDs = objectIDs.map(\.rawValue)
+                expectsRevisionAdvance = false
+                let rawIDs = objectIDs.map(\.rawValue)
                 try BridgeResult.consume(
                     rawIDs.withUnsafeBufferPointer { buffer in
                         orca_plater_objects_copy(
@@ -885,12 +892,14 @@ public final class EnginePlater: @unchecked Sendable {
             }
 
             let scene = try snapshotLocked()
-            guard scene.revision.rawValue == mutationRevision else {
-                throw BridgeError.local(
-                    .internalInvariant,
-                    operation: "apply document mutation",
-                    diagnostic: "Mutation returned revision \(mutationRevision), snapshot returned \(scene.revision.rawValue)"
-                )
+            if expectsRevisionAdvance {
+                guard scene.revision.rawValue == mutationRevision else {
+                    throw BridgeError.local(
+                        .internalInvariant,
+                        operation: "apply document mutation",
+                        diagnostic: "Mutation returned revision \(mutationRevision), snapshot returned \(scene.revision.rawValue)"
+                    )
+                }
             }
             return MutationResult(
                 snapshot: scene,
