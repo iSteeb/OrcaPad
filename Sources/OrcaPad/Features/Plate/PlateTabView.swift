@@ -226,6 +226,7 @@ struct PlateTabView: View {
                 Spacer()
                 bottomBars
                     .padding(.horizontal, 12)
+                    .padding(.bottom, 6)
             }
         }
         .fileImporter(
@@ -541,10 +542,12 @@ struct PlateTabView: View {
                     filamentPresets: environment.presets.filaments
                 )
             }
-            .padding(6)
+            .padding(.vertical, 6)
+            .padding(.horizontal, 6)
         }
         .frame(height: 58)
         .background(.ultraThinMaterial, in: Capsule())
+        .clipShape(Capsule())
     }
 
     private func duplicateSelection() {
@@ -1280,20 +1283,42 @@ private struct FilamentChips: View {
     let filamentPresets: [PresetEntry]
 
     @State private var colourTarget: Int?
+    @State private var presetTarget: Int?
 
     var body: some View {
         HStack(spacing: 6) {
             ForEach(Array(slots.enumerated()), id: \.offset) { index, slot in
-                slotMenu(index: index, slot: slot)
+                slotChip(index: index, slot: slot)
                     .disabled(isBusy)
             }
             Button(action: onAdd) {
                 Image(systemName: "plus.circle.fill")
-                    .font(.title3)
-                    .frame(height: 36)
+                    .font(.title2)
+                    .frame(width: 40, height: 40)
             }
             .disabled(isBusy || slots.count >= 16)
             .accessibilityLabel("Add filament")
+        }
+        .sheet(item: Binding(
+            get: { presetTarget.map { SlotTarget(slot: $0) } },
+            set: { presetTarget = $0?.slot }
+        )) { target in
+            FilamentSlotPickerSheet(
+                slot: target.slot,
+                current: slots[target.slot].presetName,
+                entries: filamentPresets,
+                onSelect: { name in
+                    presetTarget = nil
+                    onSelectPreset(target.slot, name)
+                },
+                onEditColour: { colourTarget = target.slot },
+                onRemove: slots.count > 1 ? {
+                    presetTarget = nil
+                    onRemove(target.slot)
+                } : nil,
+                onFlushVolumes: target.slot == 0 ? onEditFlushVolumes : nil
+            )
+            .presentationDetents([.medium, .large])
         }
         .sheet(item: Binding(
             get: { colourTarget.map { Target(slot: $0) } },
@@ -1306,72 +1331,32 @@ private struct FilamentChips: View {
         }
     }
 
-    @ViewBuilder
-    private func slotMenu(index: Int, slot: EnginePresets.FilamentSlot) -> some View {
-        Menu {
-            presetSection(index: index, slot: slot)
-            Divider()
-            actionsSection(index: index)
-        } label: {
-            slotLabel(slot: slot, index: index)
-        }
-    }
-
-    @ViewBuilder
-    private func presetSection(index: Int, slot: EnginePresets.FilamentSlot) -> some View {
-        ForEach(filamentPresets, id: \.name) { preset in
-            presetButton(index: index, preset: preset, selected: preset.name == slot.presetName)
-        }
-    }
-
-    @ViewBuilder
-    private func presetButton(index: Int, preset: PresetEntry, selected: Bool) -> some View {
+    /// One slot chip: BIG touch target (44pt); tap opens the fast picker
+    /// sheet (the inline Menu with hundreds of presets was slow and tiny).
+    private func slotChip(index: Int, slot: EnginePresets.FilamentSlot) -> some View {
         Button {
-            onSelectPreset(index, preset.name)
+            presetTarget = index
         } label: {
-            if selected {
-                Label(preset.name, systemImage: "checkmark")
-            } else {
-                Text(preset.name)
+            HStack(spacing: 5) {
+                Circle()
+                    .fill(Color(hex: slot.colour) ?? .gray)
+                    .frame(width: 20, height: 20)
+                    .overlay(Circle().strokeBorder(.secondary.opacity(0.5)))
+                Text("\(index + 1)")
+                    .font(.callout.weight(.semibold).monospacedDigit())
             }
+            .frame(height: 44)
+            .padding(.horizontal, 10)
+            .background(Color(.secondarySystemBackground), in: Capsule())
+            .lineLimit(1)
+            .fixedSize()
         }
+        .buttonStyle(.plain)
     }
 
-    @ViewBuilder
-    private func actionsSection(index: Int) -> some View {
-        Button {
-            colourTarget = index
-        } label: {
-            Label("Edit colour…", systemImage: "paintpalette")
-        }
-        if index == 0 {
-            Button {
-                onEditFlushVolumes()
-            } label: {
-                Label("Flushing volumes…", systemImage: "square.grid.3x3.middle.filled")
-            }
-        }
-        if slots.count > 1 {
-            Button(role: .destructive) {
-                onRemove(index)
-            } label: {
-                Label("Remove filament", systemImage: "minus.circle")
-            }
-        }
-    }
-
-    private func slotLabel(slot: EnginePresets.FilamentSlot, index: Int) -> some View {
-        HStack(spacing: 4) {
-            Circle()
-                .fill(Color(hex: slot.colour) ?? .gray)
-                .frame(width: 16, height: 16)
-                .overlay(Circle().strokeBorder(.secondary.opacity(0.5)))
-            Text("\(index + 1)")
-                .font(.caption.weight(.semibold).monospacedDigit())
-        }
-        .frame(height: 36)
-        .padding(.horizontal, 8)
-        .background(Color(.secondarySystemBackground), in: Capsule())
+    private struct SlotTarget: Identifiable {
+        let slot: Int
+        var id: Int { slot }
     }
 
     private struct Target: Identifiable {
@@ -2349,5 +2334,118 @@ struct ChromeToolLabel: View {
         }
         .frame(minWidth: 52, minHeight: 40)
         .contentShape(Rectangle())
+    }
+}
+
+
+/// Fast per-slot filament picker: a searchable, compatibility-filtered
+/// categorized List in a sheet (replaces the slow giant inline Menu).
+private struct FilamentSlotPickerSheet: View {
+    let slot: Int
+    let current: String
+    let entries: [PresetEntry]
+    let onSelect: (String) -> Void
+    var onEditColour: () -> Void = {}
+    var onRemove: (() -> Void)?
+    var onFlushVolumes: (() -> Void)?
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var search = ""
+    @State private var showIncompatible = false
+    @AppStorage("presets.filterCompatible") private var globalFilter = true
+
+    private var visible: [PresetEntry] {
+        var list = globalFilter && !showIncompatible
+            ? entries.filter(\.isCompatible)
+            : entries
+        if !search.isEmpty {
+            list = list.filter {
+                $0.name.localizedCaseInsensitiveContains(search) ||
+                    $0.vendor.localizedCaseInsensitiveContains(search)
+            }
+        }
+        return list
+    }
+
+    private var groups: [(String, [PresetEntry])] {
+        let others = visible.filter { $0.origin != .system }
+        let byVendor = Dictionary(grouping: visible.filter { $0.origin == .system }) {
+            $0.vendor.isEmpty ? "Other" : $0.vendor
+        }
+        var result: [(String, [PresetEntry])] = []
+        if !others.isEmpty { result.append(("Project / user", others)) }
+        result.append(contentsOf: byVendor.map { ($0.key, $0.value) }.sorted { $0.0 < $1.0 })
+        return result
+    }
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section {
+                    HStack(spacing: 8) {
+                        Image(systemName: "magnifyingglass")
+                            .foregroundStyle(.secondary)
+                        TextField("Search filaments", text: $search)
+                            .textFieldStyle(.plain)
+                            .autocorrectionDisabled()
+                            .textInputAutocapitalization(.never)
+                    }
+                    if entries.contains(where: { !$0.isCompatible }) {
+                        Toggle("Show incompatible presets", isOn: $showIncompatible)
+                            .font(.caption)
+                    }
+                    Button {
+                        dismiss()
+                        onEditColour()
+                    } label: {
+                        Label("Edit slot colour…", systemImage: "paintpalette")
+                    }
+                    if let onFlushVolumes {
+                        Button {
+                            dismiss()
+                            onFlushVolumes()
+                        } label: {
+                            Label("Flushing volumes…", systemImage: "square.grid.3x3.middle.filled")
+                        }
+                    }
+                    if let onRemove {
+                        Button(role: .destructive) {
+                            dismiss()
+                            onRemove()
+                        } label: {
+                            Label("Remove filament", systemImage: "minus.circle")
+                        }
+                    }
+                }
+                ForEach(groups, id: \.0) { group in
+                    Section(group.0) {
+                        ForEach(group.1, id: \.name) { entry in
+                            Button {
+                                onSelect(entry.name)
+                            } label: {
+                                HStack {
+                                    if entry.name == current {
+                                        Image(systemName: "checkmark")
+                                            .foregroundStyle(Color.accentColor)
+                                    }
+                                    Text(entry.name)
+                                        .foregroundStyle(entry.isCompatible ? Color.primary : Color.secondary)
+                                        .lineLimit(1)
+                                        .minimumScaleFactor(0.6)
+                                    if !entry.isCompatible {
+                                        Image(systemName: "exclamationmark.triangle")
+                                            .font(.caption2)
+                                            .foregroundStyle(.orange)
+                                    }
+                                    Spacer()
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            .navigationTitle("Slot \(slot + 1) filament")
+            .navigationBarTitleDisplayMode(.inline)
+        }
     }
 }

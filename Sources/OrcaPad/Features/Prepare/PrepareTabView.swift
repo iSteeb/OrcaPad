@@ -13,6 +13,8 @@ struct PrepareTabView: View {
     @State private var activeKind: PresetKind = .process
     @State private var activePage: String?
     @State private var expandedKind: PresetKind?
+    /// Desktop Preferences parity: hide incompatible presets GLOBALLY.
+    @AppStorage("presets.filterCompatible") private var filterCompatible = true
     /// Per-kind mode memory (user spec: simple for printer, advanced for
     /// process, remembered across switches). Persisted per kind.
     @State private var kindModes: [PresetKind: SettingsModeFilter] =
@@ -204,11 +206,73 @@ struct PrepareTabView: View {
                 kindButton(.process, symbol: "slider.horizontal.3", label: "Process")
                 Divider().frame(height: 28)
                 pageChips
+                Spacer(minLength: 4)
+                // Global preset filter (desktop Preferences: hide
+                // incompatible presets everywhere) — persisted.
+                Button {
+                    filterCompatible.toggle()
+                } label: {
+                    ChromeToolLabel(
+                        symbol: filterCompatible ? "line.3.horizontal.decrease.circle.fill" : "line.3.horizontal.decrease.circle",
+                        label: "Filter"
+                    )
+                    .foregroundStyle(filterCompatible ? Color.accentColor : Color.primary)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(filterCompatible
+                    ? "Filtering incompatible presets (tap to show all)"
+                    : "Showing all presets (tap to filter)")
+                Divider().frame(height: 28)
+                slicePillButton
             }
-            .padding(6)
+            .padding(.vertical, 6)
+            .padding(.horizontal, 6)
         }
         .frame(height: 58)
         .background(.ultraThinMaterial, in: Capsule())
+        .clipShape(Capsule())  // scrolled content never overflows the pill
+    }
+
+    /// Slice, first-class in the pill (desktop's top-right primary action).
+    @ViewBuilder
+    private var slicePillButton: some View {
+        if environment.slicing.isSlicing {
+            Button {
+                environment.slicing.cancel()
+            } label: {
+                HStack(spacing: 6) {
+                    ProgressView(
+                        value: Double(environment.slicing.progress?.percent ?? 0),
+                        total: 100
+                    )
+                    .frame(width: 64)
+                    Image(systemName: "xmark.circle.fill")
+                }
+                .frame(height: 44)
+                .padding(.horizontal, 8)
+            }
+            .accessibilityLabel("Cancel slicing")
+        } else {
+            Button {
+                Task {
+                    await environment.slicing.run(
+                        document: environment.document,
+                        presets: presets
+                    )
+                }
+            } label: {
+                ChromeToolLabel(symbol: "scissors", label: "Slice")
+                    .foregroundStyle(Color.white)
+                    .background(Color.accentColor, in: RoundedRectangle(cornerRadius: 10))
+            }
+            .buttonStyle(.plain)
+            .disabled(
+                environment.document.scene?.objects.isEmpty != false ||
+                    environment.document.isBusy ||
+                    presets.isSelecting || !presets.isReady
+            )
+            .opacity(environment.document.scene?.objects.isEmpty != false ? 0.35 : 1)
+        }
     }
 
     private func setMode(_ filter: SettingsModeFilter) {
@@ -345,7 +409,9 @@ struct PrepareTabView: View {
             if expandedKind == kind {
                 InlinePresetList(
                     entries: presetList(for: kind),
-                    selected: currentPreset(for: kind)
+                    selected: currentPreset(for: kind),
+                    filterCompatible: filterCompatible,
+                    globalFilter: filterCompatible
                 ) { name in
                     requestSelect(kind, name)
                     expandedKind = nil
@@ -597,13 +663,16 @@ private struct InlinePresetList: View {
     let selected: String
     /// Desktop preset combos: incompatible entries hidden unless asked.
     var filterCompatible = true
+    /// Global preference passed down (desktop: filter presets everywhere).
+    var globalFilter = true
     let onSelect: (String) -> Void
 
     @State private var search = ""
     @State private var showIncompatible = false
 
     private var visible: [PresetEntry] {
-        var list = filterCompatible && !showIncompatible
+        let filtering = globalFilter ? !showIncompatible : false
+        var list = filtering && entries.contains(where: { !$0.isCompatible })
             ? entries.filter(\.isCompatible)
             : entries
         if !search.isEmpty {

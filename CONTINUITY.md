@@ -158,6 +158,16 @@
 
 ## OUTCOMES
 
+- [2026-10-19] UI round 6: Slice button back (first-class in the Prepare
+  pill, primary style - it died with the hidden nav toolbar); all pills
+  clip content (clipShape Capsule + inner padding - no overflow when
+  scrolling); plate bar bottom gap to the tab bar; filament chips are
+  44pt targets opening a FAST searchable compatibility-filtered picker
+  sheet (the inline Menu with hundreds of buttons was slow + tiny);
+  GLOBAL preset filter toggle in the Prepare pill (desktop Preferences
+  parity, @AppStorage, applies to pill lists + slot picker).
+  release-0.7.3.
+
 - [2026-10-19] UI round 5: page chips only in the pill (internal PageStrip
   hidden when pill-driven), in-content settings search restored (nav bar
   hidden), preset lists searchable + compatibility-filtered (desktop combo

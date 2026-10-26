@@ -207,10 +207,12 @@ struct PreviewTabView: View {
                     }
                 }
             }
-            .padding(6)
+            .padding(.vertical, 6)
+            .padding(.horizontal, 6)
         }
         .frame(height: 58)
         .background(.ultraThinMaterial, in: Capsule())
+        .clipShape(Capsule())
     }
 
     private func barToggle(
