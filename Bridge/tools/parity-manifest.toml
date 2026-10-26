@@ -490,38 +490,43 @@ reason = "uses the CGAL repair closure deferred with mesh boolean (user, 2026-10
 id = "plate.paint-supports"
 area = "plate"
 title = "Support painting"
-status = "deferred"
+status = "partial"
 desktop = ["gizmo:FdmSupports", "kb:Support/Color Painting: adjust pen radius",
            "kb:Support/Color Painting: adjust section position", "pref:Keep painted feature after mesh change"]
+evidence = ["abi:orca_plater_volume_paint_sphere", "abi:orca_plater_volume_paint",
+            "client:struct PaintPanel", "client:case .paint"]
 work = "Bridge + UI"
-reason = "AGENTS.md: painting tools wait until the core loop ships (TriangleSelector.cpp is compiled)"
+gap = "tap-brush painting done (ABI v36: sphere strokes through TriangleSelector into supported_facets, per-state overlay, clear layer, one undo per stroke, slicing consumes them); no seed fill / circle cursor / hole filling / painted-feature-retention-on-mesh-change"
 
 [[feature]]
 id = "plate.paint-seam"
 area = "plate"
 title = "Seam painting"
-status = "deferred"
+status = "partial"
 desktop = ["gizmo:Seam"]
+evidence = ["abi:orca_plater_volume_paint_sphere", "client:struct PaintPanel"]
 work = "Bridge + UI"
-reason = "AGENTS.md: painting tools wait until the core loop ships"
+gap = "enforcer/blocker seam painting done (seam_facets through the paint contract); no angle-based smart fill"
 
 [[feature]]
 id = "plate.paint-fuzzy-skin"
 area = "plate"
 title = "Fuzzy-skin painting"
-status = "deferred"
+status = "partial"
 desktop = ["gizmo:FuzzySkin"]
+evidence = ["abi:orca_plater_volume_paint_sphere", "client:struct PaintPanel"]
 work = "Bridge + UI"
-reason = "AGENTS.md: painting tools wait until the core loop ships"
+gap = "fuzzy-skin facet painting done (fuzzy_skin_facets through the paint contract); no per-facet fuzzy-skin preview rendering"
 
 [[feature]]
 id = "plate.paint-mmu"
 area = "plate"
 title = "Multi-material (color) painting"
-status = "deferred"
+status = "partial"
 desktop = ["gizmo:MmSegmentation"]
+evidence = ["abi:orca_plater_volume_paint_sphere", "client:struct PaintPanel"]
 work = "Bridge + UI"
-reason = "AGENTS.md: MMU segmentation waits until the core loop ships"
+gap = "MMU facet painting done (mmu_segmentation_facets, extruder states T1-T4 through the paint contract, slicing consumes them); no segmentation PREVIEW rendering and only 4 of 16 extruder states in the picker"
 
 [[feature]]
 id = "plate.sla"

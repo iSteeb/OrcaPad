@@ -927,6 +927,84 @@ final class DocumentStore {
         clearPreview()
     }
 
+    // MARK: Painting (desktop painter gizmos, ABI v36)
+
+    /// Painted triangles of the selected object (all layers merged with
+    /// layer-tagged colors resolved by the renderer).
+    private(set) var paintTriangles: [EnginePlater.PaintTriangle] = []
+    private(set) var paintLayer: EnginePlater.PaintLayer = .support
+
+    /// Brush radius in world mm (desktop painter slider).
+    var paintRadiusMM: Double = 2.0
+    /// Paint state (EnforcerBlockerType: 1 enforcer/colour-1, 2 blocker/colour-2...).
+    var paintState: Int32 = 1
+
+    func selectPaintLayer(_ layer: EnginePlater.PaintLayer) {
+        paintLayer = layer
+        Task { await reloadPaint() }
+    }
+
+    /// Reloads the selected object's paint for the active layer.
+    func reloadPaint() async {
+        guard let plater, let selection else {
+            paintTriangles = []
+            return
+        }
+        let objectID = selection.objectID
+        let volumeID = selection.volumeID
+            ?? scene?.object(id: objectID)?.volumes.first(where: { $0.role == .part })?.id
+        guard let volumeID else {
+            paintTriangles = []
+            return
+        }
+        let layer = paintLayer
+        let result = await BackgroundWork.run(operation: "read paint") {
+            try plater.volumePaint(objectID: objectID, volumeID: volumeID, layer: layer)
+        }
+        switch result {
+        case .success(let triangles):
+            paintTriangles = triangles
+        case .failure(let failure):
+            paintTriangles = []
+            status.report(.document, failure: failure)
+        }
+    }
+
+    /// One sphere-brush stroke at a world hit (one undo step per stroke —
+    /// the canvas paints on touch END, desktop batches per stroke).
+    func paint(at hit: SIMD3<Double>, viewDir: SIMD3<Double>) async {
+        guard let selection else { return }
+        let objectID = selection.objectID
+        let volumeID = selection.volumeID
+            ?? scene?.object(id: objectID)?.volumes.first(where: { $0.role == .part })?.id
+        guard let volumeID else { return }
+        let layer = paintLayer
+        let radius = paintRadiusMM
+        let state = paintState
+        _ = await applyMutation(
+            .paintSphere(
+                objectID: objectID, volumeID: volumeID, layer: layer,
+                hit: hit, viewDir: viewDir, radiusMM: radius, state: state),
+            operation: "paint"
+        )
+        await reloadPaint()
+    }
+
+    func clearPaint() async {
+        guard let selection else { return }
+        let objectID = selection.objectID
+        let volumeID = selection.volumeID
+            ?? scene?.object(id: objectID)?.volumes.first(where: { $0.role == .part })?.id
+        guard let volumeID else { return }
+        let layer = paintLayer
+        if await applyMutation(
+            .paintReset(objectID: objectID, volumeID: volumeID, layer: layer),
+            operation: "clear paint"
+        ) != nil {
+            await reloadPaint()
+        }
+    }
+
     // MARK: Custom G-code at layers (desktop layer ticks, selected plate)
 
     /// The selected plate's custom G-code ticks (nil on engine failure).

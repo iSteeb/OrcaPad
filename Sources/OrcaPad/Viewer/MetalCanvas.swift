@@ -32,6 +32,8 @@ struct SceneSync {
     var flattenHighlight: Int? = nil
     /// Filament slot colors (multi-filament extruder tinting).
     var filamentColors: [SIMD4<Float>] = []
+    /// Painted-facet overlay (painter gizmo, active layer): world triangles.
+    var paintTriangles: [EnginePlater.PaintTriangle] = []
 }
 
 /// Manipulation callbacks from the canvas gestures (engine-space units).
@@ -62,6 +64,10 @@ struct CanvasManipulation {
     /// focus (user spec; desktop picks the ring you grab instead).
     let onCycleRotationAxis: () -> Void
     let onEnd: () -> Void
+    /// Paint mode (ABI v36): engine world hit point + view direction of the
+    /// tap (desktop painter strokes; one stroke per tap). LAST member: the
+    /// memberwise init order follows declaration order.
+    var onPaint: ((SIMD3<Double>, SIMD3<Double>) -> Void)? = nil
 }
 
 /// SwiftUI wrapper around MTKView + gesture recognizers.
@@ -128,6 +134,10 @@ struct MetalCanvas: UIViewRepresentable {
                     previewMatrices: scene.previewMatrices,
                     selectedVolumeID: scene.selectedVolumeID
                 )
+                // Painter overlay follows document revisions (paint strokes
+                // and layer switches advance the revision or reload).
+                coordinator.renderer?.setPaintOverlay(
+                    scene.gizmoMode == .paint ? scene.paintTriangles : nil)
                 coordinator.lastDocumentID = scene.snapshot.documentID
                 coordinator.lastDocumentRevision = scene.snapshot.revision
                 coordinator.lastPresentationRevision = scene.presentationRevision
@@ -234,6 +244,17 @@ struct MetalCanvas: UIViewRepresentable {
         @objc private func onTap(_ gesture: UITapGestureRecognizer) {
             guard let view = gesture.view as? MTKView, let renderer else { return }
             let location = gesture.location(in: view)
+            if renderer.gizmoMode == .paint {
+                // Tap-paint: hit the selected object's mesh, stroke at the
+                // hit with the camera view direction.
+                if let face = renderer.pickFace(at: location, in: view) {
+                    let forward = renderer.camera.forward
+                    let viewDir = simd_normalize(-SIMD3<Double>(
+                        Double(forward.x), Double(forward.y), Double(forward.z)))
+                    manipulation?.onPaint?(face.enginePoint, viewDir)
+                }
+                return
+            }
             if renderer.gizmoMode == .layFlat {
                 // Desktop Flatten gizmo: the hull plane under the touch wins
                 // (whole coplanar region); the raw facet remains the fallback
@@ -393,6 +414,10 @@ struct MetalCanvas: UIViewRepresentable {
             renderer: Renderer
         ) -> DragState {
             let mode = renderer.gizmoMode
+            if mode == .paint {
+                // Strokes are taps; dragging stays camera control.
+                return .orbit
+            }
             // Rectangle selection: a drag STARTING ON an instance draws the
             // marquee (drag it outward to enclose a group); dragging empty
             // space orbits — camera control stays available in every mode,
@@ -421,6 +446,8 @@ struct MetalCanvas: UIViewRepresentable {
                 manipulation?.onSelect(hit.objectID, hit.instanceID)
             }
             switch mode {
+            case .paint:
+                return .orbit  // handled above; kept for exhaustiveness
             case .layFlat:
                 // Touch-hover: dragging across the object highlights the
                 // plane under the finger (desktop hover); release applies it.

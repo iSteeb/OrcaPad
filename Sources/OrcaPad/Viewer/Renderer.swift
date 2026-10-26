@@ -19,6 +19,8 @@ enum GizmoMode: String, CaseIterable, Sendable {
     /// Desktop rectangle selection: one-finger drag draws a marquee and
     /// selects every instance whose screen footprint it intersects.
     case select
+    /// Desktop painter gizmos (ABI v36): tap-paint with a sphere brush.
+    case paint
 
     /// Menu label + symbol for the Tools menu and the collapsible panel.
     var menuLabel: String {
@@ -28,11 +30,13 @@ enum GizmoMode: String, CaseIterable, Sendable {
         case .scale: return "Scale"
         case .layFlat: return "Lay flat"
         case .select: return "Select"
+        case .paint: return "Paint"
         }
     }
 
     var symbol: String {
         switch self {
+        case .paint: return "paintbrush.pointed"
         case .move: return "arrow.up.and.down.and.arrow.left.and.right"
         case .rotate: return "arrow.clockwise.circle"
         case .scale: return "arrow.up.left.and.arrow.down.right"
@@ -165,6 +169,38 @@ final class Renderer: NSObject, MTKViewDelegate {
     }
     private var flattenPlanes: [FlattenPlaneDraw] = []
     private var flattenHighlightIndex: Int?
+
+    /// Painted-facet overlay (desktop painter gizmo): world-space triangles
+    /// in the active layer, colored by paint state.
+    private var paintOverlay: [VertexPC] = []
+    private var paintOverlayCount = 0
+
+    func setPaintOverlay(_ triangles: [EnginePlater.PaintTriangle]?) {
+        var vertices: [VertexPC] = []
+        if let triangles {
+            vertices.reserveCapacity(triangles.count * 3)
+            for triangle in triangles {
+                let color = Renderer.paintColor(triangle.state)
+                for point in [triangle.a, triangle.b, triangle.c] {
+                    vertices.append(VertexPC(position: point, color: color))
+                }
+            }
+        }
+        paintOverlay = vertices
+        paintOverlayCount = vertices.count
+    }
+
+    /// Desktop painter palette by state (blocker red, enforcer green, MMU
+    /// slot colors beyond).
+    static func paintColor(_ state: UInt8) -> SIMD4<Float> {
+        switch state {
+        case 1: return SIMD4(0.25, 0.95, 0.35, 0.55)   // enforcer / colour 1
+        case 2: return SIMD4(0.95, 0.30, 0.30, 0.55)   // blocker / colour 2
+        case 3: return SIMD4(0.95, 0.75, 0.20, 0.55)
+        case 4: return SIMD4(0.45, 0.60, 0.95, 0.55)
+        default: return SIMD4(0.75, 0.45, 0.95, 0.55)
+        }
+    }
 
     func setFlattenPlanes(_ planes: [EnginePlater.FlattenPlane]?) {
         flattenPlanes = (planes ?? []).map { plane in
@@ -902,6 +938,8 @@ final class Renderer: NSObject, MTKViewDelegate {
         let objectID: ObjectID
         let instanceID: InstanceID
         let engineNormal: SIMD3<Double>
+        /// Engine world-space hit point (paint strokes, ABI v36).
+        let enginePoint: SIMD3<Double>
     }
 
     func pickFace(at point: CGPoint, in view: MTKView) -> FacePick? {
@@ -970,12 +1008,21 @@ final class Renderer: NSObject, MTKViewDelegate {
                         + hit.normal.y * SIMD3(columns.1.x, columns.1.y, columns.1.z)
                         + hit.normal.z * SIMD3(columns.2.x, columns.2.y, columns.2.z)
                     let engine = CoordinateMapper.viewerToEngine * SIMD4<Float>(world, 0)
+                    // object-space hit point → viewer world → engine world
+                    let worldPoint = inst.model * SIMD4(hit.point.x, hit.point.y, hit.point.z, 1)
+                    let enginePoint4 = CoordinateMapper.viewerToEngine * SIMD4(
+                        worldPoint.x, worldPoint.y, worldPoint.z, 0)
+                    let enginePoint = SIMD3(enginePoint4.x, enginePoint4.y, enginePoint4.z)
                     best = (FacePick(
                         objectID: obj.objectID,
                         instanceID: inst.instanceID,
                         engineNormal: simd_normalize(SIMD3<Double>(
                             Double(engine.x), Double(engine.y), Double(engine.z)
-                        ))
+                        )),
+                        enginePoint: SIMD3<Double>(
+                            Double(enginePoint.x),
+                            Double(enginePoint.y),
+                            Double(enginePoint.z))
                     ), hit.t)
                 }
             }
@@ -988,7 +1035,7 @@ final class Renderer: NSObject, MTKViewDelegate {
     /// Returns (distance, object-space face normal, merged-mesh triangle).
     private func rayCastObject(_ ray: (origin: SIMD3<Float>, dir: SIMD3<Float>),
                                object: RenderObject, model: simd_float4x4)
-        -> (t: Float, normal: SIMD3<Float>, triangle: UInt32)? {
+        -> (t: Float, normal: SIMD3<Float>, triangle: UInt32, point: SIMD3<Float>)? {
         // AABB in world space (transform 8 corners of the packed bbox).
         var bbMin = SIMD3<Float>(repeating: .infinity)
         var bbMax = SIMD3<Float>(repeating: -.infinity)
@@ -1018,11 +1065,11 @@ final class Renderer: NSObject, MTKViewDelegate {
         let ro = SIMD3(ro4.x, ro4.y, ro4.z) / ro4.w
         let rd = simd_normalize(SIMD3(near4.x, near4.y, near4.z) / near4.w - ro)
 
-        var best: (t: Float, normal: SIMD3<Float>, triangle: UInt32)?
+        var best: (t: Float, normal: SIMD3<Float>, triangle: UInt32, point: SIMD3<Float>)?
         rayCastTriangles(ro: ro, rd: rd, positions: object.pickPositions,
                          indices: object.pickIndices) { t, normal, triangle in
             if best == nil || t < best!.t {
-                best = (t, normal, triangle)
+                best = (t, normal, triangle, ro + rd * t)
             }
         }
         return best
@@ -1214,9 +1261,9 @@ final class Renderer: NSObject, MTKViewDelegate {
         var vertices: [VertexPC] = []
         let accent = SIMD4<Float>(0.16, 0.80, 0.95, 1)
         switch gizmoMode {
-        case .layFlat, .select:
+        case .layFlat, .select, .paint:
             // no on-canvas gizmo: lay flat taps a facet; select draws the
-            // marquee rectangle instead
+            // marquee rectangle; paint taps facets with the sphere brush
             break
         case .move:
             // Engine +X → viewer +X (red); engine +Y → viewer -Z (green),
@@ -1439,6 +1486,25 @@ final class Renderer: NSObject, MTKViewDelegate {
             }
         }
         encoder.popDebugGroup()
+
+        // Painted-facet overlay (ABI v36): translucent world-space triangles
+        // over the opaque object, depth-tested like desktop painter gizmos.
+        if paintOverlayCount > 0 {
+            encoder.pushDebugGroup("paint-overlay")
+            encoder.setRenderPipelineState(pcBlendPipeline)
+            encoder.setDepthStencilState(translucentDepthState)
+            var overlayUniforms = LineUniforms(mvp: viewProj)
+            encoder.setVertexBytes(
+                &overlayUniforms,
+                length: MemoryLayout<LineUniforms>.stride, index: 1)
+            encoder.setVertexBytes(
+                &paintOverlay,
+                length: MemoryLayout<VertexPC>.stride * paintOverlayCount,
+                index: 0)
+            encoder.drawPrimitives(
+                type: .triangle, vertexStart: 0, vertexCount: paintOverlayCount)
+            encoder.popDebugGroup()
+        }
 
         // Selected PART highlight (ABI v26 part ranges): the part's
         // merged-mesh sub-range re-drawn translucent over the opaque object.

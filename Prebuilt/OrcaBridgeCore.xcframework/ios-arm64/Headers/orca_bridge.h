@@ -7,7 +7,7 @@ extern "C" {
 #endif
 
 /// Version of the C ABI contract in this header. Callers verify it at runtime.
-#define ORCA_BRIDGE_ABI_VERSION ((uint32_t)35)
+#define ORCA_BRIDGE_ABI_VERSION ((uint32_t)36)
 
 typedef int32_t orca_status_code;
 #define ORCA_STATUS_OK                     ((orca_status_code)0)
@@ -351,6 +351,59 @@ orca_result orca_plater_object_cut(orca_plater *plater,
                                    orca_object_id *out_first_object_id,
                                    uint32_t *out_object_count,
                                    orca_revision *out_revision);
+
+// --- painting (desktop painter gizmos, ABI v36) ------------------------------
+
+/// Paint layers: each is a ModelVolume FacetsAnnotation consumed by slicing
+/// (support blockers/enforcers, seam painting, MMU segmentation, fuzzy skin).
+#define ORCA_PAINT_SUPPORT ((uint8_t)0)
+#define ORCA_PAINT_SEAM    ((uint8_t)1)
+#define ORCA_PAINT_MMU     ((uint8_t)2)
+#define ORCA_PAINT_FUZZY   ((uint8_t)3)
+
+/// Paint states are the engine's EnforcerBlockerType values: NONE=0,
+/// ENFORCER=1, BLOCKER=2; MMU extruders continue upward. Fuzzy uses 0/1.
+/// One painted triangle in WORLD (engine) coordinates.
+typedef struct {
+    float positions[9];
+    uint8_t state;
+    uint8_t reserved[3];
+} orca_paint_triangle;
+
+typedef struct {
+    uint32_t count;
+    orca_paint_triangle *triangles;
+} orca_paint_mesh;
+
+void orca_paint_mesh_dispose(orca_paint_mesh *mesh);
+
+/// Every painted triangle of one layer (read-only query for overlays).
+orca_result orca_plater_volume_paint(orca_plater *plater,
+                                     orca_object_id object_id,
+                                     orca_volume_id volume_id,
+                                     uint8_t layer,
+                                     orca_paint_mesh *out);
+
+/// One sphere-brush stroke at a world hit point (one undo step).
+/// `view_dir` (world) points along the viewing ray for back-face
+/// exclusion; `radius_mm` is world scale; `state` as above. Painting the
+/// NONE state erases. Slicing consumes the result like desktop.
+orca_result orca_plater_volume_paint_sphere(orca_plater *plater,
+                                            orca_object_id object_id,
+                                            orca_volume_id volume_id,
+                                            uint8_t layer,
+                                            double hit_x, double hit_y, double hit_z,
+                                            double view_dx, double view_dy, double view_dz,
+                                            double radius_mm,
+                                            int32_t state,
+                                            orca_revision *out_revision);
+
+/// Removes every stroke from one layer (one undo step).
+orca_result orca_plater_volume_paint_reset(orca_plater *plater,
+                                           orca_object_id object_id,
+                                           orca_volume_id volume_id,
+                                           uint8_t layer,
+                                           orca_revision *out_revision);
 
 /// Desktop "Split to objects" (ModelObject::split): replaces the object by
 /// one object per connected mesh (or per part of a multi-part object),

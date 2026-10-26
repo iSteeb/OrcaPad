@@ -107,6 +107,38 @@ public final class EnginePlater: @unchecked Sendable {
         /// Desktop "Cut" (plane): the object is replaced by the kept parts.
         case cut(objectID: ObjectID, instanceID: InstanceID,
                  planePoint: SIMD3<Double>, normal: SIMD3<Double>, keep: CutKeep)
+        /// Desktop painter gizmo (ABI v36): one sphere-brush stroke.
+        case paintSphere(objectID: ObjectID, volumeID: VolumeID, layer: PaintLayer,
+                         hit: SIMD3<Double>, viewDir: SIMD3<Double>,
+                         radiusMM: Double, state: Int32)
+        /// Removes every stroke of one paint layer.
+        case paintReset(objectID: ObjectID, volumeID: VolumeID, layer: PaintLayer)
+    }
+
+    /// Paint layers (each a ModelVolume FacetsAnnotation consumed by slicing).
+    public enum PaintLayer: UInt8, Sendable, CaseIterable {
+        case support = 0
+        case seam = 1
+        case mmu = 2
+        case fuzzy = 3
+
+        public var label: String {
+            switch self {
+            case .support: return "Support"
+            case .seam: return "Seam"
+            case .mmu: return "MMU"
+            case .fuzzy: return "Fuzzy skin"
+            }
+        }
+    }
+
+    /// One painted triangle in world (engine) coordinates.
+    public struct PaintTriangle: Sendable {
+        public let a: SIMD3<Float>
+        public let b: SIMD3<Float>
+        public let c: SIMD3<Float>
+        /// Engine EnforcerBlockerType value (1=enforcer/colour1, 2=blocker/colour2, ..).
+        public let state: UInt8
     }
 
     /// What a plane cut keeps (desktop CutDialog radio buttons).
@@ -300,6 +332,50 @@ public final class EnginePlater: @unchecked Sendable {
             throw invariant(operation: operation, "Bridge returned a malformed key list")
         }
         return keys
+    }
+
+    /// Painted triangles of one layer (world coordinates), by state — the
+    /// renderer overlay source. Read-only.
+    public func volumePaint(
+        objectID: ObjectID, volumeID: VolumeID, layer: PaintLayer
+    ) throws -> [PaintTriangle] {
+        try lock.withLock {
+            var raw = orca_paint_mesh()
+            try BridgeResult.consume(
+                orca_plater_volume_paint(
+                    handle, objectID.rawValue, volumeID.rawValue,
+                    layer.rawValue, &raw
+                ),
+                operation: "read paint"
+            )
+            defer { orca_paint_mesh_dispose(&raw) }
+            guard raw.count == 0 || raw.triangles != nil else {
+                throw BridgeError.local(
+                    .internalInvariant, operation: "read paint",
+                    diagnostic: "Bridge returned paint without storage"
+                )
+            }
+            var triangles: [PaintTriangle] = []
+            triangles.reserveCapacity(Int(raw.count))
+            // C fixed-size arrays import as tuples; read by byte offset
+            // (same pattern as the toolpath extruder stats).
+            func position(_ tuple: (Float, Float, Float, Float, Float, Float,
+                                    Float, Float, Float), _ index: Int) -> Float {
+                withUnsafeBytes(of: tuple) {
+                    $0.loadUnaligned(fromByteOffset: index * MemoryLayout<Float>.stride,
+                                     as: Float.self)
+                }
+            }
+            for index in 0..<Int(raw.count) {
+                let t = raw.triangles[index]
+                triangles.append(PaintTriangle(
+                    a: SIMD3(position(t.positions, 0), position(t.positions, 1), position(t.positions, 2)),
+                    b: SIMD3(position(t.positions, 3), position(t.positions, 4), position(t.positions, 5)),
+                    c: SIMD3(position(t.positions, 6), position(t.positions, 7), position(t.positions, 8)),
+                    state: t.state))
+            }
+            return triangles
+        }
     }
 
     /// The selected plate's custom G-code ticks, ascending print_z.
@@ -845,6 +921,27 @@ public final class EnginePlater: @unchecked Sendable {
                 try BridgeResult.consume(
                     orca_plater_custom_gcode_delete(handle, printZ, &mutationRevision),
                     operation: "delete custom G-code"
+                )
+
+            case .paintSphere(let objectID, let volumeID, let layer, let hit,
+                              let viewDir, let radiusMM, let state):
+                try BridgeResult.consume(
+                    orca_plater_volume_paint_sphere(
+                        handle, objectID.rawValue, volumeID.rawValue, layer.rawValue,
+                        hit.x, hit.y, hit.z,
+                        viewDir.x, viewDir.y, viewDir.z,
+                        radiusMM, state, &mutationRevision
+                    ),
+                    operation: "paint"
+                )
+
+            case .paintReset(let objectID, let volumeID, let layer):
+                try BridgeResult.consume(
+                    orca_plater_volume_paint_reset(
+                        handle, objectID.rawValue, volumeID.rawValue,
+                        layer.rawValue, &mutationRevision
+                    ),
+                    operation: "clear paint"
                 )
 
             case .cut(let objectID, let instanceID, let point, let normal, let keep):

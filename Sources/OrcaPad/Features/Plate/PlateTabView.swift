@@ -33,6 +33,8 @@ struct PlateTabView: View {
     @State private var aboutPresented = false
     @State private var newProjectConfirmation = false
     @State private var cutPresented = false
+    @State private var paintRadius: Double = 2.0
+    @State private var paintState: Int32 = 1
     @State private var cutAxis: EngineAxis = .z
     @State private var cutFraction: Double = 0.5
     @State private var cutKeep: EnginePlater.CutKeep = .bothAsParts
@@ -108,6 +110,18 @@ struct PlateTabView: View {
                     }
                 }
             )
+        }
+        if gizmoMode == .paint, document.selection != nil {
+            PaintPanel(
+                layer: document.paintLayer,
+                state: paintState,
+                radius: paintRadius,
+                onSelectLayer: { document.selectPaintLayer($0) },
+                onSelectState: { paintState = $0; document.paintState = $0 },
+                onChangeRadius: { paintRadius = $0; document.paintRadiusMM = $0 },
+                onClear: { Task { await document.clearPaint() } }
+            )
+            .padding(.bottom, 8)
         }
         if let selection = document.selection,
            let object = document.scene?.object(id: selection.objectID),
@@ -219,6 +233,10 @@ struct PlateTabView: View {
                         await document.loadFlattenPlanes()
                     } else {
                         document.clearFlattenPlanes()
+                    }
+                    // Painter gizmo: (re)load the active layer's overlay.
+                    if gizmoMode == .paint {
+                        await document.reloadPaint()
                     }
                 }
 
@@ -334,7 +352,8 @@ struct PlateTabView: View {
                             var red: CGFloat = 0, green: CGFloat = 0, blue: CGFloat = 0, alpha: CGFloat = 0
                             ui.getRed(&red, green: &green, blue: &blue, alpha: &alpha)
                             return SIMD4<Float>(Float(red), Float(green), Float(blue), 1)
-                        }
+                        },
+                    paintTriangles: gizmoMode == .paint ? document.paintTriangles : []
                 ),
                 manipulation: CanvasManipulation(
                     onSelect: { document.select(objectID: $0, instanceID: $1) },
@@ -377,7 +396,10 @@ struct PlateTabView: View {
                         rotationAxis = order[(index + 1) % order.count]
                     }
                 },
-                onEnd: { Task { await document.commitSelectedTransform() } }
+                onEnd: { Task { await document.commitSelectedTransform() } },
+                onPaint: { hit, viewDir in
+                    Task { await document.paint(at: hit, viewDir: viewDir) }
+                }
                 )
             )
         } else {
@@ -1515,6 +1537,87 @@ private struct CutSheet: View {
     }
 }
 
+/// Desktop painter-gizmo controls: layer, paint state (per-layer meaning),
+/// brush radius, clear layer.
+private struct PaintPanel: View {
+    let layer: EnginePlater.PaintLayer
+    @State var state: Int32
+    @State var radius: Double
+    let onSelectLayer: (EnginePlater.PaintLayer) -> Void
+    let onSelectState: (Int32) -> Void
+    let onChangeRadius: (Double) -> Void
+    let onClear: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                Menu {
+                    ForEach(EnginePlater.PaintLayer.allCases, id: \.self) { candidate in
+                        Button(candidate.label) {
+                            onSelectLayer(candidate)
+                        }
+                    }
+                } label: {
+                    Label(layer.label, systemImage: "paintbrush.pointed")
+                        .font(.caption)
+                }
+                .buttonStyle(.bordered)
+                Divider().frame(height: 20)
+                ForEach(stateChoices, id: \.0) { choice in
+                    Button {
+                        onSelectState(choice.1)
+                    } label: {
+                        HStack(spacing: 4) {
+                            RoundedRectangle(cornerRadius: 3)
+                                .fill(swatch(choice.1))
+                                .frame(width: 14, height: 14)
+                            Text(choice.0).font(.caption)
+                        }
+                    }
+                    .buttonStyle(.bordered)
+                    .tint(state == choice.1 ? .accentColor : .secondary)
+                }
+                Spacer()
+                Button(role: .destructive, action: onClear) {
+                    Label("Clear", systemImage: "eraser")
+                        .font(.caption)
+                }
+                .buttonStyle(.bordered)
+            }
+            HStack(spacing: 8) {
+                Image(systemName: "circle.dotted")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Slider(value: $radius, in: 0.5...20, step: 0.5) { _ in
+                    onChangeRadius(radius)
+                }
+                Text(String(format: "%.1f mm", radius))
+                    .font(.caption.monospacedDigit())
+                    .frame(width: 60, alignment: .trailing)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(10)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14))
+        .padding(.horizontal, 12)
+    }
+
+    /// State choices per layer (engine EnforcerBlockerType semantics).
+    private var stateChoices: [(String, Int32)] {
+        switch layer {
+        case .support: return [("Enforcer", 1), ("Blocker", 2)]
+        case .seam: return [("Enforcer", 1), ("Blocker", 2)]
+        case .fuzzy: return [("Fuzzy", 1)]
+        case .mmu: return [("T1", 1), ("T2", 2), ("T3", 3), ("T4", 4)]
+        }
+    }
+
+    private func swatch(_ value: Int32) -> Color {
+        let rgba = Renderer.paintColor(UInt8(value))
+        return Color(red: Double(rgba.x), green: Double(rgba.y), blue: Double(rgba.z))
+    }
+}
+
 // MARK: - Plate bar (desktop PartPlate selector)
 
 /// Desktop plate selector: chips for the plates in order, tap to select
@@ -1980,6 +2083,7 @@ private struct ManipulationPanel: View {
             .minimumScaleFactor(0.6)
             switch mode {
             case .move: movePanel
+            case .paint: EmptyView()  // PaintPanel replaces the tools panel
             case .rotate: RotatePanel(transform: transform, axis: $rotationAxis, actions: actions)
             case .scale: ScalePanel(transform: transform, meshSize: meshSize, actions: actions)
             case .layFlat:
@@ -2514,6 +2618,10 @@ private struct ToolsPanel<Content: View>: View {
     @ViewBuilder
     private var context: some View {
         switch mode {
+        case .paint:
+            Text("tap faces to paint")
+                .font(.caption)
+                .foregroundStyle(.secondary)
         case .move:
             HStack(spacing: 10) {
                 Text("X \(String(format: "%.1f", transform.offsetX)) · Y \(String(format: "%.1f", transform.offsetY))")

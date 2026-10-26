@@ -137,6 +137,7 @@ void orca_result_dispose(orca_result *result) {
 #include "libslic3r/Format/3mf.hpp"
 #include "libslic3r/Format/STL.hpp"
 #include "libslic3r/CutUtils.hpp"
+#include "libslic3r/TriangleSelector.hpp"
 
 #include "nlohmann/json.hpp"
 
@@ -2924,6 +2925,273 @@ orca_result orca_plater_object_cut(orca_plater *plater,
         *out_first_object_id =
             static_cast<orca_object_id>(added.front()->id().id);
         *out_object_count = static_cast<uint32_t>(added.size());
+        *out_revision = mutation.commit();
+        return orcapad_ok();
+    });
+}
+
+// --- painting (desktop painter gizmos, ABI v36) --------------------------------
+
+/// Paint layer -> the volume's FacetsAnnotation.
+static Slic3r::FacetsAnnotation *orcapad_paint_annotation(
+    Slic3r::ModelVolume *volume, uint8_t layer, const char *operation,
+    orca_result *out_failure) {
+    switch (layer) {
+    case ORCA_PAINT_SUPPORT: return &volume->supported_facets;
+    case ORCA_PAINT_SEAM: return &volume->seam_facets;
+    case ORCA_PAINT_MMU: return &volume->mmu_segmentation_facets;
+    case ORCA_PAINT_FUZZY: return &volume->fuzzy_skin_facets;
+    default:
+        *out_failure = orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                                    "layer must be 0 (support), 1 (seam), 2 (mmu) or 3 (fuzzy)");
+        return nullptr;
+    }
+}
+
+void orca_paint_mesh_dispose(orca_paint_mesh *mesh) {
+    if (!mesh) return;
+    std::free(mesh->triangles);
+    *mesh = orca_paint_mesh{};
+}
+
+/// mesh-space ray-cast returning the hit facet of the volume's mesh.
+static int orcapad_volume_facet_under(
+    const Slic3r::ModelVolume *volume, const Slic3r::Vec3d &hit_local,
+    const Slic3r::Vec3d &view_dir_local, const char *operation,
+    orca_result *out_failure) {
+    const indexed_triangle_set &its = volume->mesh().its;
+    const Slic3r::Vec3f origin = hit_local.cast<float>() - view_dir_local.cast<float>() * 1000.0f;
+    const Slic3r::Vec3f direction = view_dir_local.cast<float>().normalized();
+    int best_facet = -1;
+    float best_distance = std::numeric_limits<float>::max();
+    for (size_t index = 0; index < its.indices.size(); ++index) {
+        const Slic3r::Vec3f &v0 = its.vertices[its.indices[index](0)];
+        const Slic3r::Vec3f &v1 = its.vertices[its.indices[index](1)];
+        const Slic3r::Vec3f &v2 = its.vertices[its.indices[index](2)];
+        // Moeller-Trumbore
+        const Slic3r::Vec3f edge1 = v1 - v0;
+        const Slic3r::Vec3f edge2 = v2 - v0;
+        const Slic3r::Vec3f pvec = direction.cross(edge2);
+        const float determinant = edge1.dot(pvec);
+        if (std::abs(determinant) < 1e-9f) continue;
+        const float inverse = 1.0f / determinant;
+        const Slic3r::Vec3f tvec = origin - v0;
+        const float u = tvec.dot(pvec) * inverse;
+        if (u < -1e-4f || u > 1.0f + 1e-4f) continue;
+        const Slic3r::Vec3f qvec = tvec.cross(edge1);
+        const float v = direction.dot(qvec) * inverse;
+        if (v < -1e-4f || u + v > 1.0f + 1e-4f) continue;
+        const float distance = edge2.dot(qvec) * inverse;
+        if (distance > 1e-4f && distance < best_distance) {
+            best_distance = distance;
+            best_facet = int(index);
+        }
+    }
+    if (best_facet < 0)
+        *out_failure = orcapad_fail(ORCA_STATUS_NOT_FOUND, operation,
+                                    "the paint position does not hit the volume");
+    return best_facet;
+}
+
+orca_result orca_plater_volume_paint(orca_plater *plater,
+                                     orca_object_id object_id,
+                                     orca_volume_id volume_id,
+                                     uint8_t layer,
+                                     orca_paint_mesh *out) {
+    constexpr const char *operation = "orca_plater_volume_paint";
+    if (out) *out = orca_paint_mesh{};
+    if (!plater)
+        return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation,
+                            "plater handle is null");
+    if (!out)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "output pointer is null");
+    return orcapad_guard(operation, [&]() -> orca_result {
+        Slic3r::ModelObject *object = plater_obj(plater, object_id);
+        if (!object)
+            return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation,
+                                "object was not found");
+        Slic3r::ModelVolume *volume = plater_volume(object, volume_id);
+        if (!volume)
+            return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation,
+                                "volume was not found");
+        orca_result failure = orcapad_ok();
+        Slic3r::FacetsAnnotation *annotation =
+            orcapad_paint_annotation(volume, layer, operation, &failure);
+        if (!annotation) return failure;
+
+        std::vector<indexed_triangle_set> per_type;
+        annotation->get_facets(*volume, per_type);
+        // get_facets returns VOLUME-MESH space; the ABI contract is WORLD.
+        const Slic3r::ModelInstance *instance =
+            object->instances.empty() ? nullptr : object->instances.front();
+        if (!instance)
+            return orcapad_fail(ORCA_STATUS_INVALID_MODEL, operation,
+                                "object has no instance");
+        const Slic3r::Transform3d trafo =
+            instance->get_matrix() * volume->get_matrix();
+        std::vector<orca_paint_triangle> triangles;
+        // State NONE (0) is "unpainted": a fresh selector reports every
+        // facet as NONE — only real paint states come out.
+        for (int state = int(Slic3r::EnforcerBlockerType::ENFORCER);
+             state < int(per_type.size()); ++state) {
+            if (per_type[size_t(state)].indices.empty()) continue;
+            for (const auto &triangle : per_type[size_t(state)].indices) {
+                orca_paint_triangle slot{};
+                for (int corner = 0; corner < 3; ++corner) {
+                    const Slic3r::Vec3f &vertex =
+                        per_type[size_t(state)].vertices[triangle(corner)];
+                    const Slic3r::Vec3d world =
+                        trafo * vertex.cast<double>();
+                    slot.positions[corner * 3 + 0] = float(world.x());
+                    slot.positions[corner * 3 + 1] = float(world.y());
+                    slot.positions[corner * 3 + 2] = float(world.z());
+                }
+                slot.state = uint8_t(state);
+                triangles.push_back(slot);
+            }
+        }
+        orca_paint_mesh result{};
+        result.count = static_cast<uint32_t>(triangles.size());
+        if (!triangles.empty()) {
+            result.triangles = static_cast<orca_paint_triangle *>(std::malloc(
+                triangles.size() * sizeof(orca_paint_triangle)));
+            if (!result.triangles)
+                return orcapad_fail(ORCA_STATUS_OUT_OF_MEMORY, operation,
+                                    "could not allocate the paint mesh");
+            std::memcpy(result.triangles, triangles.data(),
+                        triangles.size() * sizeof(orca_paint_triangle));
+        }
+        *out = result;
+        return orcapad_ok();
+    });
+}
+
+orca_result orca_plater_volume_paint_sphere(orca_plater *plater,
+                                            orca_object_id object_id,
+                                            orca_volume_id volume_id,
+                                            uint8_t layer,
+                                            double hit_x, double hit_y, double hit_z,
+                                            double view_dx, double view_dy, double view_dz,
+                                            double radius_mm,
+                                            int32_t state,
+                                            orca_revision *out_revision) {
+    constexpr const char *operation = "orca_plater_volume_paint_sphere";
+    if (out_revision) *out_revision = 0;
+    if (!plater)
+        return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation,
+                            "plater handle is null");
+    if (!out_revision)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "output pointer is null");
+    if (!std::isfinite(hit_x) || !std::isfinite(hit_y) || !std::isfinite(hit_z) ||
+        !std::isfinite(view_dx) || !std::isfinite(view_dy) || !std::isfinite(view_dz) ||
+        !std::isfinite(radius_mm) || radius_mm <= 0.0)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "hit, view direction or radius is invalid");
+    if (state < int32_t(Slic3r::EnforcerBlockerType::NONE) ||
+        state > int32_t(Slic3r::EnforcerBlockerType::ExtruderMax))
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "paint state is out of range");
+    return orcapad_guard(operation, [&]() -> orca_result {
+        Slic3r::ModelObject *object = plater_obj(plater, object_id);
+        if (!object)
+            return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation,
+                                "object was not found");
+        Slic3r::ModelVolume *volume = plater_volume(object, volume_id);
+        if (!volume)
+            return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation,
+                                "volume was not found");
+        orca_result failure = orcapad_ok();
+        Slic3r::FacetsAnnotation *annotation =
+            orcapad_paint_annotation(volume, layer, operation, &failure);
+        if (!annotation) return failure;
+        if (!orcapad_revision_available(*plater))
+            return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
+                                "document revision is exhausted");
+
+        // Desktop painter conventions: trafo = mesh -> world for THIS volume
+        // (object instance composed with the volume matrix); the cursor is
+        // built from mesh-space hit + camera, radius is world scale.
+        Slic3r::ModelInstance *instance =
+            object->instances.empty() ? nullptr : object->instances.front();
+        if (!instance)
+            return orcapad_fail(ORCA_STATUS_INVALID_MODEL, operation,
+                                "object has no instance");
+        const Slic3r::Transform3d trafo = instance->get_matrix() * volume->get_matrix();
+        const Slic3r::Transform3d inverse = trafo.inverse();
+        const Slic3r::Vec3d hit_local =
+            (inverse * Slic3r::Vec3d(hit_x, hit_y, hit_z));
+        const Slic3r::Vec3d view_local =
+            (inverse.linear() * Slic3r::Vec3d(view_dx, view_dy, view_dz));
+
+        orca_result facet_failure = orcapad_ok();
+        const int facet = orcapad_volume_facet_under(
+            volume, hit_local, view_local, operation, &facet_failure);
+        if (facet < 0) return facet_failure;
+
+        OrcapadMutation mutation(*plater, "Paint");
+        Slic3r::TriangleSelector selector(volume->mesh());
+        selector.deserialize(annotation->get_data(), false);
+        // Camera sits behind the hit along the view ray (mesh coords).
+        const Slic3r::Vec3f camera_local =
+            (hit_local - view_local.normalized() * 10.0).cast<float>();
+        const Slic3r::Vec3f center_local = hit_local.cast<float>();
+        auto cursor = Slic3r::TriangleSelector::SinglePointCursor::cursor_factory(
+            center_local, camera_local, float(radius_mm),
+            Slic3r::TriangleSelector::CursorType::SPHERE, trafo,
+            Slic3r::TriangleSelector::ClippingPlane{});
+        Slic3r::Transform3d trafo_no_translate = Slic3r::Transform3d::Identity();
+        trafo_no_translate.linear() = trafo.linear();
+        selector.select_patch(
+            facet, std::move(cursor),
+            static_cast<Slic3r::EnforcerBlockerType>(state),
+            trafo_no_translate, true, 0.0f);
+        if (!annotation->set(selector))
+            // set() reports "unchanged": the brush sphere touched no facet.
+            return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation,
+                                "the stroke painted nothing at that position");
+        orcapad_touch_object(*plater, object_id);
+        *out_revision = mutation.commit();
+        return orcapad_ok();
+    });
+}
+
+orca_result orca_plater_volume_paint_reset(orca_plater *plater,
+                                           orca_object_id object_id,
+                                           orca_volume_id volume_id,
+                                           uint8_t layer,
+                                           orca_revision *out_revision) {
+    constexpr const char *operation = "orca_plater_volume_paint_reset";
+    if (out_revision) *out_revision = 0;
+    if (!plater)
+        return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation,
+                            "plater handle is null");
+    if (!out_revision)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "output pointer is null");
+    return orcapad_guard(operation, [&]() -> orca_result {
+        Slic3r::ModelObject *object = plater_obj(plater, object_id);
+        if (!object)
+            return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation,
+                                "object was not found");
+        Slic3r::ModelVolume *volume = plater_volume(object, volume_id);
+        if (!volume)
+            return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation,
+                                "volume was not found");
+        orca_result failure = orcapad_ok();
+        Slic3r::FacetsAnnotation *annotation =
+            orcapad_paint_annotation(volume, layer, operation, &failure);
+        if (!annotation) return failure;
+        if (annotation->empty())
+            return orcapad_fail(ORCA_STATUS_INVALID_MODEL, operation,
+                                "the layer carries no paint");
+        if (!orcapad_revision_available(*plater))
+            return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
+                                "document revision is exhausted");
+        OrcapadMutation mutation(*plater, "Clear paint");
+        annotation->reset();
+        orcapad_touch_object(*plater, object_id);
         *out_revision = mutation.commit();
         return orcapad_ok();
     });

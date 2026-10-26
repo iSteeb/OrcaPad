@@ -276,7 +276,7 @@ static void test_md5_shim() {
 
 static void test_abi_version() {
     CHECK_EQ(orca_bridge_abi_version(), ORCA_BRIDGE_ABI_VERSION);
-    CHECK_EQ(ORCA_BRIDGE_ABI_VERSION, 35);
+    CHECK_EQ(ORCA_BRIDGE_ABI_VERSION, 36);
 }
 
 struct ProgressRecord {
@@ -3328,7 +3328,127 @@ static void test_arrange_orient(const std::string &dir, const std::string &data_
     orca_plater_free(plater);
 }
 
-// ABI v35: config import/export
+// ABI v36: painting (support/seam/MMU/fuzzy layers)
+static void test_painting(const std::string &dir) {
+    orca_plater *plater = nullptr;
+    GUARD(g0, orca_plater_new(&plater));
+    expect_ok(g0, "plater_new");
+    const std::string cube = write_cube_stl(dir, "paint_cube.stl");
+    orca_object_id object_id = 0;
+    orca_revision revision = 0;
+    GUARD(g1, import_one(plater, cube.c_str(), 100.0, 100.0, &object_id, &revision));
+    expect_ok(g1, "import cube");
+
+    orca_scene_snapshot snap = take_snapshot(plater);
+    CHECK_EQ(snap.object_count, 1);
+    const orca_volume_id volume = snap.objects[0].volumes[0].id;
+    const orca_instance_id instance = snap.objects[0].instances[0].id;
+    // WORLD bbox of the resting cube: the snapshot bbox is object-space,
+    // the instance matrix places it on the bed (ABI contract).
+    float lo[3] = {1e30f, 1e30f, 1e30f}, hi[3] = {-1e30f, -1e30f, -1e30f};
+    {
+        const double *m = snap.objects[0].instances[0].matrix; // column-major
+        const float *bmin = snap.objects[0].bbox_min;
+        const float *bmax = snap.objects[0].bbox_max;
+        for (int sx = 0; sx < 2; ++sx)
+            for (int sy = 0; sy < 2; ++sy)
+                for (int sz = 0; sz < 2; ++sz) {
+                    const double local[4] = {sx ? bmax[0] : bmin[0],
+                                             sy ? bmax[1] : bmin[1],
+                                             sz ? bmax[2] : bmin[2], 1.0};
+                    for (int row = 0; row < 3; ++row) {
+                        const double world = m[row] * local[0] + m[4 + row] * local[1]
+                                           + m[8 + row] * local[2] + m[12 + row] * local[3];
+                        lo[row] = std::min(lo[row], float(world));
+                        hi[row] = std::max(hi[row], float(world));
+                    }
+                }
+    }
+    const float minZ = lo[2], maxZ = hi[2];
+    const float midX = 0.5f * (lo[0] + hi[0]);
+    const float midY = 0.5f * (lo[1] + hi[1]);
+    const float size = hi[0] - lo[0];
+    orca_scene_snapshot_dispose(&snap);
+
+    // empty layer queries cleanly
+    orca_paint_mesh paint{};
+    GUARD(q0, orca_plater_volume_paint(plater, object_id, volume,
+                                       ORCA_PAINT_SUPPORT, &paint));
+    expect_ok(q0, "paint query empty");
+    CHECK_EQ(paint.count, 0u);
+    orca_paint_mesh_dispose(&paint);
+
+    // paint the TOP face with a blocker sphere from above (view -Z)
+    GUARD(p1, orca_plater_volume_paint_sphere(
+                  plater, object_id, volume, ORCA_PAINT_SUPPORT,
+                  midX, midY, maxZ, 0, 0, -1,
+                  0.3 * size, int32_t(2) /*BLOCKER*/, &revision));
+    expect_ok(p1, "paint top face");
+
+    GUARD(q1, orca_plater_volume_paint(plater, object_id, volume,
+                                       ORCA_PAINT_SUPPORT, &paint));
+    expect_ok(q1, "paint query after stroke");
+    CHECK(paint.count > 0);
+    bool has_blocker = false;
+    bool all_top = true;
+    for (uint32_t i = 0; i < paint.count; ++i) {
+        if (paint.triangles[i].state == 2) has_blocker = true;
+        for (int c = 0; c < 3; ++c)
+            if (paint.triangles[i].positions[c * 3 + 2] < maxZ - 0.25f * size)
+                all_top = false;
+    }
+    CHECK(has_blocker);
+    CHECK(all_top);
+    orca_paint_mesh_dispose(&paint);
+
+    // the OTHER layer is untouched
+    GUARD(q2, orca_plater_volume_paint(plater, object_id, volume,
+                                       ORCA_PAINT_SEAM, &paint));
+    expect_ok(q2, "seam layer untouched");
+    CHECK_EQ(paint.count, 0u);
+    orca_paint_mesh_dispose(&paint);
+
+    // typed rejections
+    GUARD(x1, orca_plater_volume_paint_sphere(
+                  plater, object_id, volume, 9, 0, 0, 0, 0, 0, -1, 1.0, 1, &revision));
+    expect_code(x1, ORCA_STATUS_INVALID_ARGUMENT, "paint bad layer");
+    GUARD(x2, orca_plater_volume_paint_sphere(
+                  plater, object_id, volume, ORCA_PAINT_SUPPORT,
+                  midX, midY, maxZ + 100, 0, 0, -1, 1.0, 1, &revision));
+    expect_code(x2, ORCA_STATUS_NOT_FOUND, "paint off-mesh hit");
+    GUARD(x3, orca_plater_volume_paint_reset(plater, object_id, volume,
+                                             ORCA_PAINT_SEAM, &revision));
+    expect_code(x3, ORCA_STATUS_INVALID_MODEL, "reset empty layer");
+
+    // undo removes the stroke
+    GUARD(u1, orca_plater_undo(plater, &revision));
+    expect_ok(u1, "undo paint");
+    GUARD(q3, orca_plater_volume_paint(plater, object_id, volume,
+                                       ORCA_PAINT_SUPPORT, &paint));
+    expect_ok(q3, "paint query after undo");
+    CHECK_EQ(paint.count, 0u);
+    orca_paint_mesh_dispose(&paint);
+
+    // reset path: paint then clear
+    GUARD(p2, orca_plater_volume_paint_sphere(
+                  plater, object_id, volume, ORCA_PAINT_FUZZY,
+                  midX, midY, minZ, 0, 0, 1,
+                  0.3 * size, int32_t(1) /*FUZZY=ENFORCER*/, &revision));
+    expect_ok(p2, "paint bottom fuzzy");
+    GUARD(r1, orca_plater_volume_paint_reset(plater, object_id, volume,
+                                             ORCA_PAINT_FUZZY, &revision));
+    expect_ok(r1, "reset fuzzy layer");
+    GUARD(q4, orca_plater_volume_paint(plater, object_id, volume,
+                                       ORCA_PAINT_FUZZY, &paint));
+    expect_ok(q4, "paint query after reset");
+    CHECK_EQ(paint.count, 0u);
+    orca_paint_mesh_dispose(&paint);
+
+    (void)instance;
+    orca_plater_free(plater);
+}
+
+// ABI v35: config import/export// ABI v35: config import/export
 static void test_config_io(const std::string &dir, const std::string &data_dir) {
     orca_presets *presets = nullptr;
     GUARD(g0, orca_presets_new(data_dir.c_str(), &presets));
@@ -4374,6 +4494,7 @@ int main() {
     test_exports(dir, data_dir);
     test_cut(dir);
     test_config_io(dir, data_dir);
+    test_painting(dir);
     test_project_roundtrip(dir, data_dir);
     test_user_presets(data_dir);
     test_physical_printers(data_dir);

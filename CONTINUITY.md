@@ -110,6 +110,20 @@
 
 ## PROGRESS
 
+- [2026-10-26 CODE] 0.11 PAINTING (ABI v36): the four desktop painter
+  layers are live as one contract - ORCA_PAINT_{SUPPORT,SEAM,MMU,FUZZY} ->
+  ModelVolume FacetsAnnotations. Bridge: orca_plater_volume_paint
+  (world-space triangles per paint state via FacetsAnnotation::get_facets,
+  NONE filtered), orca_plater_volume_paint_sphere (TriangleSelector +
+  SphereCursor::cursor_factory + select_patch, mesh-coord conventions from
+  the desktop gizmo, no-op stroke = typed NOT_FOUND), paint_reset. Client:
+  Paint gizmo mode (tap-brush strokes, PaintPanel layer/state/radius/clear,
+  per-state translucent overlay, drag stays camera control). Tap-to-paint
+  = one stroke per undo step (desktop capsules/seed fill open). Slicing
+  consumes all four layers (engine-side). Parity 50% -> 52% (painting
+  items deferred -> partial). Gates: host 51,570 PASS, archive 313 TUs,
+  xtool green, audit PASS.
+
 - [2026-10-26 CODE] 0.10 scope COMPLETE (parity 50%: 62 done, 19 partial):
   Wave 0 claims (Duet/FlashAir hosts, PrusaLink partial, About); Wave 1
   (new project, one-layer mode, wipe+tool-change markers, actual-flow
@@ -217,6 +231,12 @@
   host key is `host_type`.
 
 ## OUTCOMES
+
+- [2026-10-26] 0.11 painting unlocked + shipped (per USER roadmap): all
+  four painter layers through one ABI v36 contract, tap-brush UI, overlays.
+  release-0.11.0 tagged. Cumulative day: parity 42% -> 52%, ABI v31 -> v36,
+  releases 0.8.0 / 0.10.0 / 0.11.0.
+
 
 - [2026-10-26] 0.10 milestone: waves 0-2 + all three flagships landed
   (parity 42% -> 50% in one day, ABI v31 -> v35). release-0.10.0 tagged.
