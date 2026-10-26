@@ -158,6 +158,14 @@
 
 ## OUTCOMES
 
+- [2026-10-19] UI round 7: SETUP WIZARD (desktop ConfigWizard parity, the
+  user's 'global filter' intent): SetupWizardSheet from the Prepare pill
+  (wand) - vendor-grouped printer checklist, then searchable filament
+  checklist with compatible-with-picked-printers pre-checked; sets
+  persist (UserDefaults installed-sets) and drive EVERY preset list
+  (pill pages + slot picker show only installed system presets, user/
+  project always). prepare.setup-wizard done (52 done). release-0.7.4.
+
 - [2026-10-19] UI round 6: Slice button back (first-class in the Prepare
   pill, primary style - it died with the hidden nav toolbar); all pills
   clip content (clipShape Capsule + inner padding - no overflow when

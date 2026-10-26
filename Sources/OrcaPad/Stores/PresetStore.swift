@@ -127,6 +127,18 @@ final class PresetStore {
 
     init(status: StatusCenter) {
         self.status = status
+        let loaded = PresetStore.loadInstalledSets()
+        installedPrinters = loaded.0
+        installedFilaments = loaded.1
+    }
+
+    private static func loadInstalledSets() -> (Set<String>, Set<String>) {
+        let defaults = UserDefaults.standard
+        let printers = Set(
+            (defaults.stringArray(forKey: Self.installedPrintersKey)) ?? [])
+        let filaments = Set(
+            (defaults.stringArray(forKey: Self.installedFilamentsKey)) ?? [])
+        return (printers, filaments)
     }
 
     var isReady: Bool {
@@ -377,6 +389,57 @@ final class PresetStore {
         if await refreshFromEngine() {
             status.report(.presets, "presets: project settings loaded")
         }
+    }
+
+    // MARK: Preset visibility (desktop Setup Wizard: installed sets)
+
+    /// Desktop ConfigWizard parity: the wizard's printer/filament
+    /// checkboxes persist "installed" sets (appconfig `material=true`),
+    /// and every preset list shows ONLY installed system presets (user and
+    /// project presets always show). Empty set = unconfigured = show all.
+    private static let installedPrintersKey = "presets.installedPrinters"
+    private static let installedFilamentsKey = "presets.installedFilaments"
+
+    private(set) var installedPrinters: Set<String>
+    private(set) var installedFilaments: Set<String>
+
+    var isConfigured: Bool {
+        !installedPrinters.isEmpty || !installedFilaments.isEmpty
+    }
+
+    private func loadInstalled() -> (Set<String>, Set<String>) {
+        let defaults = UserDefaults.standard
+        let printers = Set(
+            (defaults.stringArray(forKey: Self.installedPrintersKey)) ?? [])
+        let filaments = Set(
+            (defaults.stringArray(forKey: Self.installedFilamentsKey)) ?? [])
+        return (printers, filaments)
+    }
+
+    func setInstalled(printers: Set<String>, filaments: Set<String>) {
+        installedPrinters = printers
+        installedFilaments = filaments
+        UserDefaults.standard.set(Array(printers), forKey: Self.installedPrintersKey)
+        UserDefaults.standard.set(Array(filaments), forKey: Self.installedFilamentsKey)
+    }
+
+    /// The preset lists everyone consumes: system presets filtered to the
+    /// installed sets (when configured); user/project always visible.
+    func visibleEntries(for kind: PresetKind) -> [PresetEntry] {
+        let source: [PresetEntry]
+        switch kind {
+        case .machine: source = machines
+        case .filament: source = filaments
+        case .process: source = processes
+        }
+        guard isConfigured else { return source }
+        let installed: Set<String>
+        switch kind {
+        case .machine: installed = installedPrinters
+        case .filament: installed = installedFilaments
+        case .process: return source  // processes have no wizard set
+        }
+        return source.filter { $0.origin != .system || installed.contains($0.name) }
     }
 
     // MARK: Multi-filament (desktop Sidebar filament list, ABI v31)

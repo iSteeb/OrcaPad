@@ -539,7 +539,7 @@ struct PlateTabView: View {
                         Task { await environment.presets.setFilamentColour(slot: slot, colour: colour) }
                     },
                     onEditFlushVolumes: { flushPresented = true },
-                    filamentPresets: environment.presets.filaments
+                    filamentPresets: environment.presets.visibleEntries(for: .filament)
                 )
             }
             .padding(.vertical, 6)

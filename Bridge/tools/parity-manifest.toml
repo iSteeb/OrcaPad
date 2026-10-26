@@ -841,12 +841,12 @@ priority = 109
 id = "prepare.setup-wizard"
 area = "prepare"
 title = "Setup wizard (vendor / printer / filament picking)"
-status = "partial"
+status = "done"
 desktop = ["menu:Setup Wizard", "dialog:ConfigWizard", "dialog:GuideFrame"]
-evidence = ["client:struct GroupedPickerList"]
-gap = "all system printers are listed; no vendor/model selection that limits the lists"
-work = "UI"
-priority = 110
+evidence = ["client:struct SetupWizardSheet", "client:func setInstalled\\(",
+            "client:func visibleEntries\\(for"]
+work = "Bridge + UI"
+note = "Desktop ConfigWizard parity: SetupWizardSheet (wand button in the Prepare pill) - vendor-grouped printer checklist, then the filament checklist (searchable, compatible-with-picked-printers pre-checked like desktop default materials); the checked sets persist (UserDefaults, desktop appconfig installed-sets equivalent) and EVERY preset list (pill pages, slot picker) shows only installed system presets with user/project presets always visible"
 
 [[feature]]
 id = "prepare.bed-shape"

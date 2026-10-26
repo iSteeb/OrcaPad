@@ -15,6 +15,7 @@ struct PrepareTabView: View {
     @State private var expandedKind: PresetKind?
     /// Desktop Preferences parity: hide incompatible presets GLOBALLY.
     @AppStorage("presets.filterCompatible") private var filterCompatible = true
+    @State private var setupPresented = false
     /// Per-kind mode memory (user spec: simple for printer, advanced for
     /// process, remembered across switches). Persisted per kind.
     @State private var kindModes: [PresetKind: SettingsModeFilter] =
@@ -179,6 +180,9 @@ struct PrepareTabView: View {
             .padding(.top, 6)
             settingsList
         }
+        .sheet(isPresented: $setupPresented) {
+            SetupWizardSheet(presets: presets)
+        }
     }
 
     /// The Prepare chrome: ONE wide, horizontally SCROLLABLE pill.
@@ -207,6 +211,18 @@ struct PrepareTabView: View {
                 Divider().frame(height: 28)
                 pageChips
                 Spacer(minLength: 4)
+                // Desktop Setup Wizard entry: pick printers + which
+                // filaments belong in the lists (installed sets).
+                Button {
+                    setupPresented = true
+                } label: {
+                    ChromeToolLabel(
+                        symbol: "wand.and.stars",
+                        label: "Setup"
+                    )
+                    .foregroundStyle(presets.isConfigured ? Color.primary : Color.accentColor)
+                }
+                .buttonStyle(.plain)
                 // Global preset filter (desktop Preferences: hide
                 // incompatible presets everywhere) — persisted.
                 Button {
@@ -300,13 +316,16 @@ struct PrepareTabView: View {
     }
 
     private func presetList(for kind: PresetKind) -> [PresetEntry] {
+        // Setup-wizard visibility first (desktop installed sets), then the
+        // compatibility filter for filament/process.
+        let visible = presets.visibleEntries(for: kind)
         switch kind {
         case .machine:
-            return presets.machines
+            return visible
         case .filament:
-            return presets.filaments
+            return visible
         case .process:
-            return showAllProcesses ? presets.processes : presets.processes.filter(\.isCompatible)
+            return showAllProcesses ? visible : visible.filter(\.isCompatible)
         }
     }
 
@@ -736,6 +755,182 @@ private struct InlinePresetList: View {
                         }
                     }
                 }
+            }
+        }
+    }
+}
+
+/// Desktop ConfigWizard parity (user spec): pick printers, then CHECK the
+/// filaments that belong in the filament list. The checked sets persist and
+/// every preset list shows only installed system presets (user/project
+/// presets always show). Picking a printer pre-checks its compatible
+/// filaments (desktop: default materials).
+struct SetupWizardSheet: View {
+    let presets: PresetStore
+
+    enum Step: String, CaseIterable, Identifiable {
+        case printers = "Printers"
+        case filaments = "Filaments"
+
+        var id: String { rawValue }
+    }
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var step: Step = .printers
+    @State private var selectedPrinters: Set<String> = []
+    @State private var selectedFilaments: Set<String> = []
+    @State private var search = ""
+
+    var body: some View {
+        NavigationStack {
+            VStack(spacing: 0) {
+                Picker("Step", selection: $step) {
+                    ForEach(Step.allCases) { candidate in
+                        Text(candidate.rawValue).tag(candidate)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 10)
+
+                List {
+                    switch step {
+                    case .printers: printerGroups
+                    case .filaments: filamentGroups
+                    }
+                }
+                .listStyle(.insetGrouped)
+            }
+            .navigationTitle("Setup")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Apply") {
+                        presets.setInstalled(
+                            printers: selectedPrinters,
+                            filaments: selectedFilaments
+                        )
+                        dismiss()
+                    }
+                }
+            }
+        }
+        .onAppear {
+            selectedPrinters = presets.installedPrinters
+            selectedFilaments = presets.installedFilaments
+        }
+    }
+
+    // MARK: Printers (vendor-grouped checklists)
+
+    @ViewBuilder
+    private var printerGroups: some View {
+        ForEach(group(entries: presets.machines), id: \.0) { group in
+            Section(group.0) {
+                ForEach(group.1, id: \.name) { entry in
+                    checkRow(
+                        name: entry.name,
+                        checked: selectedPrinters.contains(entry.name),
+                        hint: !entry.isCompatible ? "incompatible with current filaments" : nil
+                    ) {
+                        if selectedPrinters.contains(entry.name) {
+                            selectedPrinters.remove(entry.name)
+                        } else {
+                            selectedPrinters.insert(entry.name)
+                            preselectCompatibleFilaments(with: entry)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Desktop: picking a printer installs its default materials — we
+    /// pre-check every filament compatible with it.
+    private func preselectCompatibleFilaments(with printer: PresetEntry) {
+        for entry in presets.filaments where entry.isCompatible {
+            if entry.vendor == printer.vendor || entry.origin != .system {
+                selectedFilaments.insert(entry.name)
+            }
+        }
+    }
+
+    // MARK: Filaments (vendor-grouped checklists)
+
+    @ViewBuilder
+    private var filamentGroups: some View {
+        Section {
+            HStack(spacing: 8) {
+                Image(systemName: "magnifyingglass")
+                    .foregroundStyle(.secondary)
+                TextField("Search filaments", text: $search)
+                    .textFieldStyle(.plain)
+                    .autocorrectionDisabled()
+                    .textInputAutocapitalization(.never)
+            }
+        }
+        ForEach(group(entries: filteredFilaments), id: \.0) { group in
+            Section(group.0) {
+                ForEach(group.1, id: \.name) { entry in
+                    checkRow(
+                        name: entry.name,
+                        checked: selectedFilaments.contains(entry.name),
+                        hint: !entry.isCompatible ? "not compatible with the selected printers" : nil
+                    ) {
+                        if selectedFilaments.contains(entry.name) {
+                            selectedFilaments.remove(entry.name)
+                        } else {
+                            selectedFilaments.insert(entry.name)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private var filteredFilaments: [PresetEntry] {
+        guard !search.isEmpty else { return presets.filaments }
+        return presets.filaments.filter {
+            $0.name.localizedCaseInsensitiveContains(search) ||
+                $0.vendor.localizedCaseInsensitiveContains(search)
+        }
+    }
+
+    // MARK: helpers
+
+    private func group(entries: [PresetEntry]) -> [(String, [PresetEntry])] {
+        let others = entries.filter { $0.origin != .system }
+        let byVendor = Dictionary(grouping: entries.filter { $0.origin == .system }) {
+            $0.vendor.isEmpty ? "Other" : $0.vendor
+        }
+        var result: [(String, [PresetEntry])] = []
+        if !others.isEmpty { result.append(("Project / user", others)) }
+        result.append(contentsOf: byVendor.map { ($0.key, $0.value) }.sorted { $0.0 < $1.0 })
+        return result
+    }
+
+    private func checkRow(
+        name: String, checked: Bool, hint: String?, action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            HStack {
+                Image(systemName: checked ? "checkmark.circle.fill" : "circle")
+                    .foregroundStyle(checked ? Color.accentColor : Color.secondary)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(name)
+                        .foregroundStyle(Color.primary)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.6)
+                    if let hint {
+                        Text(hint)
+                            .font(.caption2)
+                            .foregroundStyle(.orange)
+                    }
+                }
+                Spacer()
             }
         }
     }
