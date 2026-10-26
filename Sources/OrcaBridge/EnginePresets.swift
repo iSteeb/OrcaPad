@@ -612,6 +612,69 @@ public final class EnginePresets: @unchecked Sendable {
     }
 
     /// Desktop "Delete preset" (user presets only).
+    // MARK: Config import/export (ABI v35)
+
+    /// Desktop "Export preset bundle" (fork shape): the current printer +
+    /// per-slot filaments + process presets as individual json files in
+    /// `directory` (created). `includeSystem` also exports selected system
+    /// presets (a fresh triple is system-only).
+    public func exportConfigs(
+        to directory: String, includeSystem: Bool
+    ) -> Result<Int, BridgeError> {
+        let operation = "EnginePresets.exportConfigs"
+        lock.lock(); defer { lock.unlock() }
+        guard let handle else { return .failure(invalidHandle(operation)) }
+        var count: UInt32 = 0
+        if let error = bridgeFailure(operation: operation, call: {
+            directory.withCString { pointer in
+                orca_presets_export_configs(
+                    handle, pointer, includeSystem ? 1 : 0, &count)
+            }
+        }) {
+            return .failure(error)
+        }
+        return .success(Int(count))
+    }
+
+    /// Imports one preset json (kind inferred from its option keys).
+    /// Returns the imported (session) preset name.
+    public func importPreset(
+        from path: String
+    ) -> Result<String, BridgeError> {
+        let operation = "EnginePresets.importPreset"
+        lock.lock(); defer { lock.unlock() }
+        guard let handle else { return .failure(invalidHandle(operation)) }
+        var owned = orca_owned_string()
+        if let error = bridgeFailure(operation: operation, call: {
+            path.withCString { pointer in
+                orca_presets_import_preset(handle, pointer, &owned)
+            }
+        }) {
+            return .failure(error)
+        }
+        return consumeBridgeString(&owned, operation: operation)
+    }
+
+    /// Desktop "Import config bundle": a vendor bundle's `<Vendor>.json`
+    /// (siblings carry the presets). Returns the preset count loaded into
+    /// the session (non-destructive).
+    public func importBundle(
+        from vendorJSONPath: String
+    ) -> Result<Int, BridgeError> {
+        let operation = "EnginePresets.importBundle"
+        lock.lock(); defer { lock.unlock() }
+        guard let handle else { return .failure(invalidHandle(operation)) }
+        var count: UInt32 = 0
+        if let error = bridgeFailure(operation: operation, call: {
+            vendorJSONPath.withCString { pointer in
+                orca_presets_import_bundle(handle, pointer, &count)
+            }
+        }) {
+            return .failure(error)
+        }
+        return .success(Int(count))
+    }
+
     public func deleteUser(kind: PresetKind, name: String) -> Result<Void, BridgeError> {
         let operation = "EnginePresets.deleteUser"
         lock.lock(); defer { lock.unlock() }

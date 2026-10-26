@@ -31,6 +31,8 @@ struct PrepareTabView: View {
     /// Desktop UnsavedChangesDialog: a selection waiting for a decision
     /// about the modified preset it would replace.
     @State private var pendingSelection: PendingSelection?
+    @State private var importPresetPresented = false
+    @State private var importBundlePresented = false
 
     private struct PendingSelection: Identifiable {
         let kind: PresetKind
@@ -197,6 +199,24 @@ struct PrepareTabView: View {
         .sheet(isPresented: $setupPresented) {
             SetupWizardSheet(presets: presets)
         }
+        .fileImporter(
+            isPresented: $importPresetPresented,
+            allowedContentTypes: [.json],
+            onCompletion: { result in
+                if case .success(let url) = result {
+                    Task { await presets.importPreset(at: url) }
+                }
+            }
+        )
+        .fileImporter(
+            isPresented: $importBundlePresented,
+            allowedContentTypes: [.json],
+            onCompletion: { result in
+                if case .success(let url) = result {
+                    Task { await presets.importBundle(at: url) }
+                }
+            }
+        )
     }
 
     /// The Prepare chrome: ONE wide, horizontally SCROLLABLE pill.
@@ -252,6 +272,33 @@ struct PrepareTabView: View {
                 .accessibilityLabel(filterCompatible
                     ? "Filtering incompatible presets (tap to show all)"
                     : "Showing all presets (tap to filter)")
+                Divider().frame(height: 28)
+                Menu {
+                    Button {
+                        importPresetPresented = true
+                    } label: {
+                        Label("Import preset\u{2026}", systemImage: "square.and.arrow.down")
+                    }
+                    Button {
+                        importBundlePresented = true
+                    } label: {
+                        Label("Import config bundle\u{2026}", systemImage: "shippingbox")
+                    }
+                    Divider()
+                    Button {
+                        Task { await presets.exportCurrentConfigs() }
+                    } label: {
+                        Label("Export current presets\u{2026}", systemImage: "square.and.arrow.up")
+                    }
+                    if let exported = presets.lastExportDirectory {
+                        ShareLink(item: exported) {
+                            Label("Share \(exported.lastPathComponent)", systemImage: "square.and.arrow.up.circle")
+                        }
+                    }
+                } label: {
+                    ChromeToolLabel(symbol: "arrow.left.arrow.right.square", label: "Configs")
+                }
+                .buttonStyle(.plain)
                 Divider().frame(height: 28)
                 slicePillButton
             }

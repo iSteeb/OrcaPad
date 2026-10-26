@@ -825,11 +825,13 @@ priority = 114
 id = "prepare.config-import-export"
 area = "prepare"
 title = "Import / export configs and preset bundles"
-status = "missing"
+status = "partial"
 desktop = ["menu:Import Configs", "menu:Export Preset Bundle", "menu:Preset Bundle", "dialog:ExportConfigsDialog",
            "format:FT_INI"]
+evidence = ["abi:orca_presets_export_configs", "abi:orca_presets_import_preset",
+            "abi:orca_presets_import_bundle", 'client:func exportCurrentConfigs\(']
 work = "Bridge + UI"
-priority = 108
+gap = "json preset export/import (current selection as per-preset json files; single-preset import with kind inference) and vendor-bundle folder import done; legacy INI config files are not read and imports are session entries kept via save-as-user-preset"
 
 [[feature]]
 id = "prepare.create-presets"

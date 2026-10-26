@@ -7,7 +7,7 @@ extern "C" {
 #endif
 
 /// Version of the C ABI contract in this header. Callers verify it at runtime.
-#define ORCA_BRIDGE_ABI_VERSION ((uint32_t)34)
+#define ORCA_BRIDGE_ABI_VERSION ((uint32_t)35)
 
 typedef int32_t orca_status_code;
 #define ORCA_STATUS_OK                     ((orca_status_code)0)
@@ -673,6 +673,32 @@ orca_result orca_presets_reset_value(orca_presets *presets, int32_t kind,
 /// Restores the whole edited preset of `kind` from its selected system
 /// preset.
 orca_result orca_presets_reset_kind(orca_presets *presets, int32_t kind);
+/// Desktop "Export preset bundle" (fork shape: export_current_configs,
+/// ABI v35): writes the CURRENT printer + per-slot filaments + process
+/// presets as individual `<name>.json` files into `directory` (created;
+/// existing files overwritten). `include_system` also exports selected
+/// system presets (a fresh triple is system-only). Returns the file count.
+orca_result orca_presets_export_configs(orca_presets *presets,
+                                        const char *directory,
+                                        uint8_t include_system,
+                                        uint32_t *out_count);
+
+/// Import ONE preset json (the counterpart of desktop's per-preset
+/// "Export preset", ABI v35): the file's `type` field picks the collection
+/// (machine / filament / process); it loads as a SESSION entry named after
+/// the file — keep it permanently by saving it as a user preset. The
+/// imported name comes back through `out_name`.
+orca_result orca_presets_import_preset(orca_presets *presets, const char *path,
+                                       orca_owned_string *out_name);
+
+/// Desktop "Import config bundle" (vendor json, ABI v35): `path` is the
+/// bundle's `<Vendor>.json` (siblings carry the presets); every preset
+/// loads into the session NON-destructively (existing selections stay;
+/// entries persist per the same rule — save as user preset to keep).
+/// Returns the number of presets loaded.
+orca_result orca_presets_import_bundle(orca_presets *presets, const char *path,
+                                       uint32_t *out_count);
+
 /// Serialized key→value dump of either the edited (`edited` != 0) or the
 /// selected system (`edited` == 0) preset config of `kind`; the client diffs
 /// the two to detect modified values.

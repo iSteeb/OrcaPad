@@ -992,6 +992,174 @@ orca_result orca_presets_config_dump(orca_presets *presets, int32_t kind,
     });
 }
 
+// --- config import/export (ABI v35) -----------------------------------------
+
+orca_result orca_presets_export_configs(orca_presets *presets,
+                                        const char *directory,
+                                        uint8_t include_system,
+                                        uint32_t *out_count) {
+    constexpr const char *operation = "orca_presets_export_configs";
+    if (out_count) *out_count = 0;
+    if (!presets)
+        return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation,
+                            "presets handle is null");
+    if (!directory || !directory[0] || !out_count)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "directory is empty or output pointer is null");
+    return orcapad_guard(operation, [&]() -> orca_result {
+        // export_current_configs writes `<name>.json` into a directory it
+        // expects to exist (save_to_json fails silently on a missing parent
+        // — the physical-printer lesson).
+        boost::system::error_code ec;
+        boost::filesystem::create_directories(
+            boost::filesystem::path(directory), ec);
+        if (ec)
+            return orcapad_fail(ORCA_STATUS_IO_FAILURE, operation,
+                                "could not create the export directory");
+        // include_modify = edited working copies (the current state);
+        // overwrite-confirm = always (OrcaPad exports into a fresh dir).
+        const std::vector<std::string> files =
+            presets->bundle->export_current_configs(
+                directory, [](const std::string &) { return 1; },
+                true, include_system != 0);
+        if (files.empty())
+            return orcapad_fail(ORCA_STATUS_INVALID_CONFIGURATION, operation,
+                                include_system
+                                    ? "no presets to export"
+                                    : "the selection holds only system presets (enable include_system)");
+        *out_count = static_cast<uint32_t>(files.size());
+        return orcapad_ok();
+    });
+}
+
+/// Preset json → collection kind. Preset files carry NO `type` header (the
+/// engine's own bundles encode kind in the subfolder), so infer it from the
+/// option keys the three config domains define — checked in an order where
+/// each kind's keys are exclusive to it.
+static bool orcapad_preset_kind_from_json(const char *path,
+                                          int32_t *out_kind,
+                                          std::string *out_error) {
+    std::ifstream file(path, std::ios::in | std::ios::binary);
+    if (!file) {
+        *out_error = "the preset file cannot be opened";
+        return false;
+    }
+    try {
+        nlohmann::json root;
+        file >> root;
+        if (!root.is_object()) {
+            *out_error = "the file is not a preset json object";
+            return false;
+        }
+        const bool has_machine = root.contains("printer_model") ||
+                                  root.contains("printable_area") ||
+                                  root.contains("gcode_flavor") ||
+                                  root.contains("nozzle_diameter");
+        const bool has_filament = root.contains("filament_diameter") ||
+                                  root.contains("filament_type") ||
+                                  root.contains("filament_colour");
+        const bool has_process = root.contains("layer_height") ||
+                                 root.contains("sparse_infill_density") ||
+                                 root.contains("line_width");
+        if (has_machine && !has_filament && !has_process) *out_kind = 0;
+        else if (has_filament && !has_machine) *out_kind = 1;
+        else if (has_process && !has_machine && !has_filament) *out_kind = 2;
+        else {
+            *out_error = "cannot tell machine/filament/process from the "
+                         "preset's keys (ambiguous or empty)";
+            return false;
+        }
+        return true;
+    } catch (const std::exception &error) {
+        *out_error = std::string("invalid json: ") + error.what();
+        return false;
+    }
+}
+
+orca_result orca_presets_import_preset(orca_presets *presets, const char *path,
+                                       orca_owned_string *out_name) {
+    constexpr const char *operation = "orca_presets_import_preset";
+    if (out_name) *out_name = orcapad_empty_string();
+    if (!presets)
+        return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation,
+                            "presets handle is null");
+    if (!path || !path[0] || !out_name)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "path is empty or output pointer is null");
+    struct stat probe;
+    if (stat(path, &probe) != 0)
+        return orcapad_fail(ORCA_STATUS_IO_FAILURE, operation,
+                            "preset file is not accessible");
+    return orcapad_guard(operation, [&]() -> orca_result {
+        int32_t kind = -1;
+        std::string kind_error;
+        if (!orcapad_preset_kind_from_json(path, &kind, &kind_error))
+            return orcapad_fail(ORCA_STATUS_INVALID_CONFIGURATION, operation,
+                                kind_error.c_str());
+        std::map<std::string, std::string> key_values;
+        std::string reason;
+        Slic3r::DynamicPrintConfig config;
+        config.load_from_json(
+            path, Slic3r::ForwardCompatibilitySubstitutionRule::EnableSilent,
+            key_values, reason);
+        if (!reason.empty())
+            return orcapad_fail(ORCA_STATUS_INVALID_CONFIGURATION, operation,
+                                reason.c_str());
+        const std::string name =
+            boost::filesystem::path(path).stem().string();
+        Slic3r::PresetCollection &collection = presets->collection(kind);
+        // Avoid name clashes with the "(modified)" suffix rule: importing a
+        // name twice replaces the session entry (desktop load_preset keeps
+        // one entry per name).
+        collection.load_preset(path, name, std::move(config), true);
+        if (!orcapad_copy_string(name.c_str(), out_name))
+            return orcapad_fail(ORCA_STATUS_OUT_OF_MEMORY, operation,
+                                "could not allocate the imported name");
+        return orcapad_ok();
+    });
+}
+
+orca_result orca_presets_import_bundle(orca_presets *presets, const char *path,
+                                       uint32_t *out_count) {
+    constexpr const char *operation = "orca_presets_import_bundle";
+    if (out_count) *out_count = 0;
+    if (!presets)
+        return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation,
+                            "presets handle is null");
+    if (!path || !path[0] || !out_count)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "path is empty or output pointer is null");
+    struct stat probe;
+    if (stat(path, &probe) != 0 || !S_ISREG(probe.st_mode))
+        return orcapad_fail(ORCA_STATUS_IO_FAILURE, operation,
+                            "the vendor json is not accessible");
+    return orcapad_guard(operation, [&]() -> orca_result {
+        const std::string directory =
+            boost::filesystem::path(path).parent_path().string();
+        const std::string vendor =
+            boost::filesystem::path(path).stem().string();
+        // NO LoadSystem/Reset flags: the bundle loads into the session
+        // without touching the current selections (ConfigWizard resets —
+        // OrcaPad's import must not).
+        try {
+            const auto result = presets->bundle->load_vendor_configs_from_json(
+                directory, vendor, Slic3r::PresetBundle::LoadConfigBundleAttributes{},
+                Slic3r::ForwardCompatibilitySubstitutionRule::EnableSilent);
+            if (result.second == 0)
+                return orcapad_fail(ORCA_STATUS_INVALID_MODEL, operation,
+                                    "the bundle contains no presets");
+            *out_count = static_cast<uint32_t>(result.second);
+            return orcapad_ok();
+        } catch (const Slic3r::ConfigurationError &error) {
+            // Most common cause: a vendor whose presets are already loaded
+            // ("duplicated defines") — a configuration problem, not an
+            // engine crash.
+            return orcapad_fail(ORCA_STATUS_INVALID_CONFIGURATION, operation,
+                                error.what());
+        }
+    });
+}
+
 // --- multi-filament (desktop Sidebar filament list, ABI v31) ---------------
 
 void orca_filament_slots_dispose(orca_filament_slots *slots) {

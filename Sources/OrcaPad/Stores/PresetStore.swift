@@ -742,6 +742,111 @@ final class PresetStore {
         BedTypeMemory.store(bedTypeMemory)
     }
 
+    // MARK: Config import/export (ABI v35)
+
+    /// The last preset export directory (Share menu target).
+    private(set) var lastExportDirectory: URL?
+
+    /// Desktop "Export preset bundle": the current selection as json files
+    /// under `Documents/Exports/presets-N/`.
+    func exportCurrentConfigs() async {
+        guard let engine, isReady, !isSelecting else {
+            status.report(.presets, "export blocked: presets are busy")
+            return
+        }
+        guard !isEngineBusy else {
+            status.report(.presets, "presets: locked while slicing — available again when the slice finishes")
+            return
+        }
+        isSelecting = true
+        defer { isSelecting = false }
+        let result = await BackgroundWork.run(operation: "export presets") { () -> URL in
+            let base = FileManager.default.urls(
+                for: .documentDirectory, in: .userDomainMask
+            )[0].appendingPathComponent("Exports", isDirectory: true)
+            try FileManager.default.createDirectory(
+                at: base, withIntermediateDirectories: true)
+            var directory = base.appendingPathComponent("presets", isDirectory: true)
+            var ordinal = 2
+            while FileManager.default.fileExists(atPath: directory.path) {
+                directory = base.appendingPathComponent(
+                    "presets-\(ordinal)", isDirectory: true)
+                ordinal += 1
+            }
+            try FileManager.default.createDirectory(
+                at: directory, withIntermediateDirectories: true)
+            let count = try engine.exportConfigs(
+                to: directory.path, includeSystem: true).get()
+            guard count > 0 else {
+                throw AppFailure.invariant(
+                    operation: "export presets",
+                    diagnostic: "no presets were exported")
+            }
+            return directory
+        }
+        switch result {
+        case .success(let directory):
+            lastExportDirectory = directory
+            status.report(.presets, "presets exported to Files \u{25b8} Exports \u{25b8} \(directory.lastPathComponent)")
+        case .failure(let failure):
+            status.report(.presets, failure: failure)
+        }
+    }
+
+    /// Imports ONE preset json (kind inferred from its keys). Session entry —
+    /// the user keeps it by saving it as a user preset.
+    func importPreset(at url: URL) async {
+        guard let engine, isReady, !isSelecting else {
+            status.report(.presets, "import blocked: presets are busy")
+            return
+        }
+        guard !isEngineBusy else {
+            status.report(.presets, "presets: locked while slicing — available again when the slice finishes")
+            return
+        }
+        isSelecting = true
+        defer { isSelecting = false }
+        let result = await BackgroundWork.run(operation: "import preset") { () -> String in
+            let name = try engine.importPreset(from: url.path).get()
+            return "preset \u{201c}\(name)\u{201d} imported — save it to keep it"
+        }
+        switch result {
+        case .success(let note):
+            if await refreshFromEngine() {
+                status.report(.presets, note)
+            }
+        case .failure(let failure):
+            status.report(.presets, failure: failure)
+        }
+    }
+
+    /// Imports a vendor config bundle (`<Vendor>.json` picked inside the
+    /// bundle folder; siblings carry the presets). Non-destructive.
+    func importBundle(at vendorJSON: URL) async {
+        guard let engine, isReady, !isSelecting else {
+            status.report(.presets, "import blocked: presets are busy")
+            return
+        }
+        guard !isEngineBusy else {
+            status.report(.presets, "presets: locked while slicing — available again when the slice finishes")
+            return
+        }
+        isSelecting = true
+        defer { isSelecting = false }
+        let result = await BackgroundWork.run(operation: "import bundle") { () -> String in
+            let count = try engine.importBundle(from: vendorJSON.path).get()
+            return "\(count) bundle preset(s) imported — save presets to keep them"
+        }
+        switch result {
+        case .success(let note):
+            if await refreshFromEngine() {
+                status.report(.presets, note)
+            }
+        case .failure(let failure):
+            status.report(.presets, failure: failure)
+        }
+    }
+
     // MARK: Desktop-parity config overrides
 
     /// Writes a serialized override into the edited preset of `kind` and

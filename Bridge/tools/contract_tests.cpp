@@ -276,7 +276,7 @@ static void test_md5_shim() {
 
 static void test_abi_version() {
     CHECK_EQ(orca_bridge_abi_version(), ORCA_BRIDGE_ABI_VERSION);
-    CHECK_EQ(ORCA_BRIDGE_ABI_VERSION, 34);
+    CHECK_EQ(ORCA_BRIDGE_ABI_VERSION, 35);
 }
 
 struct ProgressRecord {
@@ -3328,7 +3328,87 @@ static void test_arrange_orient(const std::string &dir, const std::string &data_
     orca_plater_free(plater);
 }
 
-// ABI v34: plane cut (CutUtils::Cut)
+// ABI v35: config import/export
+static void test_config_io(const std::string &dir, const std::string &data_dir) {
+    orca_presets *presets = nullptr;
+    GUARD(g0, orca_presets_new(data_dir.c_str(), &presets));
+    expect_ok(g0, "presets_new");
+    GUARD(g1, orca_presets_select(presets, "Bambu Lab X1 Carbon 0.4 nozzle",
+                                  "Bambu PLA Basic @BBL X1C",
+                                  "0.20mm Standard @BBL X1C"));
+    expect_ok(g1, "select X1C");
+
+    // export the current triple (system presets included)
+    const std::string out_dir = dir + "/exported-presets";
+    uint32_t count = 0;
+    GUARD(e1, orca_presets_export_configs(presets, out_dir.c_str(), 1, &count));
+    expect_ok(e1, "export current configs");
+    CHECK(count >= 3);
+
+    // re-import one exported preset json: name round-trips, is listed
+    orca_owned_string imported{};
+    const std::string filament = out_dir + "/Bambu PLA Basic @BBL X1C.json";
+    GUARD(i1, orca_presets_import_preset(presets, filament.c_str(), &imported));
+    expect_ok(i1, "import preset json");
+    CHECK(imported.data && strcmp(imported.data, "Bambu PLA Basic @BBL X1C") == 0);
+    orca_owned_string_dispose(&imported);
+    int32_t listed = -1;
+    GUARD(i2, orca_presets_list_count(presets, 1, &listed));
+    expect_ok(i2, "list filaments after import");
+    CHECK(listed > 0);
+
+    // typed rejections
+    GUARD(x1, orca_presets_import_preset(presets, (dir + "/nope.json").c_str(), &imported));
+    expect_code(x1, ORCA_STATUS_IO_FAILURE, "import missing file");
+    GUARD(x2, orca_presets_export_configs(presets, nullptr, 1, &count));
+    expect_code(x2, ORCA_STATUS_INVALID_ARGUMENT, "export null dir");
+
+    // vendor bundle import: a synthetic bundle (the system vendors are
+    // already installed — importing one is the duplicate case below)
+    const std::string vendor_dir = dir + "/TestVendorBundle/TestVendor";
+    {
+        mkdir(dir.c_str(), 0755);
+        mkdir((dir + "/TestVendorBundle").c_str(), 0755);
+        mkdir(vendor_dir.c_str(), 0755);
+        mkdir((vendor_dir + "/process").c_str(), 0755);
+        FILE *root = fopen((dir + "/TestVendorBundle/TestVendor.json").c_str(), "w");
+        CHECK(root != nullptr);
+        if (root) {
+            fprintf(root, "{\"name\": \"TestVendor\", \"version\": \"01.00.00.00\", "
+                          "\"description\": \"test bundle\", "
+                          "\"machine_model_list\": [], "
+                          "\"machine_list\": [], "
+                          "\"process_list\": ["
+                          "{\"name\": \"TestVendor Process\", "
+                          "\"sub_path\": \"process/TestVendor Process.json\"}], "
+                          "\"filament_list\": []}");
+            fclose(root);
+        }
+        FILE *preset = fopen((vendor_dir + "/process/TestVendor Process.json").c_str(), "w");
+        CHECK(preset != nullptr);
+        if (preset) {
+            fprintf(preset, "{\"name\": \"TestVendor Process\", \"version\": \"1\", "
+                            "\"layer_height\": \"0.2\", "
+                            "\"sparse_infill_density\": \"15%%\"}");
+            fclose(preset);
+        }
+    }
+    uint32_t loaded = 0;
+    GUARD(b1, orca_presets_import_bundle(
+                  presets, (dir + "/TestVendorBundle/TestVendor.json").c_str(), &loaded));
+    expect_ok(b1, "import vendor bundle");
+    CHECK(loaded > 0);
+    // a second import of the same names is a typed duplicate failure
+    GUARD(b1b, orca_presets_import_bundle(
+                   presets, (dir + "/TestVendorBundle/TestVendor.json").c_str(), &loaded));
+    expect_code(b1b, ORCA_STATUS_INVALID_CONFIGURATION, "import duplicate bundle");
+    GUARD(b2, orca_presets_import_bundle(presets, (dir + "/novendor.json").c_str(), &count));
+    expect_code(b2, ORCA_STATUS_IO_FAILURE, "import missing bundle");
+
+    orca_presets_free(presets);
+}
+
+// ABI v34: plane cut (CutUtils::Cut)// ABI v34: plane cut (CutUtils::Cut)
 static void test_cut(const std::string &dir) {
     orca_plater *plater = nullptr;
     GUARD(g0, orca_plater_new(&plater));
@@ -4293,6 +4373,7 @@ int main() {
     test_slice_cancel(dir);
     test_exports(dir, data_dir);
     test_cut(dir);
+    test_config_io(dir, data_dir);
     test_project_roundtrip(dir, data_dir);
     test_user_presets(data_dir);
     test_physical_printers(data_dir);
