@@ -7,7 +7,7 @@ extern "C" {
 #endif
 
 /// Version of the C ABI contract in this header. Callers verify it at runtime.
-#define ORCA_BRIDGE_ABI_VERSION ((uint32_t)32)
+#define ORCA_BRIDGE_ABI_VERSION ((uint32_t)33)
 
 typedef int32_t orca_status_code;
 #define ORCA_STATUS_OK                     ((orca_status_code)0)
@@ -812,6 +812,21 @@ orca_result orca_project_save(orca_plater *plater, orca_presets *presets,
                               const char *path, uint32_t thumbnail_size,
                               const uint8_t *thumbnail_rgba);
 
+// --- exports (ABI v33) ------------------------------------------------------
+
+/// Desktop object-list "Export STL": one object's merged mesh (all parts)
+/// as an STL file. Not a mutation.
+orca_result orca_plater_object_export_stl(orca_plater *plater,
+                                          orca_object_id object_id,
+                                          const char *path, uint8_t binary);
+
+/// Desktop "Export generic 3MF" (`Format/3mf.cpp store_3mf`): geometry
+/// only, no engine config — the interchange format every tool reads.
+/// Not a mutation.
+orca_result orca_project_export_3mf(orca_plater *plater, const char *path);
+
+
+
 /// Parsed G-code for the toolpath preview. Loading runs the full upstream
 /// GCodeProcessor over the file (CPU-heavy: run off the main thread; the
 /// engine mutex serializes it against other engine work).
@@ -990,6 +1005,18 @@ orca_result orca_plater_slice_to_gcode_with_presets(
     orca_plater *plater, orca_presets *presets, const char *gcode_path,
     orca_progress_fn progress, void *ctx, orca_slice_job *job,
     orca_slice_report *out_report);
+
+/// Desktop "Export sliced 3MF" (Plater::export_gcode_3mf, ABI v33): slices
+/// every non-empty plate (slice-all core) and embeds each plate's G-code
+/// into a BBS 3MF (`SaveStrategy::WithGcode|SkipModel` — the file printers
+/// and Bambu Studio load from USB). Presets null = the preset-free overlay
+/// path. Blocking; run off the main thread; progress scales across plates.
+orca_result orca_plater_export_gcode_3mf(orca_plater *plater,
+                                         orca_presets *presets,
+                                         const char *path,
+                                         orca_progress_fn progress, void *ctx,
+                                         orca_slice_job *job,
+                                         orca_slice_report *out_report);
 
 #if defined(__cplusplus)
 }

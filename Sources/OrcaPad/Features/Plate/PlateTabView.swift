@@ -441,6 +441,63 @@ struct PlateTabView: View {
                         }
                     }
                     Menu {
+                        if let selection = document.selection {
+                            Button {
+                                Task {
+                                    await document.exportSTL(
+                                        objectID: selection.objectID,
+                                        objectName: document.scene?
+                                            .object(id: selection.objectID)?.name ?? "object")
+                                }
+                            } label: {
+                                Label("STL (selected object)…", systemImage: "cube")
+                            }
+                        }
+                        Button {
+                            let name = projectName.isEmpty ? defaultProjectName : projectName
+                            Task { await document.export3mf(projectName: name) }
+                        } label: {
+                            Label("Generic 3MF…", systemImage: "shippingbox")
+                        }
+                        if let engine = environment.presets.engineForSlicing {
+                            Button {
+                                let name = projectName.isEmpty ? defaultProjectName : projectName
+                                Task {
+                                    await document.exportGcode3mf(
+                                        projectName: name, presets: engine, bed: bed)
+                                }
+                            } label: {
+                                Label("Sliced 3MF (.gcode.3mf)…", systemImage: "internaldrive")
+                            }
+                            .disabled(
+                                document.scene?.objects.isEmpty != false || document.isBusy)
+                        }
+                        if let export = document.lastExport {
+                            ShareLink(item: export) {
+                                Label("Share \(export.lastPathComponent)", systemImage: "square.and.arrow.up")
+                            }
+                        }
+                    } label: {
+                        Label("Export…", systemImage: "square.and.arrow.up")
+                    }
+                    .disabled(document.scene?.objects.isEmpty != false || document.isBusy)
+                    let recentProjects = EnginePaths.recentProjects()
+                    if !recentProjects.isEmpty {
+                        Menu {
+                            ForEach(recentProjects, id: \.absoluteString) { url in
+                                Button(url.deletingPathExtension().lastPathComponent) {
+                                    if document.scene?.objects.isEmpty == false {
+                                        replaceConfirmation = url
+                                    } else {
+                                        Task { await environment.openProject(url) }
+                                    }
+                                }
+                            }
+                        } label: {
+                            Label("Recent", systemImage: "clock.arrow.circlepath")
+                        }
+                    }
+                    Menu {
                         ForEach(CameraViewPreset.allCases) { preset in
                             Button(preset.rawValue) {
                                 document.applyCameraView(preset)

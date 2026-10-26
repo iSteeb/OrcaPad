@@ -220,17 +220,81 @@ enum EnginePaths {
         // own file (name, name-2, name-3 …). The G-code folder is visible in
         // Files, so previous results stay available until the user deletes
         // them — no last-slice-wins data loss.
+        return uniqueFileURL(
+            in: directory, name: baseName, pathExtension: "gcode")
+    }
+
+    /// A never-overwriting output path: `<name>.<ext>`, then `-2`, `-3` ...
+    /// (visible history in Files; no silent last-write-wins).
+    static func uniqueFileURL(
+        in directory: URL, name baseName: String, pathExtension: String
+    ) -> URL {
+        let fileManager = FileManager.default
         var candidate = directory
             .appendingPathComponent(baseName)
-            .appendingPathExtension("gcode")
+            .appendingPathExtension(pathExtension)
         var ordinal = 2
         while fileManager.fileExists(atPath: candidate.path) {
             candidate = directory
                 .appendingPathComponent("\(baseName)-\(ordinal)")
-                .appendingPathExtension("gcode")
+                .appendingPathExtension(pathExtension)
             ordinal += 1
         }
         return candidate
+    }
+
+    /// `Documents/Exports/<name>.<ext>` (STL / generic 3MF): sanitized and
+    /// unique. The folder is Files-visible.
+    static func exportURL(name: String, pathExtension: String) throws -> URL {
+        let fileManager = FileManager.default
+        let directory = fileManager.urls(
+            for: .documentDirectory, in: .userDomainMask
+        )[0].appendingPathComponent("Exports", isDirectory: true)
+        do {
+            try fileManager.createDirectory(
+                at: directory, withIntermediateDirectories: true)
+        } catch {
+            throw EnginePathError.gcodeDirectory(String(reflecting: error))
+        }
+        return uniqueFileURL(
+            in: directory,
+            name: sanitizedBaseName((name as NSString).deletingPathExtension),
+            pathExtension: pathExtension)
+    }
+
+    /// The most recently modified projects (File menu "Recent", desktop
+    /// recent-files parity). Empty when none exist yet.
+    static func recentProjects(limit: Int = 5) -> [URL] {
+        let fileManager = FileManager.default
+        let directory = fileManager.urls(
+            for: .documentDirectory, in: .userDomainMask
+        )[0].appendingPathComponent("Projects", isDirectory: true)
+        let contents: [URL]
+        do {
+            contents = try fileManager.contentsOfDirectory(
+                at: directory,
+                includingPropertiesForKeys: [.contentModificationDateKey])
+        } catch {
+            // No Projects directory yet: nothing is recent (not an error —
+            // the first save creates it).
+            return []
+        }
+        var projects: [(url: URL, date: Date)] = []
+        for url in contents where url.pathExtension.lowercased() == "3mf" {
+            var date = Date.distantPast
+            do {
+                date = try url.resourceValues(
+                    forKeys: [.contentModificationDateKey]
+                ).contentModificationDate ?? date
+            } catch {
+                // Undatable entry sinks to the bottom of the recent list.
+            }
+            projects.append((url, date))
+        }
+        return projects
+            .sorted { $0.date > $1.date }
+            .prefix(limit)
+            .map(\.url)
     }
 
     /// `Application Support/Autosave/autosave.3mf` — the lightweight

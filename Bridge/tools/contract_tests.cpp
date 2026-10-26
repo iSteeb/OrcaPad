@@ -276,7 +276,7 @@ static void test_md5_shim() {
 
 static void test_abi_version() {
     CHECK_EQ(orca_bridge_abi_version(), ORCA_BRIDGE_ABI_VERSION);
-    CHECK_EQ(ORCA_BRIDGE_ABI_VERSION, 32);
+    CHECK_EQ(ORCA_BRIDGE_ABI_VERSION, 33);
 }
 
 struct ProgressRecord {
@@ -3328,6 +3328,81 @@ static void test_arrange_orient(const std::string &dir, const std::string &data_
     orca_plater_free(plater);
 }
 
+// ABI v33: exports (object STL / generic 3MF / sliced .gcode.3mf)
+static void test_exports(const std::string &dir, const std::string &data_dir) {
+    orca_plater *plater = nullptr;
+    GUARD(g0, orca_plater_new(&plater));
+    expect_ok(g0, "plater_new");
+    orca_revision revision = 0;
+    const std::string cube = write_cube_stl(dir, "export_cube.stl");
+    orca_object_id object_id = 0;
+    GUARD(g1, import_one(plater, cube.c_str(), 100.0, 100.0, &object_id, &revision));
+    expect_ok(g1, "import cube");
+
+    // STL export round-trip: the exported mesh re-imports as one object
+    const std::string stl = dir + "/exported.stl";
+    GUARD(e1, orca_plater_object_export_stl(plater, object_id, stl.c_str(), 1));
+    expect_ok(e1, "export stl");
+    orca_object_id reimported = 0;
+    uint32_t reimported_count = 0;
+    GUARD(e2, orca_plater_import_model(plater, stl.c_str(), 100.0, 100.0,
+                                       &reimported, &reimported_count, &revision));
+    expect_ok(e2, "reimport stl");
+    CHECK_EQ(reimported_count, 1u);
+    // drop the re-imported copy: the generic-3MF round-trip below starts
+    // from exactly one object
+    GUARD(e2b, orca_plater_object_delete(plater, reimported, &revision));
+    expect_ok(e2b, "delete reimported stl object");
+    GUARD(e3, orca_plater_object_export_stl(plater, object_id, nullptr, 1));
+    expect_code(e3, ORCA_STATUS_INVALID_ARGUMENT, "stl null path");
+    GUARD(e3b, orca_plater_object_export_stl(plater, 999999, stl.c_str(), 1));
+    expect_code(e3b, ORCA_STATUS_NOT_FOUND, "stl missing object");
+
+    // generic 3MF export: geometry only, re-imports
+    const std::string generic = dir + "/exported.3mf";
+    GUARD(e4, orca_project_export_3mf(plater, generic.c_str()));
+    expect_ok(e4, "export generic 3mf");
+    orca_object_id generic_id = 0;
+    uint32_t generic_count = 0;
+    GUARD(e5, orca_plater_import_model(plater, generic.c_str(), 100.0, 100.0,
+                                       &generic_id, &generic_count, &revision));
+    expect_ok(e5, "reimport generic 3mf");
+    CHECK_EQ(generic_count, 1u);
+    GUARD(e6, orca_project_export_3mf(plater, (dir + "/x.gcode").c_str()));
+    expect_code(e6, ORCA_STATUS_INVALID_ARGUMENT, "3mf wrong suffix");
+
+    // sliced .gcode.3mf: full slice embedded, zip magic, real size
+    orca_presets *presets = nullptr;
+    GUARD(p0, orca_presets_new(data_dir.c_str(), &presets));
+    expect_ok(p0, "presets_new");
+    GUARD(p1, orca_presets_select(presets, "Bambu Lab X1 Carbon 0.4 nozzle",
+                                  "Bambu PLA Basic @BBL X1C",
+                                  "0.20mm Standard @BBL X1C"));
+    expect_ok(p1, "select X1C");
+    const std::string sliced = dir + "/exported.gcode.3mf";
+    orca_slice_report report;
+    GUARD(p2, orca_plater_export_gcode_3mf(plater, presets, sliced.c_str(),
+                                           nullptr, nullptr, nullptr, &report));
+    expect_ok(p2, "export sliced 3mf");
+    CHECK(report.time_estimate_s > 0.0);
+    CHECK(report.gcode_bytes > 1000);
+    FILE *file = fopen(sliced.c_str(), "rb");
+    CHECK(file != nullptr);
+    if (file) {
+        unsigned char magic[2] = {0, 0};
+        fread(&magic, 1, 2, file);
+        fclose(file);
+        CHECK(magic[0] == 'P' && magic[1] == 'K');
+    }
+    GUARD(p3, orca_plater_export_gcode_3mf(plater, presets,
+                                           (dir + "/x.gcode").c_str(),
+                                           nullptr, nullptr, nullptr, &report));
+    expect_code(p3, ORCA_STATUS_INVALID_ARGUMENT, "sliced 3mf wrong suffix");
+    orca_slice_report_dispose(&report);
+    orca_presets_free(presets);
+    orca_plater_free(plater);
+}
+
 static void test_project_roundtrip(const std::string &dir, const std::string &data_dir) {
     orca_presets *presets = nullptr;
     GUARD(gp, orca_presets_new(data_dir.c_str(), &presets));
@@ -4137,6 +4212,7 @@ int main() {
     test_slice_gcode_warning_levels(dir, data_dir);
     test_custom_gcode(dir, data_dir);
     test_slice_cancel(dir);
+    test_exports(dir, data_dir);
     test_project_roundtrip(dir, data_dir);
     test_user_presets(data_dir);
     test_physical_printers(data_dir);

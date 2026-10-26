@@ -1315,29 +1315,33 @@ evidence = ["client:ShareLink"]
 id = "files.export-sliced-3mf"
 area = "files"
 title = "Export sliced 3MF (.gcode.3mf)"
-status = "missing"
+status = "partial"
 desktop = ["menu:Export plate sliced file", "menu:Export all plate sliced file", "format:FT_GCODE_3MF"]
+evidence = ["abi:orca_plater_export_gcode_3mf", 'client:func exportGcode3mf\(']
 work = "Bridge + UI"
-priority = 153
+gap = "ALL-plates export only (desktop's per-plate export shares the same engine path but is not exposed separately)"
+note = "ABI v33 Plater::export_gcode_3mf parity: every non-empty plate sliced (slice-all core) and embedded via SaveStrategy::WithGcode|SkipModel with per-plate PlateData gcode_file/membership, secure config and plate thumbnail; single all-plates export (desktop's per-plate variant uses the same engine path)"
 
 [[feature]]
 id = "files.export-generic-3mf"
 area = "files"
 title = "Export generic 3MF"
-status = "missing"
+status = "done"
 desktop = ["menu:Export Generic 3MF"]
+evidence = ["abi:orca_project_export_3mf", 'client:func export3mf\(']
 work = "Bridge + UI"
-priority = 154
+note = "ABI v33 store_3mf (geometry-only interchange 3MF); Documents/Exports, shareable"
 
 [[feature]]
 id = "files.export-stl"
 area = "files"
 title = "Export objects as STL"
-status = "missing"
-desktop = ["menu:Export all objects as one STL", "menu:Export all objects as STLs", "context:Export as one STL",
-           "context:Export as STLs"]
+status = "partial"
+desktop = ["context:Export as one STL", "context:Export as STLs", "menu:Export all objects as one STL", "menu:Export all objects as STLs"]
+evidence = ["abi:orca_plater_object_export_stl", 'client:func exportSTL\(']
 work = "Bridge + UI"
-priority = 151
+gap = "per-object binary STL done (ABI v33, merged parts, re-import contract test); the export-all-objects variants are not implemented"
+note = "ABI v33 per-object binary STL (merged parts) with a re-import contract test"
 
 [[feature]]
 id = "files.export-drc"
@@ -1362,10 +1366,11 @@ priority = 155
 id = "files.recent"
 area = "files"
 title = "Recent projects / files"
-status = "missing"
+status = "partial"
 desktop = ["menu:Recent files", "pref:Maximum recent files", "pref:Add STL/STEP files to recent files list"]
+evidence = ['client:func recentProjects\(']
 work = "UI"
-priority = 156
+gap = "recent PROJECTS only (Documents/Projects by date); recent imported models and the max-count preference are not tracked"
 
 [[feature]]
 id = "files.backup"

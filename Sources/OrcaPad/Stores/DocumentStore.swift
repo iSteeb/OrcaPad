@@ -200,6 +200,106 @@ final class DocumentStore {
         }
     }
 
+    // MARK: Exports (ABI v33: STL / generic 3MF / sliced .gcode.3mf)
+
+    /// The latest export (Share menu target, like `lastSavedProject`).
+    private(set) var lastExport: URL?
+
+    /// Desktop object-list "Export STL": one object's merged mesh.
+    func exportSTL(objectID: ObjectID, objectName: String) async {
+        guard let plater, let object = scene?.object(id: objectID), !isBusy else {
+            status.report(.document, "export blocked: document is busy or object missing")
+            return
+        }
+        isMutating = true
+        let result = await BackgroundWork.run(operation: "export STL") {
+            let url = try EnginePaths.exportURL(name: object.name, pathExtension: "stl")
+            try plater.exportSTL(objectID: objectID, to: url.path)
+            return url
+        }
+        isMutating = false
+        switch result {
+        case .success(let url):
+            lastExport = url
+            status.report(.document, "STL exported: \(url.lastPathComponent)")
+        case .failure(let failure):
+            status.report(.document, failure: failure)
+        }
+    }
+
+    /// Desktop "Export generic 3MF": geometry-only interchange file.
+    func export3mf(projectName: String) async {
+        guard let plater, !isBusy else {
+            status.report(.document, "export blocked: document is busy")
+            return
+        }
+        isMutating = true
+        let result = await BackgroundWork.run(operation: "export generic 3MF") {
+            let url = try EnginePaths.exportURL(name: projectName, pathExtension: "3mf")
+            try plater.export3mf(to: url.path)
+            return url
+        }
+        isMutating = false
+        switch result {
+        case .success(let url):
+            lastExport = url
+            status.report(.document, "3MF exported: \(url.lastPathComponent)")
+        case .failure(let failure):
+            status.report(.document, failure: failure)
+        }
+    }
+
+    /// Desktop "Export sliced 3MF" (.gcode.3mf): slices every non-empty
+    /// plate and embeds the G-code — the USB-printer file. Runs under the
+    /// slicing gate (it IS a slice).
+    func exportGcode3mf(projectName: String, presets: EnginePresets, bed: EngineBed) async {
+        guard let input = beginSlicing() else {
+            status.report(.document, "export blocked: document is not ready or is busy")
+            return
+        }
+        defer { finishSlicing() }
+        let name = projectName.isEmpty ? "plater" : projectName
+        do {
+            let url = try EnginePaths.gcodeOutputURL(
+                sceneName: (name as NSString).deletingPathExtension + ".gcode")
+            // .gcode.3mf beside the G-code outputs
+            let target = url.deletingPathExtension().appendingPathExtension("3mf")
+            let job = try SliceJob()
+            do {
+                let rgba = try ThumbnailService.render(scene: input.snapshot, bed: bed)
+                try job.setThumbnail(size: ThumbnailService.size, rgba: rgba)
+            } catch {
+                status.report(.document, failure: AppFailure.wrap(
+                    error, operation: "render export thumbnail"))
+            }
+            let progressCallback: @Sendable (Int, String) -> Void = {
+                [weak self] percent, message in
+                Task { @MainActor in
+                    self?.status.update(.document, "export 3MF: \(percent)% \(message)")
+                }
+            }
+            let result = await BackgroundWork.run(operation: "export sliced 3MF") {
+                try input.plater.exportGcode3mf(
+                    to: target.path, presets: presets, job: job, progress: progressCallback)
+            }
+            switch result {
+            case .success(let sliceResult):
+                lastExport = target
+                let minutes = Int(sliceResult.timeEstimateSeconds / 60)
+                let warningNote = sliceResult.warnings.isEmpty
+                    ? "" : " \u{00b7} \(sliceResult.warnings.count) warning(s)"
+                status.report(
+                    .document,
+                    "sliced 3MF ready: \(target.lastPathComponent) \u{00b7} ~\(minutes) min print\(warningNote)")
+            case .failure(let failure):
+                status.report(.document, failure: failure)
+            }
+        } catch {
+            status.report(.document, failure: AppFailure.wrap(
+                error, operation: "prepare sliced 3MF export"))
+        }
+    }
+
     /// Background-session autosave (desktop auto-backup subset): a fast,
     /// thumbnail-less 3MF at a fixed Application Support path. Restored once
     /// on the next launch by AppEnvironment.

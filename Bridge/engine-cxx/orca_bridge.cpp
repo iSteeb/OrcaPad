@@ -134,6 +134,8 @@ void orca_result_dispose(orca_result *result) {
 #include "libslic3r/AppConfig.hpp"
 #include "libslic3r/PresetBundle.hpp"
 #include "libslic3r/Utils.hpp"
+#include "libslic3r/Format/3mf.hpp"
+#include "libslic3r/Format/STL.hpp"
 
 #include "nlohmann/json.hpp"
 
@@ -5128,6 +5130,70 @@ static std::string orcapad_marker_safe(const std::string &name) {
 }
 
 /// Shared slice-all core: presets null = the preset-free overlay config.
+/// The document's non-empty plates, in order (slice-all / sliced-3MF).
+static void orcapad_plates_with_objects(orca_plater &plater,
+                                        std::vector<int32_t> *out) {
+    for (int32_t plate_index = 0;
+         plate_index < static_cast<int32_t>(plater.plates.size());
+         ++plate_index) {
+        bool any = false;
+        for (const Slic3r::ModelObject *object : plater.model.objects)
+            for (const Slic3r::ModelInstance *instance : object->instances)
+                if (orcapad_instance_plate(
+                        plater,
+                        static_cast<orca_object_id>(object->id().id),
+                        static_cast<orca_instance_id>(instance->id().id),
+                        orcapad_instance_box(*instance)) == plate_index)
+                    any = true;
+        if (any) out->push_back(plate_index);
+    }
+}
+
+/// Slices ONE plate into its temp file `<temp_base>.plate<N>.tmp` (ABI v33):
+/// the shared core of slice-all and the sliced-3MF export. Warnings/time
+/// fold into `aggregate`; the caller owns the temp file's lifetime.
+static orca_result orcapad_slice_plate(
+    orca_plater &plater, orca_presets *presets, int32_t plate_index,
+    size_t position, size_t plate_count, const std::string &temp_base,
+    orca_progress_fn progress, void *ctx, orca_slice_job *job,
+    OrcapadSliceAccumulator &aggregate, const char *operation) {
+    const OrcapadPlate &plate =
+        plater.plates[static_cast<size_t>(plate_index)];
+    Slic3r::Model plate_model;
+    const orca_result filtered = orcapad_build_plate_model(
+        plater, operation, plate_index, plate_model);
+    if (filtered.code != ORCA_STATUS_OK) return filtered;
+
+    Slic3r::DynamicPrintConfig config = presets
+        ? presets->bundle->full_config()
+        : Slic3r::DynamicPrintConfig::full_print_config();
+    if (!presets) orcapad_config_overlays(config);
+    const std::vector<OrcapadWarning> repairs =
+        orcapad_finalize_config(config);
+    if (!repairs.empty())
+        aggregate.warnings.insert(
+            aggregate.warnings.end(), repairs.begin(), repairs.end());
+
+    Slic3r::Print print;
+    print.apply(plate_model, std::move(config));
+    print.is_BBL_printer() = presets ? presets->bundle->is_bbl_vendor() : false;
+    // Desktop PartPlate::set_print: plate origin/index/name per plate.
+    print.set_plate_origin(orcapad_plate_origin(plater, plate_index));
+    print.set_plate_index(plate_index);
+    print.set_plate_name(plate.name);
+
+    const std::string temp =
+        temp_base + ".plate" + std::to_string(plate_index) + ".tmp";
+    OrcapadPlateProgressState state{
+        progress, ctx,
+        static_cast<int32_t>(position),
+        static_cast<int32_t>(plate_count)};
+    return orcapad_run_print(
+        operation, print, temp.c_str(),
+        progress ? orcapad_plate_progress_trampoline : nullptr,
+        progress ? &state : nullptr, job, nullptr, &aggregate);
+}
+
 static orca_result orcapad_slice_all(orca_plater *plater,
                                      orca_presets *presets,
                                      const char *gcode_path,
@@ -5147,20 +5213,7 @@ static orca_result orcapad_slice_all(orca_plater *plater,
     return orcapad_guard(operation, [&]() -> orca_result {
         // 1) the plates that carry objects, in order
         std::vector<int32_t> targets;
-        for (int32_t plate_index = 0;
-             plate_index < static_cast<int32_t>(plater->plates.size());
-             ++plate_index) {
-            bool any = false;
-            for (const Slic3r::ModelObject *object : plater->model.objects)
-                for (const Slic3r::ModelInstance *instance : object->instances)
-                    if (orcapad_instance_plate(
-                            *plater,
-                            static_cast<orca_object_id>(object->id().id),
-                            static_cast<orca_instance_id>(instance->id().id),
-                            orcapad_instance_box(*instance)) == plate_index)
-                        any = true;
-            if (any) targets.push_back(plate_index);
-        }
+        orcapad_plates_with_objects(*plater, &targets);
         if (targets.empty())
             return orcapad_fail(ORCA_STATUS_INVALID_MODEL, operation,
                                 "every plate is empty");
@@ -5198,43 +5251,12 @@ static orca_result orcapad_slice_all(orca_plater *plater,
                          label, ctx);
             }
 
-            Slic3r::Model plate_model;
-            const orca_result filtered = orcapad_build_plate_model(
-                *plater, operation, plate_index, plate_model);
-            if (filtered.code != ORCA_STATUS_OK) return filtered;
-
-            Slic3r::DynamicPrintConfig config = presets
-                ? presets->bundle->full_config()
-                : Slic3r::DynamicPrintConfig::full_print_config();
-            if (!presets) orcapad_config_overlays(config);
-            const std::vector<OrcapadWarning> repairs =
-                orcapad_finalize_config(config);
-            if (!repairs.empty())
-                aggregate.warnings.insert(
-                    aggregate.warnings.end(), repairs.begin(), repairs.end());
-
-            Slic3r::Print print;
-            print.apply(plate_model, std::move(config));
-            print.is_BBL_printer() = presets ? presets->bundle->is_bbl_vendor() : false;
-            // Desktop PartPlate::set_print: every plate's Print carries the
-            // plate's world origin (its m_origin is UNINITIALIZED otherwise)
-            // and index; the G-code comes out plate-relative.
-            print.set_plate_origin(orcapad_plate_origin(*plater, plate_index));
-            print.set_plate_index(plate_index);
-            // Desktop "Name of the plate sliced" (PrintBase::m_plate_name —
-            // it flows into the {plate_name} G-code placeholder).
-            print.set_plate_name(plate.name);
-
-            const std::string temp =
-                base + ".plate" + std::to_string(plate_index) + ".tmp";
-            OrcapadPlateProgressState state{
-                progress, ctx,
-                static_cast<int32_t>(position),
-                static_cast<int32_t>(targets.size())};
-            const orca_result sliced = orcapad_run_print(
-                operation, print, temp.c_str(),
-                progress ? orcapad_plate_progress_trampoline : nullptr,
-                progress ? &state : nullptr, job, out_report, &aggregate);
+            // Shared per-plate core (ABI v33): slice into the temp file.
+            const std::string temp = base + ".plate" +
+                std::to_string(plate_index) + ".tmp";
+            const orca_result sliced = orcapad_slice_plate(
+                *plater, presets, plate_index, position, targets.size(),
+                base, progress, ctx, job, aggregate, operation);
             if (sliced.code != ORCA_STATUS_OK) {
                 std::remove(temp.c_str());
                 return sliced;
@@ -5318,6 +5340,221 @@ orca_result orca_plater_slice_all_to_gcode_with_presets(
                             "presets handle is null");
     return orcapad_slice_all(plater, presets, gcode_path, progress, ctx, job,
                              out_report);
+}
+
+// --- exports (ABI v33): STL / generic 3MF / sliced .gcode.3mf --------------
+
+/// Desktop object-list "Export STL": one object's merged mesh as STL.
+orca_result orca_plater_object_export_stl(orca_plater *plater,
+                                          orca_object_id object_id,
+                                          const char *path, uint8_t binary) {
+    constexpr const char *operation = "orca_plater_object_export_stl";
+    if (!plater)
+        return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation,
+                            "plater handle is null");
+    if (!path || !path[0])
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "path is empty");
+    struct stat probe;
+    // The Swift layer owns filesystem policy; refuse clobbering directories.
+    if (stat(path, &probe) == 0 && !S_ISREG(probe.st_mode))
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "output path exists and is not a file");
+    return orcapad_guard(operation, [&]() -> orca_result {
+        Slic3r::ModelObject *object = plater_obj(plater, object_id);
+        if (!object)
+            return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation,
+                                "object was not found");
+        if (!Slic3r::store_stl(path, object, binary != 0))
+            return orcapad_fail(ORCA_STATUS_IO_FAILURE, operation,
+                                "engine failed to write the STL");
+        return orcapad_ok();
+    });
+}
+
+/// Desktop "Export generic 3MF" (Format/3mf.cpp store_3mf): geometry only,
+/// no engine config — the interchange format every tool reads. Not a mutation.
+orca_result orca_project_export_3mf(orca_plater *plater, const char *path) {
+    constexpr const char *operation = "orca_project_export_3mf";
+    if (!plater)
+        return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation,
+                            "plater handle is null");
+    if (!path || !path[0])
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "path is empty");
+    const std::string target(path);
+    if (target.size() < 4 || target.compare(target.size() - 4, 4, ".3mf") != 0)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "project path must end in .3mf");
+    if (plater->model.objects.empty())
+        return orcapad_fail(ORCA_STATUS_INVALID_MODEL, operation,
+                            "document contains no model object");
+    return orcapad_guard(operation, [&]() -> orca_result {
+        if (!Slic3r::store_3mf(path, &plater->model, nullptr, false, nullptr, true))
+            return orcapad_fail(ORCA_STATUS_IO_FAILURE, operation,
+                                "engine failed to write the 3MF");
+        return orcapad_ok();
+    });
+}
+
+/// Desktop "Export sliced 3MF" (Plater::export_gcode_3mf, ABI v33): slices
+/// every non-empty plate (the slice-all core) and embeds each plate's
+/// G-code into a BBS 3MF — SaveStrategy::Silence|SplitModel|WithGcode|
+/// SkipModel, exactly the file printers and Bambu Studio load from USB.
+/// Presets null = the preset-free overlay path. Blocking; progress scales
+/// across plates like slice-all.
+static orca_result orcapad_export_gcode_3mf(orca_plater *plater,
+                                            orca_presets *presets,
+                                            const char *path,
+                                            orca_progress_fn progress, void *ctx,
+                                            orca_slice_job *job,
+                                            orca_slice_report *out_report) {
+    constexpr const char *operation = "orca_plater_export_gcode_3mf";
+    if (!plater)
+        return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation,
+                            "plater handle is null");
+    if (!path || !path[0] || !out_report)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "path is empty or output pointer is null");
+    const std::string target(path);
+    if (target.size() < 4 || target.compare(target.size() - 4, 4, ".3mf") != 0)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "the sliced 3MF path must end in .3mf");
+    if (plater->model.objects.empty())
+        return orcapad_fail(ORCA_STATUS_INVALID_MODEL, operation,
+                            "document contains no model object");
+    return orcapad_guard(operation, [&]() -> orca_result {
+        std::vector<int32_t> targets;
+        orcapad_plates_with_objects(*plater, &targets);
+        if (targets.empty())
+            return orcapad_fail(ORCA_STATUS_INVALID_MODEL, operation,
+                                "every plate is empty");
+
+        OrcapadSliceAccumulator aggregate;
+        const std::string base(path);
+        // PlateData owns heap objects; release_PlateData_list on any exit.
+        Slic3r::PlateDataPtrs plates;
+        struct PlateDataGuard {
+            Slic3r::PlateDataPtrs &list;
+            ~PlateDataGuard() { Slic3r::release_PlateData_list(list); }
+        } plate_guard{plates};
+        // Per-plate temp G-code files; removed after the archive is written.
+        std::vector<std::string> temps;
+        struct TempGuard {
+            std::vector<std::string> &list;
+            ~TempGuard() {
+                for (const std::string &file : list) std::remove(file.c_str());
+            }
+        } temp_guard{temps};
+
+        for (size_t position = 0; position < targets.size(); ++position) {
+            const int32_t plate_index = targets[position];
+            const OrcapadPlate &plate =
+                plater->plates[static_cast<size_t>(plate_index)];
+            if (progress) {
+                char label[128];
+                std::snprintf(label, sizeof label, "slicing plate %d/%d: %s",
+                              static_cast<int>(position + 1),
+                              static_cast<int>(targets.size()),
+                              plate.name.c_str());
+                progress(static_cast<int32_t>(position * 100 / targets.size()),
+                         label, ctx);
+            }
+            const orca_result sliced = orcapad_slice_plate(
+                *plater, presets, plate_index, position, targets.size(),
+                base, progress, ctx, job, aggregate, operation);
+            if (sliced.code != ORCA_STATUS_OK) return sliced;
+
+            auto *data = new Slic3r::PlateData();
+            plates.push_back(data);
+            data->plate_index = static_cast<int>(plate_index);
+            data->locked = plate.locked;
+            data->plate_name = plate.name;
+            data->gcode_file =
+                base + ".plate" + std::to_string(plate_index) + ".tmp";
+            temps.push_back(data->gcode_file);
+            data->is_sliced_valid = true;
+            // Membership by derived assignment (same as project save).
+            for (size_t object = 0; object < plater->model.objects.size();
+                 ++object) {
+                const Slic3r::ModelObject *model_object =
+                    plater->model.objects[object];
+                const orca_object_id object_id =
+                    static_cast<orca_object_id>(model_object->id().id);
+                for (size_t instance = 0;
+                     instance < model_object->instances.size(); ++instance) {
+                    const int plate = orcapad_instance_plate(
+                        *plater, object_id,
+                        static_cast<orca_instance_id>(
+                            model_object->instances[instance]->id().id),
+                        orcapad_instance_box(*model_object->instances[instance]));
+                    if (plate == static_cast<int>(plate_index))
+                        data->objects_and_instances.emplace_back(
+                            int(object), int(instance));
+                }
+            }
+            if (presets)
+                data->printer_model_id =
+                    presets->bundle->printers.get_edited_preset()
+                        .get_printer_type(presets->bundle.get());
+        }
+
+        // The config block inside the archive: secure (no credentials),
+        // exactly as the project save writes it.
+        Slic3r::DynamicPrintConfig config = presets
+            ? presets->bundle->full_config_secure()
+            : Slic3r::DynamicPrintConfig::full_print_config();
+        if (!presets) orcapad_config_overlays(config);
+
+        Slic3r::StoreParams params;
+        params.path = path;
+        params.model = &plater->model;
+        params.plate_data_list = plates;
+        params.config = &config;
+        // Plate thumbnail from the job image (same as project save).
+        if (job) {
+            std::lock_guard<std::mutex> lock(job->mutex);
+            if (job->thumbnail_size > 0) {
+                const uint32_t size = job->thumbnail_size;
+                const std::vector<uint8_t> source = job->thumbnail_rgba;
+                params.thumbnail_data.push_back(new Slic3r::ThumbnailData(
+                    orcapad_thumbnail(size, source, 512, 512)));
+            }
+        }
+        params.strategy = Slic3r::SaveStrategy::Silence |
+                          Slic3r::SaveStrategy::SplitModel |
+                          Slic3r::SaveStrategy::WithGcode |
+                          Slic3r::SaveStrategy::SkipModel;
+        if (!Slic3r::store_bbs_3mf(params))
+            return orcapad_fail(ORCA_STATUS_IO_FAILURE, operation,
+                                "engine failed to write the sliced 3MF");
+        // StoreParams.thumbnail_data entries are raw pointers the writer
+        // does not own — free our copies.
+        for (Slic3r::ThumbnailData *thumbnail : params.thumbnail_data)
+            delete thumbnail;
+
+        struct stat status;
+        if (stat(path, &status) != 0)
+            return orcapad_fail(ORCA_STATUS_IO_FAILURE, operation,
+                                "sliced 3MF could not be inspected");
+        if (!orcapad_fill_report(aggregate.warnings, aggregate.time_estimate_s,
+                                 static_cast<int64_t>(status.st_size), out_report))
+            return orcapad_fail(ORCA_STATUS_OUT_OF_MEMORY, operation,
+                                "could not allocate slice report");
+        if (progress) progress(100, "done", ctx);
+        return orcapad_ok();
+    });
+}
+
+orca_result orca_plater_export_gcode_3mf(orca_plater *plater,
+                                         orca_presets *presets,
+                                         const char *path,
+                                         orca_progress_fn progress, void *ctx,
+                                         orca_slice_job *job,
+                                         orca_slice_report *out_report) {
+    if (out_report) *out_report = orca_slice_report{};
+    return orcapad_export_gcode_3mf(plater, presets, path, progress, ctx,
+                                    job, out_report);
 }
 
 // --- physical printers -----------------------------------------------------

@@ -1122,6 +1122,53 @@ public final class EnginePlater: @unchecked Sendable {
         }
     }
 
+    // MARK: Exports (ABI v33)
+
+    /// Desktop object-list "Export STL": one object's merged mesh (binary).
+    public func exportSTL(objectID: ObjectID, to path: String) throws {
+        try lock.withLock {
+            let result = path.withCString { pointer in
+                orca_plater_object_export_stl(handle, objectID.rawValue, pointer, 1)
+            }
+            try BridgeResult.consume(result, operation: "export STL")
+        }
+    }
+
+    /// Desktop "Export generic 3MF": geometry-only interchange file.
+    public func export3mf(to path: String) throws {
+        try lock.withLock {
+            let result = path.withCString { pointer in
+                orca_project_export_3mf(handle, pointer)
+            }
+            try BridgeResult.consume(result, operation: "export generic 3MF")
+        }
+    }
+
+    /// Desktop "Export sliced 3MF" (.gcode.3mf): slices every non-empty
+    /// plate and embeds each plate's G-code (the USB-printer file). Blocking;
+    /// progress scales across plates like slice-all.
+    public func exportGcode3mf(
+        to path: String,
+        presets: EnginePresets,
+        job: SliceJob,
+        progress: @escaping @Sendable (Int, String) -> Void
+    ) throws -> SliceResult {
+        try Self.withLockedHandles(plater: self, presets: presets) { platerHandle, presetHandle in
+            try Self.withProgressContext(progress) { callback, context in
+                var report = orca_slice_report()
+                defer { orca_slice_report_dispose(&report) }
+                let result = path.withCString { outputPointer in
+                    orca_plater_export_gcode_3mf(
+                        platerHandle, presetHandle, outputPointer,
+                        callback, context, job.handle, &report
+                    )
+                }
+                try BridgeResult.consume(result, operation: "export sliced 3MF")
+                return try SliceResult(decoding: report, operation: "export sliced 3MF")
+            }
+        }
+    }
+
     private func snapshotLocked() throws -> SceneSnapshot {
         var rawSnapshot = orca_scene_snapshot()
         try BridgeResult.consume(
