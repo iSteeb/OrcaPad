@@ -276,7 +276,7 @@ static void test_md5_shim() {
 
 static void test_abi_version() {
     CHECK_EQ(orca_bridge_abi_version(), ORCA_BRIDGE_ABI_VERSION);
-    CHECK_EQ(ORCA_BRIDGE_ABI_VERSION, 31);
+    CHECK_EQ(ORCA_BRIDGE_ABI_VERSION, 32);
 }
 
 struct ProgressRecord {
@@ -2714,6 +2714,10 @@ static void test_preset_overrides(const std::string &data_dir) {
     expect_code(g2, ORCA_STATUS_INVALID_ARGUMENT, "set(bad kind)");
     GUARD(g3, orca_presets_set_value(presets, 2, "__no_such_key__", "1"));
     expect_code(g3, ORCA_STATUS_NOT_FOUND, "set(unknown key)");
+    // ABI v32: a value the engine cannot parse is a typed failure, never a
+    // silent no-op (the client would silently revert the edited field).
+    GUARD(g3b, orca_presets_set_value(presets, 2, "layer_height", "not_a_number"));
+    expect_code(g3b, ORCA_STATUS_INVALID_CONFIGURATION, "set(unparseable value)");
 
     // system baseline: edited dump == system dump right after selection
     orca_owned_string system_dump;
@@ -3610,6 +3614,22 @@ static void test_physical_printers(const std::string &data_dir) {
     CHECK(strcmp(entry.url.data, "http://192.168.1.9:7125") == 0);
     CHECK(strcmp(entry.webui.data, "http://192.168.1.9") == 0);
     orca_physical_printer_dispose(&entry);
+
+    // ABI v32: upsert REPLACES the preset association (the editor ties a
+    // printer to exactly one preset; stale ties must not accumulate).
+    GUARD(g6b, orca_physical_printer_upsert(presets, "Vyper", "moonraker",
+                                            "http://192.168.1.9:7125", "http://192.168.1.9", "k2",
+                                            "Prusa MK4 0.4 nozzle"));
+    expect_ok(g6b, "upsert retie");
+    GUARD(g6c, orca_physical_printer_list(presets, 0, &entry));
+    expect_ok(g6c, "list after retie");
+    CHECK(strcmp(entry.preset_names.data, "Prusa MK4 0.4 nozzle") == 0);
+    orca_physical_printer_dispose(&entry);
+    // and back, so the persisted fresh-session check below keeps its shape
+    GUARD(g6d, orca_physical_printer_upsert(presets, "Vyper", "moonraker",
+                                            "http://192.168.1.9:7125", "http://192.168.1.9", "k2",
+                                            "Anycubic Vyper 0.4 nozzle"));
+    expect_ok(g6d, "upsert retie back");
     orca_presets_free(presets);
 
     // persisted: a fresh session reloads it
@@ -3816,6 +3836,35 @@ static void test_custom_gcode(const std::string &dir, const std::string &data_di
         // machine_pause_gcode. Cover both tag dialects.
         CHECK(text.find("PAUSE_PRINT") != std::string::npos);
     }
+
+    // ABI v32: custom G-code binds to the SELECTED plate. The engine
+    // model's curr_plate_index follows the Bridge's current plate —
+    // before this fix every item landed on (and sliced from) plate 0.
+    orca_plate_id plate2 = 0;
+    GUARD(p1, orca_plater_plate_add(plater, &plate2, &revision));
+    expect_ok(p1, "add plate 2");
+    orca_scene_snapshot snap;
+    GUARD(p2, orca_plater_plate_select(plater, plate2, &snap));
+    expect_ok(p2, "select plate 2");
+    const orca_plate_id plate1 = snap.plates[0].id;
+    orca_scene_snapshot_dispose(&snap);
+    GUARD(p3, orca_plater_custom_gcode_count(plater, &count));
+    expect_ok(p3, "count on plate 2 (empty)");
+    CHECK_EQ(count, 0);
+    GUARD(p4, orca_plater_custom_gcode_add(plater, 2.0, ORCA_CUSTOM_PAUSE_PRINT, 0, "",
+                                             "plate two pause", &revision));
+    expect_ok(p4, "pause on plate 2");
+    GUARD(p5, orca_plater_custom_gcode_count(plater, &count));
+    expect_ok(p5, "count on plate 2 after add");
+    CHECK_EQ(count, 1);
+    GUARD(p6, orca_plater_plate_select(plater, plate1, &snap));
+    expect_ok(p6, "select plate 1 again");
+    orca_scene_snapshot_dispose(&snap);
+    GUARD(p7, orca_plater_custom_gcode_count(plater, &count));
+    expect_ok(p7, "count on plate 1 (untouched)");
+    // colour change 1.2 + custom 4.5 + pause 3.3
+    CHECK_EQ(count, 3);
+
     orca_presets_free(presets);
     orca_plater_free(plater);
 }
@@ -3867,6 +3916,22 @@ static void test_slice_cancel(const std::string &dir) {
                                          &progress, job3, &report));
     check_slice_outputs(gcode.c_str(), g8, report, progress, "slice after cancel");
     orca_slice_job_free(job3);
+
+    // ABI v32: a cancelled slice-all leaves NO partial combined G-code
+    // behind (the output is assembled in a temp and renamed only on
+    // success — a mid-run failure keeps the previous file intact).
+    const std::string all = dir + "/cancel-all.gcode";
+    orca_slice_job *cancel_all_job = nullptr;
+    GUARD(ca1, orca_slice_job_new(&cancel_all_job));
+    expect_ok(ca1, "job for slice-all cancel");
+    CancelOnProgress cancel_all_record{cancel_all_job};
+    GUARD(ca2, orca_plater_slice_all_to_gcode(
+                   plater, all.c_str(), cancel_trampoline, &cancel_all_record,
+                   cancel_all_job, &report));
+    expect_code(ca2, ORCA_STATUS_CANCELLED, "slice-all cancelled");
+    struct stat partial;
+    CHECK(stat(all.c_str(), &partial) != 0);
+    orca_slice_job_free(cancel_all_job);
 
     // G-code thumbnails from the job's plate image (default config:
     // 48x48/PNG,300x300/PNG on the non-BBL defaults path)

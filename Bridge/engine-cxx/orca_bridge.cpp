@@ -905,7 +905,19 @@ orca_result orca_presets_set_value(orca_presets *presets, int32_t kind,
         if (!option)
             return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation,
                                 "unknown configuration key");
-        option->deserialize(serialized_value, false);
+        // Parse into a CLONE and commit only on success: upstream's numeric
+        // deserializers write 0 into the value when stream extraction fails
+        // (iss >> value), and a rejected value must leave the edited preset
+        // untouched. The parse result is the contract — never a silent
+        // no-op (the client would refresh its dumps and the field would
+        // silently revert).
+        std::unique_ptr<Slic3r::ConfigOption> parsed(option->clone());
+        if (!parsed->deserialize(serialized_value, false))
+            return orcapad_fail(ORCA_STATUS_INVALID_CONFIGURATION, operation,
+                                (std::string("the value for \"") + key +
+                                 "\" could not be parsed for this option")
+                                    .c_str());
+        edited.config.set_key_value(key, parsed.release());
         return orcapad_ok();
     });
 }
@@ -1994,13 +2006,15 @@ orca_result orca_plater_set_bed(orca_plater *plater,
         width <= 0.0 || depth <= 0.0 || height <= 0.0)
         return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
                             "bed geometry contains a non-finite or non-positive value");
-    plater->bed_origin_x = origin_x;
-    plater->bed_origin_y = origin_y;
-    plater->bed_width = width;
-    plater->bed_depth = depth;
-    plater->bed_height = height;
-    if (!out_snapshot) return orcapad_ok();
-    return orca_plater_snapshot(plater, out_snapshot);
+    return orcapad_guard(operation, [&]() -> orca_result {
+        plater->bed_origin_x = origin_x;
+        plater->bed_origin_y = origin_y;
+        plater->bed_width = width;
+        plater->bed_depth = depth;
+        plater->bed_height = height;
+        if (!out_snapshot) return orcapad_ok();
+        return orca_plater_snapshot(plater, out_snapshot);
+    });
 }
 
 orca_result orca_plater_plate_add(orca_plater *plater,
@@ -3427,8 +3441,16 @@ void orca_custom_gcode_item_dispose(orca_custom_gcode_item *item) {
     *item = orca_custom_gcode_item{};
 }
 
+/// Custom G-code of the SELECTED plate. The engine model's
+/// curr_plate_index is upstream GUI state; the Bridge's current_plate is
+/// the authority, so they are synced here and before every slice
+/// (Print::apply consumes the codes at model.curr_plate_index — upstream
+/// defaults it to 0, which mis-binds pauses/colour changes on plate 2+).
+/// The 3MF writer persists the whole per-plate map and is index-safe.
 static Slic3r::CustomGCode::Info &orcapad_plate_custom_gcodes(orca_plater *plater) {
-    return plater->model.plates_custom_gcodes[plater->model.curr_plate_index];
+    orcapad_clamp_current_plate(*plater);
+    plater->model.curr_plate_index = plater->current_plate;
+    return plater->model.plates_custom_gcodes[plater->current_plate];
 }
 
 orca_result orca_plater_custom_gcode_count(orca_plater *plater, int32_t *out_count) {
@@ -4949,6 +4971,9 @@ static orca_result orcapad_build_plate_model(orca_plater &plater,
         plate_index >= static_cast<int32_t>(plater.plates.size()))
         return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
                             "plate index is out of range");
+    // Print::apply copies the custom G-code at model.curr_plate_index into
+    // the Print: point it at the plate being sliced.
+    plater.model.curr_plate_index = plate_index;
     out = plater.model;
     std::vector<Slic3r::ObjectID> empty;
     size_t kept_instances = 0;
@@ -5005,10 +5030,14 @@ orca_result orca_plater_slice_to_gcode(orca_plater *plater,
         Slic3r::Print print;
         print.apply(plate_model, std::move(config));
         print.is_BBL_printer() = false;
-        // Desktop PartPlate::set_print parity: plate origin + index.
+        // Desktop PartPlate::set_print parity: plate origin + index + name
+        // ({plate_name} G-code placeholder; slice-all sets it per plate).
         print.set_plate_origin(
             orcapad_plate_origin(*plater, plater->current_plate));
         print.set_plate_index(plater->current_plate);
+        orcapad_clamp_current_plate(*plater);
+        print.set_plate_name(
+            plater->plates[static_cast<size_t>(plater->current_plate)].name);
         const orca_result sliced = orcapad_run_print(operation, print, gcode_path, progress, ctx,
                                                      job, out_report);
         if (sliced.code == ORCA_STATUS_OK)
@@ -5048,10 +5077,14 @@ orca_result orca_plater_slice_to_gcode_with_presets(
         Slic3r::Print print;
         print.apply(plate_model, std::move(config));
         print.is_BBL_printer() = presets->bundle->is_bbl_vendor();
-        // Desktop PartPlate::set_print parity: plate origin + index.
+        // Desktop PartPlate::set_print parity: plate origin + index + name
+        // ({plate_name} G-code placeholder; slice-all sets it per plate).
         print.set_plate_origin(
             orcapad_plate_origin(*plater, plater->current_plate));
         print.set_plate_index(plater->current_plate);
+        orcapad_clamp_current_plate(*plater);
+        print.set_plate_name(
+            plater->plates[static_cast<size_t>(plater->current_plate)].name);
         const orca_result sliced = orcapad_run_print(operation, print, gcode_path, progress, ctx,
                                                      job, out_report);
         if (sliced.code == ORCA_STATUS_OK)
@@ -5079,6 +5112,19 @@ static void orcapad_plate_progress_trampoline(int32_t percent, const char *messa
     const int32_t global = static_cast<int32_t>(
         std::lround(state->plate_position * span + local * span / 100.0));
     state->progress(std::clamp(global, 0, 99), message, state->ctx);
+}
+
+/// Marker-safe plate name: printable, no quotes, backslashes or control
+/// characters (UTF-8 survives byte-wise). Plate names are user-editable;
+/// a raw quote or newline would corrupt the `; ORCA_PLATE` comment that
+/// the client splits sections by.
+static std::string orcapad_marker_safe(const std::string &name) {
+    std::string safe;
+    safe.reserve(name.size());
+    for (const unsigned char c : name)
+        if (c >= 0x20 && c != '"' && c != '\\' && c != 0x7f)
+            safe.push_back(static_cast<char>(c));
+    return safe;
 }
 
 /// Shared slice-all core: presets null = the preset-free overlay config.
@@ -5119,8 +5165,19 @@ static orca_result orcapad_slice_all(orca_plater *plater,
             return orcapad_fail(ORCA_STATUS_INVALID_MODEL, operation,
                                 "every plate is empty");
 
-        // 2) truncate the destination once; plates append in order
-        FILE *output = fopen(gcode_path, "wb");
+        // 2) assemble in a temp file, renamed over the destination only
+        // when every plate succeeded: a mid-run failure (typed error,
+        // cancellation, IO) must leave the PREVIOUS output intact, never a
+        // half-written multi-plate G-code that could be previewed or sent.
+        const std::string combined = std::string(gcode_path) + ".orcapad-all.tmp";
+        struct CombinedCleanup {
+            const std::string &path;
+            bool keep = false;
+            ~CombinedCleanup() {
+                if (!keep) std::remove(path.c_str());
+            }
+        } combined_cleanup{combined};
+        FILE *output = fopen(combined.c_str(), "wb");
         if (!output)
             return orcapad_fail(ORCA_STATUS_IO_FAILURE, operation,
                                 "could not create the output G-code");
@@ -5186,14 +5243,14 @@ static orca_result orcapad_slice_all(orca_plater *plater,
             // marker + plate G-code + marker
             std::string error;
             [&] {
-                FILE *out = fopen(gcode_path, "ab");
+                FILE *out = fopen(combined.c_str(), "ab");
                 if (!out) {
                     error = "could not reopen the output G-code";
                     return;
                 }
                 fprintf(out, "; ORCA_PLATE index=%d total=%d name=\"%s\" begin\n",
                         plate_index + 1, static_cast<int>(targets.size()),
-                        plate.name.c_str());
+                        orcapad_marker_safe(plate.name).c_str());
                 FILE *in = fopen(temp.c_str(), "rb");
                 if (!in) {
                     fclose(out);
@@ -5222,13 +5279,19 @@ static orca_result orcapad_slice_all(orca_plater *plater,
         }
 
         struct stat status;
-        if (stat(gcode_path, &status) != 0)
+        if (stat(combined.c_str(), &status) != 0)
             return orcapad_fail(ORCA_STATUS_IO_FAILURE, operation,
                                 "combined G-code could not be inspected");
         if (!orcapad_fill_report(aggregate.warnings, aggregate.time_estimate_s,
                                  static_cast<int64_t>(status.st_size), out_report))
             return orcapad_fail(ORCA_STATUS_OUT_OF_MEMORY, operation,
                                 "could not allocate slice report");
+        // POSIX rename() atomically replaces the destination: the previous
+        // output stays intact until this single successful step.
+        if (std::rename(combined.c_str(), gcode_path) != 0)
+            return orcapad_fail(ORCA_STATUS_IO_FAILURE, operation,
+                                "could not publish the combined G-code");
+        combined_cleanup.keep = true;
         if (progress) progress(100, "done", ctx);
         return orcapad_ok();
     });
@@ -5386,6 +5449,10 @@ orca_result orca_physical_printer_upsert(orca_presets *presets, const char *name
         printer.config.opt_string("print_host") = url;
         printer.config.opt_string("print_host_webui") = webui_url;
         printer.config.opt_string("printhost_apikey") = api_key;
+        // Upsert = REPLACE the preset associations: the OrcaPad editor ties
+        // a printer to exactly one preset, so stale ties from earlier edits
+        // must not accumulate (add_preset only unions into the set).
+        printer.reset_presets();
         printer.add_preset(preset);
         printer.update_preset_names_in_config();
         // ConfigBase::save_to_json does NOT create the parent directory and
@@ -5542,6 +5609,9 @@ orca_result orca_project_open(orca_plater *plater, orca_presets *presets,
             }
             plater->plates = std::move(adopted);
             plater->current_plate = 0;
+            // The adopted model's curr_plate_index is file state; the
+            // Bridge owns the selection and starts at plate 0.
+            plater->model.curr_plate_index = 0;
         }
 
         orca_project_info info{};
@@ -5629,8 +5699,6 @@ orca_result orca_project_save(orca_plater *plater, orca_presets *presets,
                     config.option<Slic3r::ConfigOptionFloats>("nozzle_diameter"))
                 data->nozzle_diameters = nozzles->serialize();
         }
-        Slic3r::PlateData *const plate = plates.front();
-
         Slic3r::StoreParams params;
         params.path = target.c_str();
         params.model = &plater->model;

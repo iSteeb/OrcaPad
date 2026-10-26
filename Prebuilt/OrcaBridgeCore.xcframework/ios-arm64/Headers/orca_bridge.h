@@ -7,7 +7,7 @@ extern "C" {
 #endif
 
 /// Version of the C ABI contract in this header. Callers verify it at runtime.
-#define ORCA_BRIDGE_ABI_VERSION ((uint32_t)31)
+#define ORCA_BRIDGE_ABI_VERSION ((uint32_t)32)
 
 typedef int32_t orca_status_code;
 #define ORCA_STATUS_OK                     ((orca_status_code)0)
@@ -705,8 +705,9 @@ orca_result orca_presets_set_filament_colour(orca_presets *presets,
 /// project settings, `PresetBundle::load_config_model`) and REPLACES the
 /// document (new document id, revision +1) and the preset session
 /// atomically — nothing changes on failure. Object placements are kept
-/// exactly (project semantics). Projects whose plates 2+ hold objects are
-/// rejected with ORCA_STATUS_UNSUPPORTED_CAPABILITY (single plate only).
+/// exactly (project semantics). The file's plates are adopted (names,
+/// locks, locked membership; up to ORCA_PLATE_MAX_COUNT — more is a typed
+/// unsupported capability).
 #define ORCA_PROJECT_FROM_ORCA   ((uint8_t)0)
 #define ORCA_PROJECT_FROM_BBS    ((uint8_t)1)
 #define ORCA_PROJECT_FROM_PRUSA  ((uint8_t)2)
@@ -800,11 +801,13 @@ orca_result orca_plater_fill_bed(orca_plater *plater, orca_presets *presets,
                                  uint32_t *out_added,
                                  orca_revision *out_revision);
 
-/// Desktop "Save project": writes the document as a single-plate Orca 3MF
+/// Desktop "Save project": writes the document as an Orca 3MF
 /// (`store_bbs_3mf`) with the session's secure full config
-/// (`full_config_secure`, no print-host credentials) and project-embedded
-/// presets, plus the plate thumbnail when `thumbnail_rgba` is non-null
-/// (top-down RGBA8, `thumbnail_size` square). Saving is not a mutation.
+/// (`full_config_secure`, no print-host credentials), project-embedded
+/// presets and one PlateData per document plate (names, locks, membership
+/// — desktop OrcaSlicer reads the same plates back), plus the plate
+/// thumbnail when `thumbnail_rgba` is non-null (top-down RGBA8,
+/// `thumbnail_size` square). Saving is not a mutation.
 orca_result orca_project_save(orca_plater *plater, orca_presets *presets,
                               const char *path, uint32_t thumbnail_size,
                               const uint8_t *thumbnail_rgba);
