@@ -89,15 +89,16 @@ else
 fi
 
 # 8. Generic config overlays appear ONLY on the preset-free slice paths
-#    (definition + the three defaults paths: standalone slice, slice_to_gcode
-#    and preset-free slice-all; never after full_config()).
+#    (definition + the four defaults paths: standalone slice, slice_to_gcode,
+#    preset-free slice-all and preset-free sliced-3MF export; never after
+#    full_config()).
 overlay_count=$(grep -c 'orcapad_config_overlays' \
     "$ROOT/Bridge/engine-cxx/orca_bridge.cpp" || true)
 preset_slice=$(awk '/orca_plater_slice_to_gcode_with_presets/,/^}/' \
     "$ROOT/Bridge/engine-cxx/orca_bridge.cpp")
 preset_slice_all=$(awk '/orca_plater_slice_all_to_gcode_with_presets/,/^}/' \
     "$ROOT/Bridge/engine-cxx/orca_bridge.cpp")
-if [ "$overlay_count" -eq 4 ] \
+if [ "$overlay_count" -eq 5 ] \
     && ! grep -q 'orcapad_config_overlays' <<<"$preset_slice" \
     && ! grep -q 'orcapad_config_overlays' <<<"$preset_slice_all"; then
     report PASS "config overlays only on preset-free slice paths"
