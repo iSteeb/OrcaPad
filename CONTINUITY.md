@@ -110,6 +110,23 @@
 
 ## PROGRESS
 
+- [2026-10-26 CODE] 0.14 COMPLETE via PARALLEL SUBAGENTS (board:
+  .agents/BOARD.md, gitignored; smoke test -> 3 research agents -> 2
+  implementation agents with exclusive file ownership; coordinator owns
+  Bridge/gates/releases). IMPL-A: 5 more print hosts (Flashforge local
+  HTTP API incl. body validation, Obico, Prusa Connect, SimplyPrint,
+  3DPrinterOS) + host picker entries. IMPL-B: Wave B (handy models x3
+  generated STLs, auto-slice w/ debounce, zip import hand-parsed EOCD +
+  Compression framework, toolpath OBJ export, Shells+COG overlay via
+  ShellOverlayCenter channel, 18-group settings grey-out table citing
+  ConfigManipulation.cpp). COORDINATOR: ABI v37 (orca_plater_object_hull
+  convex_hull_3d + volume centroid; orca_plater_add_text_object through
+  the engine Emboss pipeline create_font_file->text2shapes->
+  polygons2model with the GUI projection recipe; Sarabun OFL shipped),
+  facade objectHull/addTextObject, DocumentStore shims, Add Text sheet,
+  ~8 integration compile fixes. Parity 52% -> 62% (74 done, 29 partial);
+  host 51,590 checks PASS; audit + license gates PASS.
+
 - [2026-10-26 CODE] 0.11 PAINTING (ABI v36): the four desktop painter
   layers are live as one contract - ORCA_PAINT_{SUPPORT,SEAM,MMU,FUZZY} ->
   ModelVolume FacetsAnnotations. Bridge: orca_plater_volume_paint
@@ -231,6 +248,14 @@
   host key is `host_type`.
 
 ## OUTCOMES
+
+- [2026-10-26] 0.14 milestone: every desktop print-host connection
+  implemented (11 upload paths + digest/flashair), Wave B shipped, text
+  emboss v1 (engine Emboss pipeline). Parity 42% -> 62% across the day
+  (releases 0.8.0-0.14.0, ABI v31 -> v37). Subagent pipeline proven:
+  research in parallel, implementation with exclusive file ownership,
+  coordinator-only builds/gates.
+
 
 - [2026-10-26] 0.11 painting unlocked + shipped (per USER roadmap): all
   four painter layers through one ABI v36 contract, tap-brush UI, overlays.

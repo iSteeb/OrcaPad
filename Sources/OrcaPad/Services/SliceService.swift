@@ -339,6 +339,45 @@ final class SliceService {
 
     var isSlicing: Bool { activeJob != nil }
 
+    // MARK: Auto-slice (board §wave-b/2: persisted "slice.auto" toggle)
+
+    /// Re-slices when the document moved past the last outcome's revision
+    /// while the user's auto-slice toggle is on. The DEBOUNCE is the
+    /// caller's `.task(id: revision)` cancellation: this sleeps first, and
+    /// every newer document revision cancels the sleep and restarts the
+    /// observation — only the last revision of a burst of edits slices.
+    ///
+    /// Scope (deliberate): document REVISION changes only — preset edits do
+    /// not advance the revision, so preset changes wait for the explicit
+    /// Slice action (desktop re-slices on those too; wiring that needs a
+    /// revision signal for presets, left to a later wave).
+    func autoSlice(document: DocumentStore, presets: PresetStore) async {
+        // No prior outcome / no listed machine: the explicit Slice action
+        // owns first-run guidance (SliceService.run reports it) — auto
+        // never becomes a silent first slice.
+        guard lastOutcome != nil, presets.hasListedMachine else { return }
+        guard let revision = document.scene?.revision,
+            revision != lastOutcome?.sourceRevision else { return }
+        do {
+            try await Task.sleep(for: .seconds(1.5))
+        } catch {
+            // Explicit recovery: cancellation means a newer revision
+            // superseded this one (the debounce working); the restarted
+            // task owns the re-slice.
+            return
+        }
+        // The burst may have settled on an outcome that is already current
+        // (undo back onto the sliced revision), the plate may have emptied,
+        // or a manual slice may be in flight — none of these re-slice.
+        guard !isSlicing, !document.isBusy,
+            let current = document.scene?.revision,
+            current == revision,
+            lastOutcome?.sourceRevision != revision,
+            document.scene?.objects.isEmpty == false
+        else { return }
+        await run(document: document, presets: presets)
+    }
+
     /// Desktop "Cancel" during slicing: cooperative engine cancellation.
     func cancel() {
         guard let activeJob else { return }

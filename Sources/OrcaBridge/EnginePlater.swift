@@ -378,6 +378,76 @@ public final class EnginePlater: @unchecked Sendable {
         }
     }
 
+    // MARK: Hull / COG + text (ABI v37)
+
+    /// Convex hull + volume centroid of an object (world space of its
+    /// first instance).
+    public struct HullMesh: Sendable {
+        public let positions: [SIMD3<Float>]
+        public let indices: [UInt32]
+        public let centroid: SIMD3<Float>
+    }
+
+    public func objectHull(objectID: ObjectID) throws -> HullMesh {
+        try lock.withLock {
+            var raw = orca_hull_mesh()
+            try BridgeResult.consume(
+                orca_plater_object_hull(handle, objectID.rawValue, &raw),
+                operation: "object hull"
+            )
+            defer { orca_hull_mesh_dispose(&raw) }
+            guard raw.index_count > 0, raw.positions != nil, raw.indices != nil else {
+                throw BridgeError.local(
+                    .internalInvariant, operation: "object hull",
+                    diagnostic: "Bridge returned a hull without storage"
+                )
+            }
+            var positions: [SIMD3<Float>] = []
+            positions.reserveCapacity(Int(raw.vertex_count))
+            for index in 0..<Int(raw.vertex_count) {
+                positions.append(SIMD3(
+                    raw.positions[index * 3], raw.positions[index * 3 + 1],
+                    raw.positions[index * 3 + 2]))
+            }
+            let indices = Array(UnsafeBufferPointer(
+                start: raw.indices, count: Int(raw.index_count)))
+            return HullMesh(
+                positions: positions, indices: indices,
+                centroid: SIMD3(raw.centroid.0, raw.centroid.1, raw.centroid.2))
+        }
+    }
+
+    /// Desktop "Add Text" v1: standalone raised text object at the bed
+    /// center (bundled Sarabun; one undo step).
+    public func addTextObject(
+        text: String, fontPath: String, sizeMM: Double, depthMM: Double,
+        bedCenter: SIMD2<Double>
+    ) throws -> MutationResult {
+        try lock.withLock {
+            var mutationRevision: UInt64 = 0
+            var rawObjectID: UInt64 = 0
+            let result = text.withCString { textPointer in
+                fontPath.withCString { fontPointer in
+                    orca_plater_add_text_object(
+                        handle, fontPointer, textPointer,
+                        sizeMM, depthMM, bedCenter.x, bedCenter.y,
+                        &rawObjectID, &mutationRevision)
+                }
+            }
+            try BridgeResult.consume(result, operation: "add text object")
+            let scene = try snapshotLocked()
+            guard scene.revision.rawValue == mutationRevision else {
+                throw BridgeError.local(
+                    .internalInvariant, operation: "add text object",
+                    diagnostic: "revision mismatch after add text")
+            }
+            return MutationResult(
+                snapshot: scene,
+                createdObjectID: try Self.objectID(rawObjectID, operation: "add text object"),
+                createdObjectCount: 1)
+        }
+    }
+
     /// The selected plate's custom G-code ticks, ascending print_z.
     public func customGcodes() throws -> [CustomGcodeItem] {
         try lock.withLock {

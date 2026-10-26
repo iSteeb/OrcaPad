@@ -927,6 +927,67 @@ final class DocumentStore {
         clearPreview()
     }
 
+    // MARK: Object shells + COG (ABI v37)
+
+    /// Hull + centroid of every object (IMPL-B contract shim, coordinator
+    /// implementation). Empty when the document has no objects.
+    func objectHulls() async -> [ObjectID: EnginePlater.HullMesh] {
+        guard let plater, let scene, !scene.objects.isEmpty else { return [:] }
+        var result: [ObjectID: EnginePlater.HullMesh] = [:]
+        for object in scene.objects {
+            let id = object.id
+            let hull = await BackgroundWork.run(operation: "object hull \(id)") {
+                try plater.objectHull(objectID: id)
+            }
+            switch hull {
+            case .success(let mesh):
+                result[id] = mesh
+            case .failure(let failure):
+                status.report(.document, failure: failure)
+            }
+        }
+        return result
+    }
+
+    /// Desktop "Add Text": flat raised text object at the plate center.
+    func addTextObject(text: String, sizeMM: Double, depthMM: Double) async {
+        guard let plater, !isBusy else {
+            status.report(.document, "add text blocked: document is busy")
+            return
+        }
+        // Bundled Sarabun (SIL OFL 1.1) — shipped with the app.
+        guard let fontURL = Bundle.module.url(
+            forResource: "Sarabun-Regular", withExtension: "ttf",
+            subdirectory: "Fonts")
+        else {
+            status.report(.document, failure: .invariant(
+                operation: "add text object",
+                diagnostic: "the bundled font is missing from the app"))
+            return
+        }
+        isMutating = true
+        let bedCenter = currentPlateCenter ?? SIMD2<Double>(0, 0)
+        let result = await BackgroundWork.run(operation: "add text object") {
+            try plater.addTextObject(
+                text: text, fontPath: fontURL.path,
+                sizeMM: sizeMM, depthMM: depthMM,
+                bedCenter: bedCenter)
+        }
+        isMutating = false
+        switch result {
+        case .success(let mutation):
+            install(mutation.snapshot)
+            if let id = mutation.createdObjectID,
+               let instance = mutation.snapshot.object(id: id)?.instances.first?.id {
+                selection = InstanceSelection(objectID: id, instanceID: instance)
+            }
+            frameRequest += 1
+            status.report(.document, "text added")
+        case .failure(let failure):
+            status.report(.document, failure: failure)
+        }
+    }
+
     // MARK: Painting (desktop painter gizmos, ABI v36)
 
     /// Painted triangles of the selected object (all layers merged with

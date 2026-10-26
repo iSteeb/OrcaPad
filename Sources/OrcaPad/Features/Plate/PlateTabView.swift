@@ -15,6 +15,9 @@ struct PlateTabView: View {
     @Environment(AppEnvironment.self) private var environment
     @State private var importPresented = false
     @State private var importMode: ImportMode = .model
+    /// "Import zip…" (board §wave-b/3): one zip of models, extracted and
+    /// imported sequentially.
+    @State private var zipImportPresented = false
     @State private var replaceConfirmation: URL?
     @State private var savePresented = false
     @State private var projectName = ""
@@ -35,6 +38,10 @@ struct PlateTabView: View {
     @State private var cutPresented = false
     @State private var paintRadius: Double = 2.0
     @State private var paintState: Int32 = 1
+    @State private var textPresented = false
+    @State private var textContent = "OrcaPad"
+    @State private var textSize: Double = 10
+    @State private var textDepth: Double = 2
     @State private var cutAxis: EngineAxis = .z
     @State private var cutFraction: Double = 0.5
     @State private var cutKeep: EnginePlater.CutKeep = .bothAsParts
@@ -42,6 +49,9 @@ struct PlateTabView: View {
     @State private var plateRenameTarget: PlateID?
     @State private var plateRenameText = ""
     @State private var flushPresented = false
+    /// Board §wave-b/5: object shells + COG overlay (View menu, session
+    /// state like the desktop View menu — not persisted).
+    @State private var showShells = false
 
     private var document: DocumentStore { environment.document }
 
@@ -258,6 +268,17 @@ struct PlateTabView: View {
             allowsMultipleSelection: importMode == .model,
             onCompletion: handleImport
         )
+        .fileImporter(
+            isPresented: $zipImportPresented,
+            allowedContentTypes: [UTType.zip],
+            onCompletion: handleZipImport
+        )
+        // Shells + COG (board §wave-b/5): reload per document revision while
+        // the toggle is on — the renderer re-derives its buffers from the
+        // published generation.
+        .task(id: shellOverlayKey) {
+            await reloadShells()
+        }
         .sheet(isPresented: $objectsPresented) { objectsList }
         .sheet(isPresented: $aboutPresented) { AboutView() }
         .confirmationDialog(
@@ -299,6 +320,19 @@ struct PlateTabView: View {
             }
         } message: {
             Text("The plate is cleared and the undo history is discarded. Printer, filament and process selections stay.")
+        }
+        .sheet(isPresented: $textPresented) {
+            AddTextSheet(
+                text: $textContent, size: $textSize, depth: $textDepth
+            ) {
+                textPresented = false
+                let content = textContent
+                let size = textSize
+                let depth = textDepth
+                Task {
+                    await document.addTextObject(text: content, sizeMM: size, depthMM: depth)
+                }
+            }
         }
         .sheet(isPresented: $cutPresented) {
             CutSheet(
@@ -440,6 +474,11 @@ struct PlateTabView: View {
                     } label: {
                         Label("Import model…", systemImage: "plus.square")
                     }
+                    Button {
+                        zipImportPresented = true
+                    } label: {
+                        Label("Import zip…", systemImage: "doc.zip")
+                    }
                     Menu {
                         ForEach(
                             PrimitiveShape.allCases.filter(\.isObjectShape),
@@ -457,6 +496,35 @@ struct PlateTabView: View {
                         }
                     } label: {
                         Label("Add shape", systemImage: "cube")
+                    }
+                    Button {
+                        textPresented = true
+                    } label: {
+                        Label("Add Text\u{2026}", systemImage: "textformat")
+                    }
+                    // Desktop "Add Handy models" (MenuFactory parity):
+                    // one-tip bundled test prints. OrcaPad ships three tiny
+                    // parametric STLs instead of upstream's .drc files (the
+                    // Draco decoder is not in the engine closure).
+                    Menu {
+                        ForEach(HandyModels.entries) { entry in
+                            Button {
+                                importHandy(entry)
+                            } label: {
+                                Label {
+                                    VStack(alignment: .leading) {
+                                        Text(entry.name)
+                                        Text(entry.summary)
+                                            .font(.caption2)
+                                            .foregroundStyle(.secondary)
+                                    }
+                                } icon: {
+                                    Image(systemName: "printer.door.open")
+                                }
+                            }
+                        }
+                    } label: {
+                        Label("Handy models", systemImage: "shippingbox.fill")
                     }
                     Button {
                         newProjectConfirmation = true
@@ -544,6 +612,8 @@ struct PlateTabView: View {
                                 document.applyCameraView(preset)
                             }
                         }
+                        Divider()
+                        Toggle("Shells + COG", isOn: $showShells)
                     } label: {
                         Label("View", systemImage: "camera")
                     }
@@ -763,6 +833,28 @@ struct PlateTabView: View {
         return base.isEmpty ? "OrcaPad project" : base
     }
 
+    /// Board §wave-b/5: publishes per-object hulls to the renderer's
+    /// overlay channel. Reloaded on every document revision while the
+    /// toggle is on (and cleared when it is off / the plate empties).
+    private var shellOverlayKey: String {
+        "\(showShells)-\(document.scene?.revision.rawValue ?? 0)"
+    }
+
+    private func reloadShells() async {
+        guard showShells, let scene = document.scene, !scene.objects.isEmpty else {
+            ShellOverlayCenter.shared.update([])
+            return
+        }
+        // INTEGRATION (coordinator): DocumentStore wrapper mirroring
+        // loadFlattenPlanes — engine session held, one BackgroundWork run
+        // calling EnginePlater.objectHull(objectID:) per object of the
+        // current snapshot; returns [ObjectID: EnginePlater.HullMesh].
+        // Failures surface through StatusCenter inside the wrapper.
+        let hulls = await document.objectHulls()
+        ShellOverlayCenter.shared.update(
+            hulls.map { ShellDraw(objectID: $0.key, hull: $0.value) })
+    }
+
     private func handleImport(_ result: Result<[URL], any Error>) {
         if case .volume(let role, let objectID) = importMode,
             case .success(let urls) = result {
@@ -806,6 +898,74 @@ struct PlateTabView: View {
                 .document,
                 failure: AppFailure.wrap(error, operation: "choose import file")
             )
+        }
+    }
+
+    /// "Import zip…" (board §wave-b/3): extract on a background task, then
+    /// feed every model file through the same sequential multi-import path
+    /// as handleImport (one undo step per object, desktop parity).
+    private func handleZipImport(_ result: Result<URL, any Error>) {
+        switch result {
+        case .success(let url):
+            Task {
+                if !document.isReady {
+                    await environment.bootstrap()
+                }
+                guard document.isReady else { return }
+                let extraction = await BackgroundWork.run(operation: "extract zip") {
+                    try ZipImport.extractModelFiles(from: url)
+                }
+                switch extraction {
+                case .success(let files):
+                    environment.status.report(
+                        .document,
+                        "\(url.lastPathComponent): importing \(files.count) model(s)…"
+                    )
+                    for file in files {
+                        let bedCenter = document.currentPlateCenter
+                            ?? environment.presets.printVolume.map {
+                                SIMD2<Double>($0.centerX, $0.centerY)
+                            }
+                            ?? .zero
+                        await document.importModel(from: file, bedCenter: bedCenter)
+                    }
+                case .failure(let failure):
+                    environment.status.report(.document, failure: failure)
+                }
+            }
+        case .failure(let error):
+            environment.status.report(
+                .document,
+                failure: AppFailure.wrap(error, operation: "choose zip file")
+            )
+        }
+    }
+
+    /// "Handy models": one bundled STL through the normal import path
+    /// (bundled resources are plain readable URLs — no sandbox copy of the
+    /// PICKED file is needed beyond the one importModel makes itself).
+    private func importHandy(_ entry: HandyModels.Entry) {
+        let url: URL
+        do {
+            url = try HandyModels.bundledURL(for: entry)
+        } catch {
+            environment.status.report(
+                .document,
+                failure: AppFailure.wrap(error, operation: "add handy model")
+            )
+            return
+        }
+        Task {
+            if !document.isReady {
+                await environment.bootstrap()
+            }
+            guard document.isReady else { return }
+            let bedCenter = document.currentPlateCenter
+                ?? environment.presets.printVolume.map {
+                    SIMD2<Double>($0.centerX, $0.centerY)
+                }
+                ?? .zero
+            await document.importModel(from: url, bedCenter: bedCenter)
         }
     }
 
@@ -1470,6 +1630,62 @@ private extension VolumeRole {
         return Color(
             red: Double(c.x), green: Double(c.y), blue: Double(c.z), opacity: 1
         )
+    }
+}
+
+/// Desktop "Add Text" v1 (ABI v37): flat raised text as its own object,
+/// bundled Sarabun (SIL OFL 1.1); size = line height, depth = extrusion.
+private struct AddTextSheet: View {
+    @Binding var text: String
+    @Binding var size: Double
+    @Binding var depth: Double
+    let onAdd: () -> Void
+
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("Text") {
+                    TextField("Text", text: $text)
+                        .font(.body)
+                    HStack {
+                        Text("Height")
+                            .foregroundStyle(.secondary)
+                        Slider(value: $size, in: 4...40, step: 1)
+                        Text(String(format: "%.0f mm", size))
+                            .font(.caption.monospacedDigit())
+                            .frame(width: 56, alignment: .trailing)
+                    }
+                    HStack {
+                        Text("Depth")
+                            .foregroundStyle(.secondary)
+                        Slider(value: $depth, in: 0.4...10, step: 0.2)
+                        Text(String(format: "%.1f mm", depth))
+                            .font(.caption.monospacedDigit())
+                            .frame(width: 56, alignment: .trailing)
+                    }
+                }
+                Section {
+                    Button {
+                        onAdd()
+                    } label: {
+                        Label("Add Text", systemImage: "textformat")
+                    }
+                    .disabled(text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                } footer: {
+                    Text("Raised text object at the plate center (Sarabun, SIL OFL). Move, scale and slice it like any model.")
+                }
+            }
+            .navigationTitle("Add Text")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }
+                }
+            }
+        }
+        .presentationDetents([.medium])
     }
 }
 

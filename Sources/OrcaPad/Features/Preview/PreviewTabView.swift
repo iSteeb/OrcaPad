@@ -25,6 +25,16 @@ struct PreviewTabView: View {
     @State private var ticks: [EnginePlater.CustomGcodeItem] = []
     @State private var customTextPresented = false
     @State private var customText = ""
+    /// Board §wave-b/4: toolpath → OBJ export, shared through the system
+    /// sheet (the URL only exists after a background write).
+    @State private var sharingOBJ: ShareURL?
+
+    /// Identifiable URL wrapper so `.sheet(item:)` can present the share
+    /// sheet for an export that finished asynchronously.
+    private struct ShareURL: Identifiable {
+        let url: URL
+        var id: String { url.absoluteString }
+    }
 
     var body: some View {
         Group {
@@ -95,6 +105,10 @@ struct PreviewTabView: View {
                 }
             )
         }
+        .sheet(item: $sharingOBJ) { share in
+            ActivityShareSheet(items: [share.url])
+                .presentationDetents([.medium, .large])
+        }
         .alert("Custom G-code", isPresented: $customTextPresented) {
             TextField("G-code (e.g. M300 S440 P200)", text: $customText)
             Button("Add") {
@@ -159,6 +173,44 @@ struct PreviewTabView: View {
                 .preview,
                 failure: AppFailure.wrap(error, operation: "choose G-code file")
             )
+        }
+    }
+
+    /// Board §wave-b/4: writes the visible toolpath to
+    /// `Documents/Exports/<name>.obj` off the main actor, then presents
+    /// the system share sheet for the result.
+    private func exportToolpathOBJ() async {
+        guard let toolpath = store.toolpath else {
+            environment.status.report(
+                .preview,
+                failure: .invariant(
+                    operation: "export OBJ",
+                    diagnostic: "no toolpath is loaded"))
+            return
+        }
+        let lower = store.lowerLayer
+        let upper = store.upperLayer
+        let hidden = store.hiddenRoles
+        let baseName = (store.loadedURL?
+            .deletingPathExtension()
+            .lastPathComponent ?? "toolpath") + "-toolpath"
+        let result = await BackgroundWork.run(operation: "export OBJ") {
+            try ToolpathOBJ.write(
+                toolpath: toolpath,
+                lowerLayer: lower,
+                upperLayer: upper,
+                hiddenRoles: hidden,
+                baseName: baseName)
+        }
+        switch result {
+        case .success(let url):
+            environment.status.report(
+                .preview,
+                "OBJ exported: \(url.lastPathComponent) " +
+                    "(\(store.lowerLayer + 1)–\(store.upperLayer + 1) of \(store.layerCount) layers visible at export)")
+            sharingOBJ = ShareURL(url: url)
+        case .failure(let failure):
+            environment.status.report(.preview, failure: failure)
         }
     }
 
@@ -316,6 +368,15 @@ struct PreviewTabView: View {
                     ChromeToolLabel(symbol: "doc.badge.plus", label: "Open")
                 }
                 .buttonStyle(.plain)
+                // Board §wave-b/4: export the VISIBLE toolpath as an OBJ
+                // (one box per extrusion segment) and share it.
+                Button {
+                    Task { await exportToolpathOBJ() }
+                } label: {
+                    ChromeToolLabel(symbol: "cube", label: "OBJ")
+                }
+                .buttonStyle(.plain)
+                .disabled(store.toolpath == nil)
                 if let url = store.loadedURL {
                     ShareLink(item: url) {
                         ChromeToolLabel(symbol: "square.and.arrow.up", label: "Share")

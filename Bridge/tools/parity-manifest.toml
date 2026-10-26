@@ -278,9 +278,11 @@ evidence = ["abi:orca_plater_add_shape_object", "abi:orca_plater_volume_add_shap
 id = "plate.handy-models"
 area = "plate"
 title = "Handy models (bundled test models)"
-status = "missing"
+status = "partial"
 desktop = ["context:Add Handy models", "context:{_(model.label)}@append_submenu_add_handy_model", "format:FT_GALLERY"]
+evidence = ["client:HandyModels"]
 work = "UI"
+gap = "three bundled models (calibration cube, cylinder, bridge strip) instead of desktop's Draco-encoded gallery; no tolerance-test part"
 priority = 32
 
 [[feature]]
@@ -442,8 +444,10 @@ priority = 38
 id = "plate.text-emboss"
 area = "plate"
 title = "Text emboss / engrave"
-status = "missing"
+status = "partial"
 desktop = ["gizmo:Emboss", "context:Edit text", "context:{item_name}@append_menu_itemm_add_"]
+evidence = ["abi:orca_plater_add_text_object", "client:struct AddTextSheet"]
+gap = "standalone RAISED text done (engine Emboss pipeline, bundled Sarabun OFL, size/depth sheet, contract-tested); on-surface emboss/engrave, per-glyph editing, font picking and text gizmo are not implemented"
 work = "Bridge + UI"
 priority = 39
 note = "Emboss.cpp is compiled; needs iOS font access"
@@ -716,9 +720,11 @@ note = "Multi-element numeric vectors render one slot-numbered field per element
 id = "prepare.option-dependencies"
 area = "prepare"
 title = "Option dependency enable/disable and sanity prompts"
-status = "missing"
+status = "partial"
 source = "src/slic3r/GUI/ConfigManipulation.cpp:toggle_print_fff_options"
+evidence = ["client:SettingsRowGreyouts"]
 work = "Client-reimpl"
+gap = "18 hand-written rule groups covering the high-traffic ConfigManipulation dependencies (walls, infill, spiral, top-surface, skirt/brim, supports, ironing, prime tower, fuzzy, detour) with visible reasons; not the complete desktop rule engine"
 priority = 103
 
 [[feature]]
@@ -901,10 +907,11 @@ note = "edits are rejected while slicing (ARCHITECTURE \u00a75 edit-while-slicin
 id = "prepare.auto-slice"
 area = "prepare"
 title = "Auto slice after changes"
-status = "missing"
+status = "done"
 desktop = ["pref:Auto slice after changes"]
+evidence = ['client:func autoSlice\(']
 work = "UI"
-priority = 116
+note = "Auto toggle in the Prepare pill: revision-observing task with 1.5s debounce, staleness/busy guards"
 
 [[feature]]
 id = "prepare.preset-sync"
@@ -1051,10 +1058,11 @@ evidence = ["client:private var legend", "client:estimatedStealthSeconds", "clie
 id = "preview.shells-cog"
 area = "preview"
 title = "Object shells and center of gravity"
-status = "missing"
+status = "done"
 source = "src/slic3r/GUI/GCodeViewer.hpp:Shells"
-work = "UI"
-priority = 205
+evidence = ["abi:orca_plater_object_hull", "client:ShellOverlayCenter"]
+work = "Bridge + UI"
+note = "ABI v37: engine convex_hull_3d + volume centroid per object; Plate View-menu toggle draws the hull wireframe (depth-cued fill) + COG marker"
 
 [[feature]]
 id = "preview.gcode-window"
@@ -1069,10 +1077,10 @@ priority = 208
 id = "preview.export-toolpaths"
 area = "preview"
 title = "Export toolpaths as OBJ"
-status = "missing"
+status = "done"
+evidence = ["client:ToolpathOBJ"]
 desktop = ["menu:Export toolpaths as OBJ"]
 work = "Client-reimpl"
-priority = 209
 
 [[feature]]
 id = "preview.gcode-viewer"
@@ -1139,29 +1147,30 @@ priority = 311
 id = "device.host-prusalink"
 area = "device"
 title = "PrusaLink / Prusa Connect hosts"
-status = "partial"
+status = "done"
 desktop = ["host:htPrusaLink", "host:htPrusaConnect"]
 evidence = ['client:prusalink', 'client:DigestCredentials']
 work = "Client-reimpl"
-gap = "PrusaLink upload + select-and-print done (HTTP digest, user maker, per-upload session); Prusa Connect (cloud) not implemented"
+note = "PrusaLink: HTTP digest upload + select-and-print. Prusa Connect: connect.prusa3d.com api/files/local with X-Api-Key (Connect token) and to_print flag, Accept-Language parity (OctoPrint.cpp PrusaConnect block)"
 
 [[feature]]
 id = "device.host-duet"
 area = "device"
 title = "Duet host"
-status = "missing"
+status = "done"
 desktop = ["host:htDuet"]
+evidence = ['client:rr_upload', 'client:duetStart']
 work = "Client-reimpl"
-priority = 301
+note = "Duet/RRF parity (Duet.cpp): raw-body POST /rr_upload?name=0:/gcodes/<file> + time, queued /rr_gcode M32 start when start-print is on"
 
 [[feature]]
 id = "device.host-repetier"
 area = "device"
 title = "Repetier host"
-status = "missing"
+status = "done"
+evidence = ['client:printer/model/default', 'client:autostart']
 desktop = ["host:htRepetier"]
 work = "Client-reimpl"
-priority = 302
 
 [[feature]]
 id = "device.host-flashair"
@@ -1177,16 +1186,18 @@ note = "FlashAir.cpp parity: the three-step upload.cgi flow (WRITEPROTECT=ON&FTI
 id = "device.host-astrobox"
 area = "device"
 title = "AstroBox host"
-status = "missing"
+status = "done"
+evidence = ['client:api/files/local', 'client:X-Api-Key']
 desktop = ["host:htAstroBox"]
 work = "Client-reimpl"
-priority = 304
 
 [[feature]]
 id = "device.host-mks"
 area = "device"
 title = "MKS host"
-status = "missing"
+status = "partial"
+evidence = ["client:X-Filename"]
+gap = "raw-body /upload?X-Filename= done; start-print (M23/M24 over the TCP console) not implemented"
 desktop = ["host:htMKS"]
 work = "Client-reimpl"
 priority = 305
@@ -1195,16 +1206,18 @@ priority = 305
 id = "device.host-esp3d"
 area = "device"
 title = "ESP3D host"
-status = "missing"
+status = "done"
+evidence = ['client:upload_serial', 'client:M23']
 desktop = ["host:htESP3D"]
 work = "Client-reimpl"
-priority = 306
 
 [[feature]]
 id = "device.host-crealityprint"
 area = "device"
 title = "Creality Print host + LAN discovery"
-status = "missing"
+status = "partial"
+evidence = ["client:upload/", "client:Bearer"]
+gap = "LAN upload done (Bearer /upload/<file> multipart); LAN discovery (CrealityHostDiscovery) not implemented"
 desktop = ["host:htCrealityPrint", "dialog:CrealityDiscoveryDialog"]
 work = "Client-reimpl"
 priority = 307
@@ -1213,25 +1226,27 @@ priority = 307
 id = "device.host-obico"
 area = "device"
 title = "Obico host"
-status = "missing"
+status = "done"
+evidence = ['client:g_code_files', 'client:Bearer']
 desktop = ["host:htObico"]
 work = "Client-reimpl"
-priority = 308
 
 [[feature]]
 id = "device.host-flashforge"
 area = "device"
 title = "Flashforge host"
-status = "missing"
+status = "done"
+evidence = ['client:uploadGcode', 'client:serialNumber']
 desktop = ["host:htFlashforge"]
 work = "Client-reimpl"
-priority = 309
 
 [[feature]]
 id = "device.host-simplyprint"
 area = "device"
 title = "SimplyPrint host (cloud auth)"
-status = "missing"
+status = "partial"
+evidence = ["client:TempUpload"]
+gap = "TempUpload with a pasted API key done (uuid-validated); account-link OAuth flow and REST start-print (desktop opens a browser import link) not implemented"
 desktop = ["host:htSimplyPrint", "dialog:PrinterCloudAuthDialog"]
 work = "Client-reimpl"
 priority = 312
@@ -1240,16 +1255,18 @@ priority = 312
 id = "device.host-elegoolink"
 area = "device"
 title = "ElegooLink host"
-status = "missing"
+status = "done"
+evidence = ['client:uploadFile/upload', 'client:Host']
 desktop = ["host:htElegooLink"]
 work = "Client-reimpl"
-priority = 313
 
 [[feature]]
 id = "device.host-3dprinteros"
 area = "device"
 title = "3DPrinterOS host"
-status = "missing"
+status = "partial"
+evidence = ["client:apiglobal/upload"]
+gap = "apiglobal/upload with a pasted session token done (file_id validated); browser login-token flow and REST start (desktop opens quickprint link) not implemented"
 desktop = ["host:ht3DPrinterOS"]
 work = "Client-reimpl"
 priority = 314
@@ -1371,10 +1388,11 @@ reason = "deferred by user 2026-10-07 (draco)"
 id = "files.import-zip"
 area = "files"
 title = "Import zip archive"
-status = "missing"
+status = "done"
 desktop = ["menu:Import Zip Archive", "format:FT_ZIP", "dialog:FileArchiveDialog"]
+evidence = ["client:ZipImport"]
 work = "UI"
-priority = 155
+note = "Hand-parsed EOCD/central-directory + Apple Compression raw-DEFLATE (methods 0/8, typed rejections for ZIP64/encryption/others, zip-slip + bomb guards); every model inside imports through the multi-import path"
 
 [[feature]]
 id = "files.recent"

@@ -33,6 +33,9 @@ struct PrepareTabView: View {
     @State private var pendingSelection: PendingSelection?
     @State private var importPresetPresented = false
     @State private var importBundlePresented = false
+    /// Board §wave-b/2: auto re-slice on document changes (persisted —
+    /// desktop "slice automatically" preference parity).
+    @AppStorage("slice.auto") private var autoSlice = false
 
     private struct PendingSelection: Identifiable {
         let kind: PresetKind
@@ -84,6 +87,22 @@ struct PrepareTabView: View {
                 Text("The current preset has \(pending.modified) modified setting(s). Save them as a user preset from the preset menu first, or discard them.")
             }
         }
+        // Auto-slice observation (board §wave-b/2): re-keyed on every
+        // document revision and on the toggle itself; SliceService debounces
+        // through this task's cancellation. Lives with the toggle: leaving
+        // the Prepare tab cancels a pending auto-slice (a deliberate,
+        // documented scope — not a background daemon).
+        .task(id: autoSliceTaskKey) {
+            guard autoSlice else { return }
+            await environment.slicing.autoSlice(
+                document: environment.document, presets: presets)
+        }
+    }
+
+    /// The observation key: revision + toggle state (flipping the toggle on
+    /// evaluates the current revision immediately).
+    private var autoSliceTaskKey: String {
+        "\(autoSlice)-\(environment.document.scene?.revision.rawValue ?? 0)"
     }
 
     // MARK: Slice action (desktop parity: top toolbar)
@@ -299,6 +318,28 @@ struct PrepareTabView: View {
                     ChromeToolLabel(symbol: "arrow.left.arrow.right.square", label: "Configs")
                 }
                 .buttonStyle(.plain)
+                Divider().frame(height: 28)
+                // Auto-slice toggle (board §wave-b/2): re-slices after
+                // document changes once a first (manual) slice exists.
+                Button {
+                    autoSlice.toggle()
+                } label: {
+                    ChromeToolLabel(
+                        symbol: autoSlice
+                            ? "arrow.triangle.2.circlepath.circle.fill"
+                            : "arrow.triangle.2.circlepath.circle",
+                        label: "Auto"
+                    )
+                    .foregroundStyle(autoSlice ? Color.accentColor : Color.primary)
+                    .background(
+                        autoSlice ? Color.accentColor.opacity(0.18) : Color.clear,
+                        in: RoundedRectangle(cornerRadius: 10)
+                    )
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(autoSlice
+                    ? "Auto-slice on — re-slices after plate changes"
+                    : "Auto-slice off")
                 Divider().frame(height: 28)
                 slicePillButton
             }

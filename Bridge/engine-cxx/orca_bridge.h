@@ -7,7 +7,7 @@ extern "C" {
 #endif
 
 /// Version of the C ABI contract in this header. Callers verify it at runtime.
-#define ORCA_BRIDGE_ABI_VERSION ((uint32_t)36)
+#define ORCA_BRIDGE_ABI_VERSION ((uint32_t)37)
 
 typedef int32_t orca_status_code;
 #define ORCA_STATUS_OK                     ((orca_status_code)0)
@@ -351,6 +351,40 @@ orca_result orca_plater_object_cut(orca_plater *plater,
                                    orca_object_id *out_first_object_id,
                                    uint32_t *out_object_count,
                                    orca_revision *out_revision);
+
+// --- shells / COG + text emboss (ABI v37) ------------------------------------
+
+/// Convex hull of an object's merged mesh plus its volume centroid.
+/// WORLD space of the object's FIRST instance (ModelObject::mesh() bakes
+/// volume transforms + that instance; multi-instance objects place further
+/// copies with their own instance matrices). Read-only.
+typedef struct {
+    uint32_t vertex_count;
+    uint32_t index_count;
+    float *positions;            // xyz triples, object space
+    uint32_t *indices;           // triangle list
+    float centroid[3];           // object space, volume-weighted
+} orca_hull_mesh;
+void orca_hull_mesh_dispose(orca_hull_mesh *mesh);
+
+orca_result orca_plater_object_hull(orca_plater *plater,
+                                    orca_object_id object_id,
+                                    orca_hull_mesh *out);
+
+/// Desktop "Add Text" v1 (standalone raised text object, flat base):
+/// loads the font file at `font_path` (TTF/TTC bytes, stb_truetype in the
+/// engine), shapes the text at `size_mm` line height, extrudes `depth_mm`,
+/// and adds the mesh as a new object resting on the bed at the center.
+/// One mutation (one undo step); returns the new object id.
+orca_result orca_plater_add_text_object(orca_plater *plater,
+                                        const char *font_path,
+                                        const char *text,
+                                        double size_mm,
+                                        double depth_mm,
+                                        double bed_center_x,
+                                        double bed_center_y,
+                                        orca_object_id *out_object_id,
+                                        orca_revision *out_revision);
 
 // --- painting (desktop painter gizmos, ABI v36) ------------------------------
 

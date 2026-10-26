@@ -276,7 +276,7 @@ static void test_md5_shim() {
 
 static void test_abi_version() {
     CHECK_EQ(orca_bridge_abi_version(), ORCA_BRIDGE_ABI_VERSION);
-    CHECK_EQ(ORCA_BRIDGE_ABI_VERSION, 36);
+    CHECK_EQ(ORCA_BRIDGE_ABI_VERSION, 37);
 }
 
 struct ProgressRecord {
@@ -3328,7 +3328,74 @@ static void test_arrange_orient(const std::string &dir, const std::string &data_
     orca_plater_free(plater);
 }
 
-// ABI v36: painting (support/seam/MMU/fuzzy layers)
+// ABI v37: object hull / COG + text emboss
+static void test_hull_and_text(const std::string &dir) {
+    orca_plater *plater = nullptr;
+    GUARD(g0, orca_plater_new(&plater));
+    expect_ok(g0, "plater_new");
+    const std::string cube = write_cube_stl(dir, "hull_cube.stl");
+    orca_object_id object_id = 0;
+    orca_revision revision = 0;
+    GUARD(g1, import_one(plater, cube.c_str(), 100.0, 100.0, &object_id, &revision));
+    expect_ok(g1, "import cube");
+
+    // hull: a cube's hull is the cube itself (12 triangles, 8 vertices)
+    orca_hull_mesh hull{};
+    GUARD(h1, orca_plater_object_hull(plater, object_id, &hull));
+    expect_ok(h1, "object hull");
+    CHECK_EQ(hull.index_count / 3, 12u);
+    CHECK_EQ(hull.vertex_count, 8u);
+    // world space of instance 0: the import placed the cube at (100,100),
+    // resting on the bed (10mm tall => centroid z = 5)
+    CHECK_NEAR(hull.centroid[0], 100.0, 1e-3);
+    CHECK_NEAR(hull.centroid[1], 100.0, 1e-3);
+    CHECK_NEAR(hull.centroid[2], 10.0, 1e-3);  // 20mm test cube
+    orca_hull_mesh_dispose(&hull);
+    GUARD(h2, orca_plater_object_hull(plater, 999999, &hull));
+    expect_code(h2, ORCA_STATUS_NOT_FOUND, "hull missing object");
+
+    // text: the shipped Sarabun (OFL) copy
+    const std::string font = "Sources/OrcaPad/Resources/Fonts/Sarabun-Regular.ttf";
+    struct stat probe;
+    if (stat(font.c_str(), &probe) == 0) {
+        orca_object_id text_id = 0;
+        GUARD(t1, orca_plater_add_text_object(plater, font.c_str(), "OC",
+                                              10.0, 2.0, 100.0, 100.0,
+                                              &text_id, &revision));
+        expect_ok(t1, "add text object");
+        CHECK(text_id != 0);
+        orca_scene_snapshot snap = take_snapshot(plater);
+        CHECK_EQ(snap.object_count, 2);
+        bool found = false;
+        for (int i = 0; i < snap.object_count; ++i)
+            if (snap.objects[i].id == text_id) {
+                found = true;
+                CHECK(snap.objects[i].index_count > 30);
+                // extrusion-centered mesh: z extent ~= depth (2mm); the
+                // INSTANCE rests it on the bed
+                CHECK_NEAR(snap.objects[i].bbox_max[2] - snap.objects[i].bbox_min[2],
+                           2.0f, 0.05f);
+            }
+        CHECK(found);
+        orca_scene_snapshot_dispose(&snap);
+        GUARD(t2, orca_plater_undo(plater, &revision));
+        expect_ok(t2, "undo text");
+        snap = take_snapshot(plater);
+        CHECK_EQ(snap.object_count, 1);
+        orca_scene_snapshot_dispose(&snap);
+        GUARD(t3, orca_plater_add_text_object(plater, font.c_str(), "   ",
+                                              10.0, 2.0, 100.0, 100.0,
+                                              &text_id, &revision));
+        expect_code(t3, ORCA_STATUS_INVALID_MODEL, "whitespace text rejected");
+    }
+    GUARD(t4, orca_plater_add_text_object(plater, (dir + "/nofont.ttf").c_str(),
+                                          "X", 10.0, 2.0, 0, 0,
+                                          &object_id, &revision));
+    expect_code(t4, ORCA_STATUS_IO_FAILURE, "missing font file");
+    orca_plater_free(plater);
+}
+
+// ABI v36: painting (support/seam/MMU/fuzzy layers)// ABI v36: painting (support/seam/MMU/fuzzy layers)
 static void test_painting(const std::string &dir) {
     orca_plater *plater = nullptr;
     GUARD(g0, orca_plater_new(&plater));
@@ -4495,6 +4562,7 @@ int main() {
     test_cut(dir);
     test_config_io(dir, data_dir);
     test_painting(dir);
+    test_hull_and_text(dir);
     test_project_roundtrip(dir, data_dir);
     test_user_presets(data_dir);
     test_physical_printers(data_dir);

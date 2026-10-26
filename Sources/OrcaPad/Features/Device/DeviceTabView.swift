@@ -412,6 +412,17 @@ enum PrinterHostKind {
         ("prusalink", "PrusaLink"),
         ("duet", "Duet / RepRapFirmware"),
         ("flashair", "FlashAir SD card"),
+        ("repetier", "Repetier"),
+        ("astrobox", "AstroBox"),
+        ("mks", "MKS"),
+        ("esp3d", "ESP3D"),
+        ("crealityprint", "Creality Print (LAN)"),
+        ("elegoolink", "ElegooLink"),
+        ("flashforge", "Flashforge"),
+        ("obico", "Obico"),
+        ("prusaconnect", "PrusaConnect"),
+        ("simplyprint", "SimplyPrint"),
+        ("3dprinteros", "3DPrinterOS"),
     ]
 
     static func label(_ hostType: String) -> String {
@@ -425,6 +436,17 @@ enum PrinterHostKind {
         case "prusalink": return "printer.dotmatrix"
         case "duet": return "cpu"
         case "flashair": return "sdcard"
+        case "repetier": return "dial.max"
+        case "astrobox": return "externaldrive.connected.to.line.below"
+        case "mks": return "cylinder.split.1x2"
+        case "esp3d": return "wifi.router"
+        case "crealityprint": return "printer.dotmatrix.fill"
+        case "elegoolink": return "link"
+        case "flashforge": return "cube.transparent"
+        case "obico": return "cloud"
+        case "prusaconnect": return "globe"
+        case "simplyprint": return "cloud.fill"
+        case "3dprinteros": return "network"
         default: return "printer"
         }
     }
@@ -608,6 +630,16 @@ private struct PhysicalPrinterEditor: View {
     @State private var webUI = ""
     @State private var apiKey = ""
 
+    /// Cloud hosts serve from a fixed address which the desktop dialog
+    /// prefills (PhysicalPrinterDialog.cpp: app.obico.io / connect.prusa3d.
+    /// com; SimplyPrint.hpp get_host; 3DPrinterOS.hpp default_host).
+    private static let serviceHosts: [String: String] = [
+        "obico": "https://app.obico.io",
+        "prusaconnect": "https://connect.prusa3d.com",
+        "simplyprint": "https://simplyprint.io",
+        "3dprinteros": "https://cloud.3dprinteros.com",
+    ]
+
     private static func isHTTP(_ value: String) -> Bool {
         value.hasPrefix("http://") || value.hasPrefix("https://")
     }
@@ -649,7 +681,7 @@ private struct PhysicalPrinterEditor: View {
                 } header: {
                     Text("Connection")
                 } footer: {
-                    Text("Host URL receives uploads, e.g. http://192.168.1.51 (Moonraker behind Mainsail/Fluidd) or http://192.168.1.51:7125 (Moonraker directly). Device UI URL is the web page shown in this tab when it differs from the host URL, e.g. http://192.168.1.51 for Mainsail.")
+                    Text("Host URL receives uploads, e.g. http://192.168.1.51 (Moonraker behind Mainsail/Fluidd) or http://192.168.1.51:7125 (Moonraker directly). Cloud hosts use their fixed service address (prefilled); paste the account/token as the API key. Flashforge takes the printer's LAN address with API key \"serial:checkCode\". Device UI URL is the web page shown in this tab when it differs from the host URL, e.g. http://192.168.1.51 for Mainsail.")
                 }
             }
             .navigationTitle(existing == nil ? "Add printer" : "Edit printer")
@@ -675,6 +707,14 @@ private struct PhysicalPrinterEditor: View {
             }
             .onChange(of: url) { _, value in
                 if !value.isEmpty, !value.hasPrefix("http") { url = "http://\(value)" }
+            }
+            .onChange(of: hostType) { _, kind in
+                // Desktop PhysicalPrinterDialog prefills each cloud host's
+                // fixed service address; a URL the user typed themselves
+                // is never overwritten.
+                if url.isEmpty || Self.serviceHosts.values.contains(url) {
+                    url = Self.serviceHosts[kind] ?? ""
+                }
             }
             .onChange(of: webUI) { _, value in
                 if !value.isEmpty, !value.hasPrefix("http") { webUI = "http://\(value)" }

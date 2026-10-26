@@ -138,6 +138,9 @@ void orca_result_dispose(orca_result *result) {
 #include "libslic3r/Format/STL.hpp"
 #include "libslic3r/CutUtils.hpp"
 #include "libslic3r/TriangleSelector.hpp"
+#include "libslic3r/Emboss.hpp"
+#include "libslic3r/EmbossShape.hpp"
+#include "libslic3r/TextConfiguration.hpp"
 
 #include "nlohmann/json.hpp"
 
@@ -2925,6 +2928,198 @@ orca_result orca_plater_object_cut(orca_plater *plater,
         *out_first_object_id =
             static_cast<orca_object_id>(added.front()->id().id);
         *out_object_count = static_cast<uint32_t>(added.size());
+        *out_revision = mutation.commit();
+        return orcapad_ok();
+    });
+}
+
+// --- shells / COG + text emboss (ABI v37) ------------------------------------
+
+void orca_hull_mesh_dispose(orca_hull_mesh *mesh) {
+    if (!mesh) return;
+    std::free(mesh->positions);
+    std::free(mesh->indices);
+    *mesh = orca_hull_mesh{};
+}
+
+/// Signed volume + centroid of a triangle soup (object space).
+static void orcapad_mesh_centroid(const indexed_triangle_set &its,
+                                  double *out_volume, Slic3r::Vec3d *out_centroid) {
+    double volume6 = 0;
+    Slic3r::Vec3d centroid = Slic3r::Vec3d::Zero();
+    for (const auto &triangle : its.indices) {
+        const Slic3r::Vec3f &a = its.vertices[triangle(0)];
+        const Slic3r::Vec3f &b = its.vertices[triangle(1)];
+        const Slic3r::Vec3f &c = its.vertices[triangle(2)];
+        const double v6 = a.dot(b.cross(c));  // 6x signed tet volume
+        volume6 += v6;
+        centroid += (a.cast<double>() + b.cast<double>() + c.cast<double>()) * v6;
+    }
+    if (std::abs(volume6) < 1e-12) {
+        *out_volume = 0;
+        *out_centroid = Slic3r::Vec3d::Zero();
+        return;
+    }
+    *out_volume = std::abs(volume6) / 6.0;
+    // tetra centroid weight: (a+b+c)/4 per tet; summed above as (a+b+c)*v6
+    // => divide by 4 * sum(v6)
+    *out_centroid = centroid / (4.0 * volume6);
+}
+
+orca_result orca_plater_object_hull(orca_plater *plater,
+                                    orca_object_id object_id,
+                                    orca_hull_mesh *out) {
+    constexpr const char *operation = "orca_plater_object_hull";
+    if (out) *out = orca_hull_mesh{};
+    if (!plater)
+        return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation,
+                            "plater handle is null");
+    if (!out)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "output pointer is null");
+    return orcapad_guard(operation, [&]() -> orca_result {
+        Slic3r::ModelObject *object = plater_obj(plater, object_id);
+        if (!object)
+            return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation,
+                                "object was not found");
+        Slic3r::TriangleMesh hull = object->mesh().convex_hull_3d();
+        if (hull.empty())
+            return orcapad_fail(ORCA_STATUS_INVALID_MODEL, operation,
+                                "the object mesh has no convex hull");
+        double volume = 0;
+        Slic3r::Vec3d centroid;
+        orcapad_mesh_centroid(hull.its, &volume, &centroid);
+
+        orca_hull_mesh result{};
+        result.vertex_count = static_cast<uint32_t>(hull.its.vertices.size());
+        result.index_count = static_cast<uint32_t>(hull.its.indices.size() * 3);
+        result.positions = static_cast<float *>(std::malloc(
+            hull.its.vertices.size() * 3 * sizeof(float)));
+        result.indices = static_cast<uint32_t *>(std::malloc(
+            result.index_count * sizeof(uint32_t)));
+        if (!result.positions || !result.indices) {
+            orca_hull_mesh_dispose(&result);
+            return orcapad_fail(ORCA_STATUS_OUT_OF_MEMORY, operation,
+                                "could not allocate the hull mesh");
+        }
+        for (size_t v = 0; v < hull.its.vertices.size(); ++v) {
+            result.positions[v * 3 + 0] = hull.its.vertices[v].x();
+            result.positions[v * 3 + 1] = hull.its.vertices[v].y();
+            result.positions[v * 3 + 2] = hull.its.vertices[v].z();
+        }
+        size_t flat = 0;
+        for (const auto &triangle : hull.its.indices)
+            for (int corner = 0; corner < 3; ++corner)
+                result.indices[flat++] = static_cast<uint32_t>(triangle(corner));
+        result.centroid[0] = float(centroid.x());
+        result.centroid[1] = float(centroid.y());
+        result.centroid[2] = float(centroid.z());
+        *out = result;
+        return orcapad_ok();
+    });
+}
+
+/// Desktop standalone "Add Text" (ABI v37): engine Emboss pipeline —
+/// create_font_file -> text2shapes -> polygons2model with the GUI
+/// try_create_mesh projection recipe (EmbossJob.cpp:927-950), flat raised
+/// text on its own object.
+orca_result orca_plater_add_text_object(orca_plater *plater,
+                                        const char *font_path,
+                                        const char *text,
+                                        double size_mm,
+                                        double depth_mm,
+                                        double bed_center_x,
+                                        double bed_center_y,
+                                        orca_object_id *out_object_id,
+                                        orca_revision *out_revision) {
+    constexpr const char *operation = "orca_plater_add_text_object";
+    if (out_object_id) *out_object_id = 0;
+    if (out_revision) *out_revision = 0;
+    if (!plater)
+        return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation,
+                            "plater handle is null");
+    if (!font_path || !font_path[0] || !text || !text[0] ||
+        !out_object_id || !out_revision)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "font path, text or output pointer is empty");
+    if (!std::isfinite(size_mm) || size_mm <= 0.0 ||
+        !std::isfinite(depth_mm) || depth_mm <= 0.0)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "text size and depth must be positive");
+    struct stat probe;
+    if (stat(font_path, &probe) != 0)
+        return orcapad_fail(ORCA_STATUS_IO_FAILURE, operation,
+                            "font file is not accessible");
+    return orcapad_guard(operation, [&]() -> orca_result {
+        if (!orcapad_revision_available(*plater))
+            return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
+                                "document revision is exhausted");
+        // 1) load the font bytes (stb_truetype, in-memory)
+        std::ifstream file(font_path, std::ios::in | std::ios::binary);
+        if (!file)
+            return orcapad_fail(ORCA_STATUS_IO_FAILURE, operation,
+                                "font file could not be opened");
+        auto bytes = std::make_unique<std::vector<unsigned char>>(
+            (std::istreambuf_iterator<char>(file)),
+            std::istreambuf_iterator<char>());
+        auto font = Slic3r::Emboss::create_font_file(std::move(bytes));
+        if (!font)
+            return orcapad_fail(ORCA_STATUS_INVALID_CONFIGURATION, operation,
+                                "the font file could not be parsed");
+        Slic3r::Emboss::FontFileWithCache font_with_cache(std::move(font));
+
+        // 2) shape the text (line height in mm)
+        Slic3r::FontProp prop;
+        prop.size_in_mm = float(size_mm);
+        prop.per_glyph = true;
+        Slic3r::HealedExPolygons healed =
+            Slic3r::Emboss::text2shapes(font_with_cache, text, prop);
+        Slic3r::ExPolygons shapes = healed.expolygons;
+        if (shapes.empty())
+            return orcapad_fail(ORCA_STATUS_INVALID_MODEL, operation,
+                                "the text produced no shapes (empty glyphs?)");
+
+        // 3) extrude (GUI try_create_mesh recipe; standalone text is
+        //    is_outside=true => offset = -SAFE_SURFACE_OFFSET(0.015))
+        const double scale = Slic3r::Emboss::get_text_shape_scale(
+            prop, *font_with_cache.font_file);
+        auto project_z = std::make_unique<Slic3r::Emboss::ProjectZ>(
+            depth_mm / scale);
+        Slic3r::Transform3d transform =
+            Eigen::Translation<double, 3>(0.0, 0.0, -0.015) *
+            Eigen::Scaling(scale);
+        Slic3r::Emboss::ProjectTransform projection(std::move(project_z),
+                                                    transform);
+        Slic3r::TriangleMesh mesh(
+            Slic3r::Emboss::polygons2model(shapes, projection));
+        if (mesh.empty() || mesh.its.vertices.empty())
+            return orcapad_fail(ORCA_STATUS_INVALID_MODEL, operation,
+                                "the text mesh came out empty");
+
+        // 4) add as an object resting on the bed (import-path semantics)
+        OrcapadMutation mutation(*plater, "Add Text");
+        Slic3r::ModelObject *object = plater->model.add_object();
+        if (!object)
+            return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
+                                "engine did not create the text object");
+        object->name = std::string("Text: ") + text;
+        Slic3r::ModelVolume *volume = object->add_volume(std::move(mesh));
+        if (!volume)
+            return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
+                                "engine did not create the text volume");
+        volume->name = text;
+        volume->source.is_from_builtin_objects = true;
+        object->center_around_origin();
+        Slic3r::ModelInstance *instance = object->add_instance();
+        if (!instance)
+            return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
+                                "engine did not create the text instance");
+        instance->set_offset(Slic3r::Vec3d(bed_center_x, bed_center_y, 0.0));
+        object->ensure_on_bed(false);
+        if (!orcapad_register_object(*plater, *object))
+            return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
+                                "engine returned an invalid or reused object ID");
+        *out_object_id = static_cast<orca_object_id>(object->id().id);
         *out_revision = mutation.commit();
         return orcapad_ok();
     });

@@ -175,6 +175,13 @@ final class Renderer: NSObject, MTKViewDelegate {
     private var paintOverlay: [VertexPC] = []
     private var paintOverlayCount = 0
 
+    // Object shells + COG overlay (Plate View menu, board §wave-b/5):
+    // per-object convex-hull wireframe + volume-centroid marker, published
+    // by the Plate tab through ShellOverlayCenter. Derived GPU buffers are
+    // cached per (generation, bed center) — hulls reload per revision, not
+    // per frame.
+    private var shellCache: ShellOverlayCache?
+
     func setPaintOverlay(_ triangles: [EnginePlater.PaintTriangle]?) {
         var vertices: [VertexPC] = []
         if let triangles {
@@ -200,6 +207,179 @@ final class Renderer: NSObject, MTKViewDelegate {
         case 4: return SIMD4(0.45, 0.60, 0.95, 0.55)
         default: return SIMD4(0.75, 0.45, 0.95, 0.55)
         }
+    }
+
+    /// Shell overlay colors: desktop has no shell gizmo (hulls exist only
+    /// for computation upstream); OrcaPad's color echoes the selection
+    /// outline family so the shell reads as analysis geometry, not a model.
+    private static let shellLineColor = SIMD4<Float>(0.55, 0.85, 1.0, 0.9)
+    private static let shellFillColor = SIMD4<Float>(0.35, 0.65, 0.95, 0.07)
+    private static let shellAxisColors = (
+        SIMD4<Float>(0.95, 0.30, 0.25, 1),   // engine +X
+        SIMD4<Float>(0.35, 0.85, 0.35, 1),   // engine +Y
+        SIMD4<Float>(0.30, 0.55, 1.00, 1)    // engine +Z
+    )
+
+    /// GPU buffers + counts derived from one overlay generation.
+    private struct ShellOverlayCache {
+        let generation: UInt64
+        let bedCenter: SIMD2<Float>
+        let lineBuffer: MTLBuffer
+        let lineCount: Int
+        let fillBuffer: MTLBuffer
+        let fillCount: Int
+        let markerBuffer: MTLBuffer
+        let markerCount: Int
+    }
+
+    /// Derives (and caches) the shell overlay geometry for the current
+    /// ShellOverlayCenter state. Nil when no shells are published. Engine
+    /// world positions map through the SAME bed-anchored transform as the
+    /// scene (viewerPoint(fromEngine:bedCenter:)).
+    private func shellOverlay(bedCenter: SIMD2<Float>) -> ShellOverlayCache? {
+        let center = ShellOverlayCenter.shared
+        guard !center.shells.isEmpty else {
+            shellCache = nil
+            return nil
+        }
+        if let cache = shellCache,
+            cache.generation == center.generation, cache.bedCenter == bedCenter {
+            return cache
+        }
+
+        var lines: [VertexPC] = []
+        var fill: [VertexPC] = []
+        var markers: [VertexPC] = []
+        for shell in center.shells {
+            let hull = shell.hull
+            guard hull.positions.count >= 3, hull.indices.count >= 3 else {
+                continue
+            }
+            let viewer = hull.positions.map {
+                CoordinateMapper.viewerPoint(fromEngine: $0, bedCenter: bedCenter)
+            }
+            // Wireframe: every UNIQUE edge of the hull's triangle list
+            // (key = sorted vertex-index pair), drawn once.
+            var edges = Set<UInt64>()
+            func edgeKey(_ a: UInt32, _ b: UInt32) -> UInt64 {
+                a < b ? UInt64(a) << 32 | UInt64(b) : UInt64(b) << 32 | UInt64(a)
+            }
+            for triangle in stride(from: 0, to: hull.indices.count - 2, by: 3) {
+                let a = hull.indices[triangle]
+                let b = hull.indices[triangle + 1]
+                let c = hull.indices[triangle + 2]
+                guard Int(a) < viewer.count, Int(b) < viewer.count,
+                    Int(c) < viewer.count
+                else { continue }
+                for (p, q) in [(a, b), (b, c), (c, a)] {
+                    if edges.insert(edgeKey(p, q)).inserted {
+                        lines.append(VertexPC(
+                            position: viewer[Int(p)], color: Renderer.shellLineColor))
+                        lines.append(VertexPC(
+                            position: viewer[Int(q)], color: Renderer.shellLineColor))
+                    }
+                }
+                // Faint solid fill gives the shell depth cueing against the
+                // object behind it.
+                for index in [a, b, c] {
+                    fill.append(VertexPC(
+                        position: viewer[Int(index)], color: Renderer.shellFillColor))
+                }
+            }
+            markers.append(contentsOf: cogMarker(
+                center: CoordinateMapper.viewerPoint(
+                    fromEngine: hull.centroid, bedCenter: bedCenter),
+                positions: viewer))
+        }
+        guard lines.count >= 2 else {
+            shellCache = nil
+            return nil
+        }
+
+        func buffer(_ vertices: [VertexPC], label: String)
+            -> (MTLBuffer, Int)?
+        {
+            guard !vertices.isEmpty else { return nil }
+            guard let buffer = device.makeBuffer(
+                bytes: vertices,
+                length: MemoryLayout<VertexPC>.stride * vertices.count,
+                options: .storageModeShared
+            ) else {
+                fail("shell overlay \(label) buffer allocation failed")
+                return nil
+            }
+            buffer.label = label
+            return (buffer, vertices.count)
+        }
+        guard let line = buffer(lines, label: "shell-lines"),
+            let marker = buffer(markers, label: "shell-cog")
+        else {
+            shellCache = nil
+            return nil
+        }
+        let fillBuffer = buffer(fill, label: "shell-fill")
+        let cache = ShellOverlayCache(
+            generation: center.generation,
+            bedCenter: bedCenter,
+            lineBuffer: line.0,
+            lineCount: line.1,
+            // fillCount 0 ⇒ the fill pass never draws; the line buffer is a
+            // non-optional placeholder so the cache struct stays simple.
+            fillBuffer: fillBuffer?.0 ?? line.0,
+            fillCount: fillBuffer?.1 ?? 0,
+            markerBuffer: marker.0,
+            markerCount: marker.1
+        )
+        shellCache = cache
+        return cache
+    }
+
+    /// COG marker at the hull's volume centroid: a small wire octahedron
+    /// plus an axis triad sized to the hull extent (desktop draws a COG
+    /// marker only for TOOLPATHS — libvgcode — OrcaPad extends the idea to
+    /// objects; engine axes colored like the rotate gizmo).
+    private func cogMarker(
+        center: SIMD3<Float>, positions: [SIMD3<Float>]
+    ) -> [VertexPC] {
+        var minimum = SIMD3<Float>(repeating: .infinity)
+        var maximum = SIMD3<Float>(repeating: -.infinity)
+        for position in positions {
+            minimum = simd_min(minimum, position)
+            maximum = simd_max(maximum, position)
+        }
+        let extent = simd_distance(minimum, maximum)
+        let octahedronRadius = max(extent * 0.045, 1.0)
+        let axisLength = max(extent * 0.09, 2.0)
+
+        var vertices: [VertexPC] = []
+        let white = SIMD4<Float>(1, 1, 1, 0.9)
+        // Wire octahedron (±x/±y/±z tips, 12 edges).
+        let tips = [
+            SIMD3<Float>(1, 0, 0), SIMD3<Float>(-1, 0, 0),
+            SIMD3<Float>(0, 1, 0), SIMD3<Float>(0, -1, 0),
+            SIMD3<Float>(0, 0, 1), SIMD3<Float>(0, 0, -1),
+        ].map { center + $0 * octahedronRadius }
+        let tipEdges = [
+            (0, 2), (0, 3), (0, 4), (0, 5),
+            (1, 2), (1, 3), (1, 4), (1, 5),
+            (2, 4), (2, 5), (3, 4), (3, 5),
+        ]
+        for (a, b) in tipEdges {
+            vertices.append(VertexPC(position: tips[a], color: white))
+            vertices.append(VertexPC(position: tips[b], color: white))
+        }
+        // Axis triad along the ENGINE axes (desktop camera/gizmo colors:
+        // X red, Y green, Z blue).
+        for (axis, color) in zip(
+            [SIMD3<Float>(1, 0, 0), SIMD3<Float>(0, 0, -1), SIMD3<Float>(0, 1, 0)],
+            [Renderer.shellAxisColors.0, Renderer.shellAxisColors.1,
+             Renderer.shellAxisColors.2]
+        ) {
+            vertices.append(VertexPC(position: center, color: color))
+            vertices.append(VertexPC(
+                position: center + axis * axisLength, color: color))
+        }
+        return vertices
     }
 
     func setFlattenPlanes(_ planes: [EnginePlater.FlattenPlane]?) {
@@ -1486,6 +1666,40 @@ final class Renderer: NSObject, MTKViewDelegate {
             }
         }
         encoder.popDebugGroup()
+
+        // Object shells + COG (Plate View menu): hull wireframe + faint
+        // fill depth-tested against the scene, COG marker always on top so
+        // it stays readable inside the shell.
+        if let overlay = shellOverlay(bedCenter: bed.center) {
+            encoder.pushDebugGroup("shell-overlay")
+            var flatUniforms = LineUniforms(mvp: viewProj)
+            encoder.setVertexBytes(
+                &flatUniforms,
+                length: MemoryLayout<LineUniforms>.stride, index: 1)
+            if overlay.fillCount > 0 {
+                encoder.setRenderPipelineState(pcBlendPipeline)
+                encoder.setDepthStencilState(translucentDepthState)
+                encoder.setVertexBuffer(overlay.fillBuffer, offset: 0, index: 0)
+                encoder.drawPrimitives(
+                    type: .triangle, vertexStart: 0,
+                    vertexCount: overlay.fillCount)
+            }
+            if overlay.lineCount > 0 {
+                encoder.setRenderPipelineState(linePipeline)
+                encoder.setDepthStencilState(translucentDepthState)
+                encoder.setVertexBuffer(overlay.lineBuffer, offset: 0, index: 0)
+                encoder.drawPrimitives(
+                    type: .line, vertexStart: 0, vertexCount: overlay.lineCount)
+            }
+            if overlay.markerCount > 0 {
+                encoder.setRenderPipelineState(linePipeline)
+                encoder.setDepthStencilState(overlayDepthState)
+                encoder.setVertexBuffer(overlay.markerBuffer, offset: 0, index: 0)
+                encoder.drawPrimitives(
+                    type: .line, vertexStart: 0, vertexCount: overlay.markerCount)
+            }
+            encoder.popDebugGroup()
+        }
 
         // Painted-facet overlay (ABI v36): translucent world-space triangles
         // over the opaque object, depth-tested like desktop painter gizmos.

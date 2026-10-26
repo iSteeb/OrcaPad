@@ -80,6 +80,15 @@ struct SettingsPagesSections: View {
                         ForEach(group.rows) { row in
                             SettingsEditorRowView(
                                 row: row,
+                                // Desktop ConfigManipulation parity (board
+                                // §wave-b/2): value-dependent grey-outs over
+                                // the same edited/system dumps the editor
+                                // shows.
+                                disabledReason: SettingsRowGreyouts.reason(
+                                    key: row.key,
+                                    lookup: SettingsValueLookup(
+                                        edited: presets.editedConfigs[kind] ?? [:],
+                                        system: presets.systemConfigs[kind] ?? [:])),
                                 onCommit: { commit(row.key, $0) },
                                 onReset: { reset(row.key) },
                                 onReject: { environment.status.report(.presets, $0) }
@@ -274,6 +283,9 @@ struct PerElementVectorEditor: View {
 
 struct SettingsEditorRowView: View {
     let row: SettingsEditorRow
+    /// Desktop dependency grey-out (SettingsRowGreyouts): non-nil disables
+    /// the editor and renders the reason; nil = freely editable.
+    var disabledReason: String? = nil
     let onCommit: (String) -> Void
     let onReset: () -> Void
     let onReject: (String) -> Void
@@ -310,6 +322,8 @@ struct SettingsEditorRowView: View {
                 labelColumn
                 Spacer(minLength: 8)
                 editor
+                    .disabled(disabledReason != nil)
+                    .opacity(disabledReason == nil ? 1 : 0.45)
                 if let sidetext = row.sidetext, row.editorKind == .numeric {
                     Text(sidetext)
                         .font(.caption)
@@ -322,6 +336,15 @@ struct SettingsEditorRowView: View {
                     }
                     .buttonStyle(.borderless)
                 }
+            }
+            // Desktop parity: the dependency reason doubles as the row's
+            // explanation — always visible (a hidden reason behind a tap
+            // reads as a broken control on a touch screen).
+            if let disabledReason {
+                Text(disabledReason)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             if showTooltip, let tooltip = row.tooltip {
                 Text(tooltip)
@@ -348,9 +371,15 @@ struct SettingsEditorRowView: View {
             HStack(spacing: 4) {
                 Text(row.label)
                     .font(.subheadline)
-                    .foregroundStyle(row.isModified ? Color.accentColor : Color.primary)
+                    .foregroundStyle(
+                        row.isModified && disabledReason == nil
+                            ? Color.accentColor : Color.primary)
                     .lineLimit(2)
-                if row.tooltip != nil {
+                if disabledReason != nil {
+                    Image(systemName: "minus.circle")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else if row.tooltip != nil {
                     Image(systemName: showTooltip ? "info.circle.fill" : "info.circle")
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -362,6 +391,7 @@ struct SettingsEditorRowView: View {
         }
         .contentShape(Rectangle())
         .onTapGesture { showTooltip.toggle() }
+        .opacity(disabledReason == nil ? 1 : 0.55)
     }
 
     @ViewBuilder

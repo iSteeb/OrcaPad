@@ -24,3 +24,4 @@ DerivedData/
 
 # Python bytecode (Distribution/*.py, Bridge/tools/*.py)
 __pycache__/
+/.agents
