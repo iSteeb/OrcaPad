@@ -68,6 +68,19 @@
 
 ## DECISIONS
 
+- [2026-10-26 CODE] 0.11 painting design (verified against pinned upstream):
+  all four paint layers are ModelVolume FacetsAnnotation fields
+  (supported_facets / seam_facets / mmu_segmentation_facets /
+  fuzzy_skin_facets). ABI v36 plan: ORCA_PAINT_LAYER enum; read path
+  orca_plater_volume_paint (world-space triangle sets per paint state via
+  FacetsAnnotation::get_facets / the BBS facets_per_type overload);
+  write path orca_plater_volume_paint_sphere (TriangleSelector(mesh) ->
+  set_facets -> SphereCursor(world hit + radius + mesh->world trafo) ->
+  select_patch -> FacetsAnnotation::set, one undo step) +
+  paint_reset per layer; client renders per-state translucent overlays and
+  a Paint gizmo (layer/role picker, radius slider, drag-paint batched to
+  one undo step). MMU states encode extruders in EnforcerBlockerType.
+
 - [2026-10-06 USER] Three modules, one-way deps; engine never patched; raw ABI
   only in `Sources/OrcaBridge`; C++ session is the sole authority; lock order
   plater → presets; engine entry process-serialized (`ObjectBase` IDs).
