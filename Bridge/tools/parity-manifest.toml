@@ -385,11 +385,13 @@ note = "needs security-scoped bookmarks to the original files"
 id = "plate.cut"
 area = "plate"
 title = "Cut tool"
-status = "missing"
+status = "partial"
 desktop = ["gizmo:Cut", "context:Invalidate cut info"]
+evidence = ["abi:orca_plater_object_cut", "client:struct CutSheet",
+            'client:func cutSelected\(']
 work = "Closure + UI"
-priority = 24
-note = "CutUtils.cpp has no exotic dependencies"
+gap = "PLANE cuts done (CutUtils in the closure: axis + position sheet, keep upper/lower/both-as-parts/both-as-objects, one undo step, contract-tested); connector/dowel cuts, the on-canvas cut gizmo (drag the plane) and cut-info invalidation are not implemented"
+note = "CutUtils.cpp entered the closure (cut_mesh is TriangleMeshSlicer, no CGAL); desktop attribute mapping: upper=KeepUpper+PlaceOnCutUpper+FlipUpper, lower=KeepLower+PlaceOnCutLower"
 
 [[feature]]
 id = "plate.simplify"

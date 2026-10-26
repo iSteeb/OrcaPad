@@ -7,7 +7,7 @@ extern "C" {
 #endif
 
 /// Version of the C ABI contract in this header. Callers verify it at runtime.
-#define ORCA_BRIDGE_ABI_VERSION ((uint32_t)33)
+#define ORCA_BRIDGE_ABI_VERSION ((uint32_t)34)
 
 typedef int32_t orca_status_code;
 #define ORCA_STATUS_OK                     ((orca_status_code)0)
@@ -335,6 +335,23 @@ orca_result orca_plater_volume_delete(orca_plater *plater, orca_object_id object
 orca_result orca_plater_volume_rename(orca_plater *plater, orca_object_id object_id,
                                       orca_volume_id volume_id, const char *name,
                                       orca_revision *out_revision);
+/// Desktop "Cut" (CutUtils::Cut, plane only — connectors/dowels are not
+/// exposed): cuts the object through the plane given by an ENGINE world
+/// point and unit-ish normal, and keeps the requested result. `keep`:
+/// 0 = upper half (flipped onto the cut face), 1 = lower half (placed on
+/// the cut face), 2 = both as PARTS of one object, 3 = both as separate
+/// objects. One mutation: the object is replaced by the results; the new
+/// objects' first ID and count come back through the out-params.
+orca_result orca_plater_object_cut(orca_plater *plater,
+                                   orca_object_id object_id,
+                                   orca_instance_id instance_id,
+                                   double plane_x, double plane_y, double plane_z,
+                                   double normal_x, double normal_y, double normal_z,
+                                   int32_t keep,
+                                   orca_object_id *out_first_object_id,
+                                   uint32_t *out_object_count,
+                                   orca_revision *out_revision);
+
 /// Desktop "Split to objects" (ModelObject::split): replaces the object by
 /// one object per connected mesh (or per part of a multi-part object),
 /// each dropped onto the bed. A single-body object is ORCA_STATUS_INVALID_MODEL.

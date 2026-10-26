@@ -136,6 +136,7 @@ void orca_result_dispose(orca_result *result) {
 #include "libslic3r/Utils.hpp"
 #include "libslic3r/Format/3mf.hpp"
 #include "libslic3r/Format/STL.hpp"
+#include "libslic3r/CutUtils.hpp"
 
 #include "nlohmann/json.hpp"
 
@@ -2637,6 +2638,124 @@ orca_result orca_plater_volume_rename(orca_plater *plater, orca_object_id object
                                 "document revision is exhausted");
         OrcapadMutation mutation(*plater, "Rename");
         volume->name = value;
+        *out_revision = mutation.commit();
+        return orcapad_ok();
+    });
+}
+
+/// The cut matrix mapping the cut plane (ENGINE world point + normal) onto
+/// z = 0: rotate the normal onto +Z, then translate to the plane point.
+/// CutUtils applies its inverse to the mesh and slices at z = 0.
+static Slic3r::Transform3d orcapad_cut_matrix(const Slic3r::Vec3d &point,
+                                              const Slic3r::Vec3d &normal) {
+    Slic3r::Vec3d axis;
+    double angle = 0.0;
+    Slic3r::Matrix3d rotation = Slic3r::Matrix3d::Identity();
+    Slic3r::Geometry::rotation_from_two_vectors(
+        normal.normalized(), Slic3r::Vec3d::UnitZ(), axis, angle, &rotation);
+    return Slic3r::Geometry::translation_transform(point) *
+           Slic3r::Transform3d(rotation);
+}
+
+/// Desktop "Cut" (CutUtils::Cut, plane only, ABI v34).
+orca_result orca_plater_object_cut(orca_plater *plater,
+                                   orca_object_id object_id,
+                                   orca_instance_id instance_id,
+                                   double plane_x, double plane_y, double plane_z,
+                                   double normal_x, double normal_y, double normal_z,
+                                   int32_t keep,
+                                   orca_object_id *out_first_object_id,
+                                   uint32_t *out_object_count,
+                                   orca_revision *out_revision) {
+    constexpr const char *operation = "orca_plater_object_cut";
+    if (out_first_object_id) *out_first_object_id = 0;
+    if (out_object_count) *out_object_count = 0;
+    if (out_revision) *out_revision = 0;
+    if (!plater)
+        return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation,
+                            "plater handle is null");
+    if (!out_first_object_id || !out_object_count || !out_revision)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "output pointer is null");
+    if (!std::isfinite(plane_x) || !std::isfinite(plane_y) ||
+        !std::isfinite(plane_z) || !std::isfinite(normal_x) ||
+        !std::isfinite(normal_y) || !std::isfinite(normal_z))
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "plane point or normal contains a non-finite value");
+    const Slic3r::Vec3d normal(normal_x, normal_y, normal_z);
+    if (normal.squaredNorm() < 1e-12)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "plane normal is degenerate");
+    if (keep < 0 || keep > 3)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "keep must be 0 (upper), 1 (lower), 2 (both as parts) or 3 (both as objects)");
+    return orcapad_guard(operation, [&]() -> orca_result {
+        Slic3r::ModelObject *object = plater_obj(plater, object_id);
+        if (!object)
+            return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation,
+                                "object was not found");
+        size_t instance_index = 0;
+        if (!plater_instance(object, instance_id, &instance_index))
+            return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation,
+                                "instance was not found");
+        if (!orcapad_revision_available(*plater))
+            return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
+                                "document revision is exhausted");
+
+        Slic3r::ModelObjectCutAttributes attributes;
+        switch (keep) {
+        case 0:
+            attributes = Slic3r::ModelObjectCutAttribute::KeepUpper |
+                         Slic3r::ModelObjectCutAttribute::PlaceOnCutUpper |
+                         Slic3r::ModelObjectCutAttribute::FlipUpper;
+            break;
+        case 1:
+            attributes = Slic3r::ModelObjectCutAttribute::KeepLower |
+                         Slic3r::ModelObjectCutAttribute::PlaceOnCutLower;
+            break;
+        case 2:
+            attributes = Slic3r::ModelObjectCutAttribute::KeepUpper |
+                         Slic3r::ModelObjectCutAttribute::KeepLower |
+                         Slic3r::ModelObjectCutAttribute::KeepAsParts;
+            break;
+        default:
+            attributes = Slic3r::ModelObjectCutAttribute::KeepUpper |
+                         Slic3r::ModelObjectCutAttribute::KeepLower;
+            break;
+        }
+
+        // Cut runs on a scratch model (CutUtils clones the object); the
+        // results enter the document as copies, like convert_units.
+        Slic3r::Cut cut(object, static_cast<int>(instance_index),
+                        orcapad_cut_matrix(Slic3r::Vec3d(plane_x, plane_y, plane_z),
+                                           normal),
+                        attributes);
+        const Slic3r::ModelObjectPtrs &results = cut.perform_with_plane();
+        if (results.empty())
+            return orcapad_fail(ORCA_STATUS_INVALID_MODEL, operation,
+                                "the plane did not cut through the object");
+
+        OrcapadMutation mutation(*plater, "Cut");
+        std::vector<Slic3r::ModelObject *> added;
+        for (const Slic3r::ModelObject *result : results) {
+            Slic3r::ModelObject *clone = plater->model.add_object(*result);
+            if (!clone)
+                return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
+                                    "engine did not create the cut object");
+            if (!orcapad_register_object(*plater, *clone))
+                return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
+                                    "engine returned an invalid or reused object ID");
+            clone->ensure_on_bed(false);
+            added.push_back(clone);
+        }
+        plater->mesh_revisions.erase(object_id);
+        if (!plater->model.delete_object(
+                Slic3r::ObjectID(static_cast<size_t>(object_id))))
+            return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
+                                "engine did not delete the source object");
+        *out_first_object_id =
+            static_cast<orca_object_id>(added.front()->id().id);
+        *out_object_count = static_cast<uint32_t>(added.size());
         *out_revision = mutation.commit();
         return orcapad_ok();
     });

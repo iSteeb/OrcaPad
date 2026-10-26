@@ -77,7 +77,7 @@ engine_sources() {
              IntersectionPoints.cpp FlushVolPredictor.cpp Geometry/Circle.cpp Clipper2Utils.cpp TriangleSetSampling.cpp FaceDetector.cpp TriangleSelector.cpp BuildVolume.cpp Extruder.cpp PrincipalComponents2D.cpp MultiMaterialSegmentation.cpp FilamentGroup.cpp ContourZ.cpp Feature/Interlocking/InterlockingGenerator.cpp Feature/Interlocking/VoxelUtils.cpp calib.cpp MaterialType.cpp FlushVolCalc.cpp NormalUtils.cpp \
              Preset.cpp PresetBundle.cpp AppConfig.cpp \
              miniz_extension.cpp Format/3mf.cpp Format/bbs_3mf.cpp NSVGUtils.cpp \
-             Emboss.cpp ExPolygonsIndex.cpp Orient.cpp; do
+             Emboss.cpp ExPolygonsIndex.cpp Orient.cpp CutUtils.cpp; do
         case "$f" in
             # host libstdc++ does not leak <memory> transitively into this
             # header (Darwin libc++ does) — same adapter pattern as LocalesUtils

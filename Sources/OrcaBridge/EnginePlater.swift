@@ -104,6 +104,26 @@ public final class EnginePlater: @unchecked Sendable {
         case addCustomGcode(printZ: Double, kind: CustomGcodeKind,
                             extruder: Int, color: String, extra: String)
         case deleteCustomGcode(printZ: Double)
+        /// Desktop "Cut" (plane): the object is replaced by the kept parts.
+        case cut(objectID: ObjectID, instanceID: InstanceID,
+                 planePoint: SIMD3<Double>, normal: SIMD3<Double>, keep: CutKeep)
+    }
+
+    /// What a plane cut keeps (desktop CutDialog radio buttons).
+    public enum CutKeep: Int32, Sendable, CaseIterable {
+        case upper = 0
+        case lower = 1
+        case bothAsParts = 2
+        case bothAsObjects = 3
+
+        public var label: String {
+            switch self {
+            case .upper: return "Upper part"
+            case .lower: return "Lower part"
+            case .bothAsParts: return "Both as parts"
+            case .bothAsObjects: return "Both as objects"
+            }
+        }
     }
 
     /// Desktop layer-tick custom G-code types (CustomGCode::Type).
@@ -826,6 +846,21 @@ public final class EnginePlater: @unchecked Sendable {
                     orca_plater_custom_gcode_delete(handle, printZ, &mutationRevision),
                     operation: "delete custom G-code"
                 )
+
+            case .cut(let objectID, let instanceID, let point, let normal, let keep):
+                var rawObjectID: UInt64 = 0
+                var objectCount: UInt32 = 0
+                try BridgeResult.consume(
+                    orca_plater_object_cut(
+                        handle, objectID.rawValue, instanceID.rawValue,
+                        point.x, point.y, point.z,
+                        normal.x, normal.y, normal.z, keep.rawValue,
+                        &rawObjectID, &objectCount, &mutationRevision
+                    ),
+                    operation: "cut object"
+                )
+                createdObjectCount = Int(objectCount)
+                createdObjectID = try Self.objectID(rawObjectID, operation: "cut object")
 
             case .pasteObject(let bedCenter):
                 var rawObjectID: UInt64 = 0

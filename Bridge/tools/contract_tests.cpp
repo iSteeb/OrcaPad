@@ -276,7 +276,7 @@ static void test_md5_shim() {
 
 static void test_abi_version() {
     CHECK_EQ(orca_bridge_abi_version(), ORCA_BRIDGE_ABI_VERSION);
-    CHECK_EQ(ORCA_BRIDGE_ABI_VERSION, 33);
+    CHECK_EQ(ORCA_BRIDGE_ABI_VERSION, 34);
 }
 
 struct ProgressRecord {
@@ -3328,6 +3328,85 @@ static void test_arrange_orient(const std::string &dir, const std::string &data_
     orca_plater_free(plater);
 }
 
+// ABI v34: plane cut (CutUtils::Cut)
+static void test_cut(const std::string &dir) {
+    orca_plater *plater = nullptr;
+    GUARD(g0, orca_plater_new(&plater));
+    expect_ok(g0, "plater_new");
+    const std::string cube = write_cube_stl(dir, "cut_cube.stl");
+    orca_object_id object_id = 0;
+    orca_revision revision = 0;
+    GUARD(g1, import_one(plater, cube.c_str(), 100.0, 100.0, &object_id, &revision));
+    expect_ok(g1, "import cube");
+
+    // geometry probe: bbox mid-height is where the plane goes
+    orca_scene_snapshot snap = take_snapshot(plater);
+    CHECK_EQ(snap.object_count, 1);
+    const orca_scene_object &source = snap.objects[0];
+    const double cx = 0.5 * (source.bbox_min[0] + source.bbox_max[0]);
+    const double cy = 0.5 * (source.bbox_min[1] + source.bbox_max[1]);
+    const double midZ = 0.5 * (source.bbox_min[2] + source.bbox_max[2]);
+    const float sourceHeight = source.bbox_max[2] - source.bbox_min[2];
+    const orca_instance_id instance = source.instances[0].id;
+    orca_scene_snapshot_dispose(&snap);
+
+    // typed rejections
+    orca_object_id first = 0;
+    uint32_t count = 0;
+    GUARD(e1, orca_plater_object_cut(plater, object_id, instance,
+                                     cx, cy, midZ, 0, 0, 1, 9,
+                                     &first, &count, &revision));
+    expect_code(e1, ORCA_STATUS_INVALID_ARGUMENT, "cut(keep out of range)");
+    GUARD(e2, orca_plater_object_cut(plater, object_id, instance,
+                                     cx, cy, midZ, 0, 0, 0, 3,
+                                     &first, &count, &revision));
+    expect_code(e2, ORCA_STATUS_INVALID_ARGUMENT, "cut(degenerate normal)");
+    GUARD(e3, orca_plater_object_cut(plater, 999999, instance,
+                                     cx, cy, midZ, 0, 0, 1, 3,
+                                     &first, &count, &revision));
+    expect_code(e3, ORCA_STATUS_NOT_FOUND, "cut(missing object)");
+
+    // both halves as separate objects: two smaller meshes, one undo step
+    GUARD(c1, orca_plater_object_cut(plater, object_id, instance,
+                                     cx, cy, midZ, 0, 0, 1, 3,
+                                     &first, &count, &revision));
+    expect_ok(c1, "cut both as objects");
+    CHECK_EQ(count, 2u);
+    CHECK(first != object_id);
+    {
+        orca_scene_snapshot after = take_snapshot(plater);
+        CHECK_EQ(after.object_count, 2);
+        for (int i = 0; i < after.object_count; ++i) {
+            const float height = after.objects[i].bbox_max[2] -
+                                 after.objects[i].bbox_min[2];
+            // each half is distinctly shorter than the whole (cap closes it)
+            CHECK(height < 0.75f * sourceHeight);
+        }
+        orca_scene_snapshot_dispose(&after);
+    }
+    GUARD(u1, orca_plater_undo(plater, &revision));
+    expect_ok(u1, "undo cut");
+    {
+        orca_scene_snapshot restored = take_snapshot(plater);
+        CHECK_EQ(restored.object_count, 1);
+        orca_scene_snapshot_dispose(&restored);
+    }
+
+    // both halves as PARTS: one object, two volumes
+    GUARD(c2, orca_plater_object_cut(plater, object_id, instance,
+                                     cx, cy, midZ, 0, 0, 1, 2,
+                                     &first, &count, &revision));
+    expect_ok(c2, "cut both as parts");
+    CHECK_EQ(count, 1u);
+    {
+        orca_scene_snapshot parts = take_snapshot(plater);
+        CHECK_EQ(parts.object_count, 1);
+        CHECK_EQ(parts.objects[0].volume_count, 2);
+        orca_scene_snapshot_dispose(&parts);
+    }
+    orca_plater_free(plater);
+}
+
 // ABI v33: exports (object STL / generic 3MF / sliced .gcode.3mf)
 static void test_exports(const std::string &dir, const std::string &data_dir) {
     orca_plater *plater = nullptr;
@@ -4213,6 +4292,7 @@ int main() {
     test_custom_gcode(dir, data_dir);
     test_slice_cancel(dir);
     test_exports(dir, data_dir);
+    test_cut(dir);
     test_project_roundtrip(dir, data_dir);
     test_user_presets(data_dir);
     test_physical_printers(data_dir);

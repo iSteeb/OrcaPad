@@ -32,6 +32,10 @@ struct PlateTabView: View {
     @State private var deleteAllConfirmation = false
     @State private var aboutPresented = false
     @State private var newProjectConfirmation = false
+    @State private var cutPresented = false
+    @State private var cutAxis: EngineAxis = .z
+    @State private var cutFraction: Double = 0.5
+    @State private var cutKeep: EnginePlater.CutKeep = .bothAsParts
     @State private var parameterTablePresented = false
     @State private var plateRenameTarget: PlateID?
     @State private var plateRenameText = ""
@@ -277,6 +281,21 @@ struct PlateTabView: View {
             }
         } message: {
             Text("The plate is cleared and the undo history is discarded. Printer, filament and process selections stay.")
+        }
+        .sheet(isPresented: $cutPresented) {
+            CutSheet(
+                axis: $cutAxis,
+                fraction: $cutFraction,
+                keep: $cutKeep,
+                objectName: document.selection.flatMap { id in
+                    document.scene?.object(id: id.objectID)?.name
+                } ?? "object")
+            {
+                cutPresented = false
+                Task {
+                    await document.cutSelected(axis: cutAxis, fraction: cutFraction, keep: cutKeep)
+                }
+            }
         }
     }
 
@@ -1017,6 +1036,12 @@ extension PlateTabView {
                 Label("Split to parts", systemImage: "square.split.2x1")
             }
             .disabled(object.modelParts.isEmpty)
+            Button {
+                cutPresented = true
+            } label: {
+                Label("Cut\u{2026}", systemImage: "square.split.bottomthird")
+            }
+            .disabled(document.selection == nil || document.isBusy)
             Divider()
             ForEach([VolumeRole.part, .negative, .modifier, .supportBlocker, .supportEnforcer], id: \.self) { role in
                 volumeAddMenu(role: role, object: object)
@@ -1423,6 +1448,70 @@ private extension VolumeRole {
         return Color(
             red: Double(c.x), green: Double(c.y), blue: Double(c.z), opacity: 1
         )
+    }
+}
+
+/// Desktop CutDialog subset: axis + position (fraction of the object's
+/// extent) + what to keep.
+private struct CutSheet: View {
+    @Binding var axis: EngineAxis
+    @Binding var fraction: Double
+    @Binding var keep: EnginePlater.CutKeep
+    let objectName: String
+    let onCut: () -> Void
+
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("Cut \(objectName)") {
+                    Picker("Axis", selection: $axis) {
+                        Text("X").tag(EngineAxis.x)
+                        Text("Y").tag(EngineAxis.y)
+                        Text("Z").tag(EngineAxis.z)
+                    }
+                    .pickerStyle(.segmented)
+                    VStack(alignment: .leading) {
+                        Text("Position")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        HStack {
+                            Slider(value: $fraction, in: 0.05...0.95)
+                            Text(String(format: "%.0f%%", fraction * 100))
+                                .font(.caption.monospacedDigit())
+                                .frame(width: 44, alignment: .trailing)
+                        }
+                    }
+                }
+                Section("Keep") {
+                    Picker("Keep", selection: $keep) {
+                        ForEach(EnginePlater.CutKeep.allCases, id: \.self) { option in
+                            Text(option.label).tag(option)
+                        }
+                    }
+                    .pickerStyle(.inline)
+                    .labelsHidden()
+                }
+                Section {
+                    Button(role: .destructive) {
+                        onCut()
+                    } label: {
+                        Label("Cut", systemImage: "square.split.bottomthird")
+                    }
+                } footer: {
+                    Text("The cut runs through the object's bounding box; the object is replaced by what you keep (one undo step).")
+                }
+            }
+            .navigationTitle("Cut")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }
+                }
+            }
+        }
+        .presentationDetents([.medium])
     }
 }
 

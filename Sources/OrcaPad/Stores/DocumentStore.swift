@@ -760,6 +760,51 @@ final class DocumentStore {
         cameraRequestID += 1
     }
 
+    /// Desktop "Cut": plane cut through the object's world bbox; the object
+    /// is replaced by the kept parts (one undo step). Selects the first
+    /// result and re-frames.
+    func cutSelected(
+        axis: EngineAxis, fraction: Double, keep: EnginePlater.CutKeep
+    ) async {
+        guard let current = selection,
+              let object = scene?.object(id: current.objectID),
+              let instance = object.instances.first(where: { $0.id == current.instanceID })
+        else { return }
+        // World-space bbox of the instance (engine frame).
+        let matrix = instance.matrix
+        var low = SIMD3<Double>(repeating: .infinity)
+        var high = SIMD3<Double>(repeating: -.infinity)
+        let mesh = object.mesh
+        for index in 0..<mesh.positions.count {
+            let p = mesh.positions[index]
+            let local = SIMD3<Double>(Double(p.x), Double(p.y), Double(p.z))
+            let world = SIMD3(
+                matrix[0, 0] * local.x + matrix[1, 0] * local.y + matrix[2, 0] * local.z + matrix[3, 0],
+                matrix[0, 1] * local.x + matrix[1, 1] * local.y + matrix[2, 1] * local.z + matrix[3, 1],
+                matrix[0, 2] * local.x + matrix[1, 2] * local.y + matrix[2, 2] * local.z + matrix[3, 2])
+            low = simd_min(low, world)
+            high = simd_max(high, world)
+        }
+        let axisIndex = Int(axis.rawValue)
+        let point = SIMD3(
+            axisIndex == 0 ? low.x + (high.x - low.x) * fraction : 0.5 * (low.x + high.x),
+            axisIndex == 1 ? low.y + (high.y - low.y) * fraction : 0.5 * (low.y + high.y),
+            axisIndex == 2 ? low.z + (high.z - low.z) * fraction : 0.5 * (low.z + high.z))
+        let normal: SIMD3<Double> = axis == .x ? SIMD3(1, 0, 0)
+            : axis == .y ? SIMD3(0, 1, 0) : SIMD3(0, 0, 1)
+        if let mutation = await applyMutation(
+            .cut(objectID: object.id, instanceID: instance.id,
+                 planePoint: point, normal: normal, keep: keep),
+            operation: "cut object"
+        ), let created = mutation.createdObjectID,
+           let createdInstance = mutation.snapshot.object(id: created)?.instances.first?.id {
+            selection = InstanceSelection(objectID: created, instanceID: createdInstance)
+            multiSelection = []
+            frameRequest += 1
+            status.report(.document, "cut into \(mutation.createdObjectCount) object(s)")
+        }
+    }
+
     // MARK: Split (desktop Split to objects / parts)
 
     func splitToObjects(_ objectID: ObjectID) async {
