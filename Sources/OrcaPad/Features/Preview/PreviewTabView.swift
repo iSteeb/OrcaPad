@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (c) 2026 OrcaPad contributors
 
+import OrcaBridge
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -19,6 +20,11 @@ struct PreviewTabView: View {
     @State private var consumedSliceJob: UInt64?
     /// Desktop "Jump to layer": typed layer number.
     @State private var jumpLayerText = ""
+    /// Desktop layer ticks: custom G-code (pause / colour change / custom).
+    @State private var ticksPresented = false
+    @State private var ticks: [EnginePlater.CustomGcodeItem] = []
+    @State private var customTextPresented = false
+    @State private var customText = ""
 
     var body: some View {
         Group {
@@ -76,6 +82,58 @@ struct PreviewTabView: View {
             allowedContentTypes: GcodeTypes.all,
             onCompletion: openExternal
         )
+        .task(id: environment.document.scene?.revision.rawValue) {
+            await reloadTicks()
+        }
+        .sheet(isPresented: $ticksPresented) {
+            CustomGcodeSheet(
+                ticks: ticks,
+                onDelete: { printZ in
+                    Task {
+                        await environment.document.deleteCustomGcode(printZ: printZ)
+                    }
+                }
+            )
+        }
+        .alert("Custom G-code", isPresented: $customTextPresented) {
+            TextField("G-code (e.g. M300 S440 P200)", text: $customText)
+            Button("Add") {
+                let text = customText
+                customText = ""
+                Task { await addTick(.custom, extruder: 0, extra: text) }
+            }
+            Button("Cancel", role: .cancel) { customText = "" }
+        } message: {
+            Text("Runs at the top visible layer of the selected plate after re-slicing.")
+        }
+    }
+
+    /// The print height the next tick lands at: the current upper layer's z.
+    private var tickHeight: Double? {
+        guard let layer = store.layer(at: store.upperLayer), layer.z > 0 else { return nil }
+        return Double(layer.z)
+    }
+
+    private func reloadTicks() async {
+        if let items = await environment.document.customGcodes() {
+            ticks = items
+        }
+    }
+
+    private func addTick(
+        _ kind: EnginePlater.CustomGcodeKind, extruder: Int, extra: String = ""
+    ) async {
+        guard let height = tickHeight else {
+            environment.status.report(
+                .document, failure: .invariant(
+                    operation: "add custom G-code",
+                    diagnostic: "no layer height to attach the tick to"))
+            return
+        }
+        await environment.document.addCustomGcode(
+            printZ: height, kind: kind, extruder: extruder,
+            color: kind == .colorChange ? "#FF0000" : "", extra: extra)
+        await reloadTicks()
     }
 
     /// Desktop "G-code viewer" parity: preview any G-code file.
@@ -309,6 +367,41 @@ struct PreviewTabView: View {
             .lineLimit(1)
             .minimumScaleFactor(0.6)
             .frame(minWidth: 150, alignment: .trailing)
+            // Desktop layer ticks: custom G-code at the top visible layer.
+            Menu {
+                Button {
+                    Task { await addTick(.pausePrint, extruder: 0) }
+                } label: {
+                    Label("Pause print", systemImage: "pause.circle")
+                }
+                let slotCount = max(environment.presets.filamentSlots.count, 1)
+                Menu {
+                    ForEach(1...min(slotCount, 4), id: \.self) { extruder in
+                        Button("Extruder \(extruder)") {
+                            Task { await addTick(.colorChange, extruder: extruder) }
+                        }
+                    }
+                } label: {
+                    Label("Colour change", systemImage: "paintbrush")
+                }
+                Button {
+                    customTextPresented = true
+                } label: {
+                    Label("Custom G-code\u{2026}", systemImage: "chevron.left.forwardslash.chevron.right")
+                }
+            } label: {
+                ChromeToolLabel(symbol: "plus.circle", label: "Tick")
+            }
+            .buttonStyle(.plain)
+            .disabled(tickHeight == nil || environment.document.isBusy)
+            if !ticks.isEmpty {
+                Button {
+                    ticksPresented = true
+                } label: {
+                    ChromeToolLabel(symbol: "clock.badge.exclamationmark", label: "\(ticks.count)")
+                }
+                .buttonStyle(.plain)
+            }
             // Desktop "Jump to layer": type a layer number, land on it.
             HStack(spacing: 4) {
                 TextField("Layer", text: $jumpLayerText)
@@ -548,6 +641,73 @@ private struct PreviewDock: View {
             in: RoundedRectangle(cornerRadius: 10)
         )
         .contentShape(Rectangle())
+    }
+}
+
+/// Desktop layer-tick list (custom G-code editor): one row per tick,
+/// swipe to delete (one undo step each).
+private struct CustomGcodeSheet: View {
+    let ticks: [EnginePlater.CustomGcodeItem]
+    let onDelete: (Double) -> Void
+
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            List {
+                ForEach(ticks) { tick in
+                    VStack(alignment: .leading, spacing: 2) {
+                        HStack {
+                            Label(tick.kind.label, systemImage: symbol(tick.kind))
+                            Spacer()
+                            Text(String(format: "%.2f mm", tick.printZ))
+                                .font(.caption.monospacedDigit())
+                                .foregroundStyle(.secondary)
+                        }
+                        if !detail(tick).isEmpty {
+                            Text(detail(tick))
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    .swipeActions {
+                        Button(role: .destructive) {
+                            onDelete(tick.printZ)
+                        } label: {
+                            Label("Delete", systemImage: "trash")
+                        }
+                    }
+                }
+            }
+            .navigationTitle("Custom G-code")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }
+                }
+            }
+        }
+        .presentationDetents([.medium, .large])
+    }
+
+    private func symbol(_ kind: EnginePlater.CustomGcodeKind) -> String {
+        switch kind {
+        case .colorChange: return "paintbrush"
+        case .pausePrint: return "pause.circle"
+        case .toolChange: return "wrench.and.screwdriver"
+        case .template: return "doc.text"
+        case .custom: return "chevron.left.forwardslash.chevron.right"
+        }
+    }
+
+    private func detail(_ tick: EnginePlater.CustomGcodeItem) -> String {
+        switch tick.kind {
+        case .colorChange: return tick.extruder > 0 ? "Extruder \(tick.extruder) \(tick.color)" : tick.color
+        case .pausePrint: return tick.extra.isEmpty ? "Pauses the print" : tick.extra
+        case .toolChange: return "Extruder \(tick.extruder)"
+        case .template: return "Template tick (read-only)"
+        case .custom: return tick.extra
+        }
     }
 }
 

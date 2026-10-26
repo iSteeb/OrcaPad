@@ -954,23 +954,28 @@ priority = 207
 id = "preview.color-print"
 area = "preview"
 title = "Per-layer filament (color) change + ColorPrint scheme"
-status = "missing"
+status = "partial"
 desktop = ["view:ColorPrint", "slider:Change Filament", "slider:Filament", "slider:Delete Filament Change",
            "option:ColorChanges"]
+evidence = ["abi:orca_plater_custom_gcode_add", "client:struct CustomGcodeSheet",
+            "client:case .colorChange"]
 work = "Bridge + UI"
-priority = 200
-note = "Model::custom_gcode_per_print_z / CustomGCode.cpp are compiled"
+gap = "colour-change TICKS + slice consumption (engine colour-change events render as markers) done; the full ColorPrint extrusion-recoloring scheme is not implemented"
+note = "ABI v24 ticks (plate-bound since ABI v32): Preview Tick menu adds colour changes per extruder at the top layer; delete via the tick sheet; slicing consumes them through the engine's custom-gcode path"
 
 [[feature]]
 id = "preview.pause-custom-gcode"
 area = "preview"
 title = "Pause / custom G-code / template at layer"
-status = "missing"
+status = "partial"
 desktop = ["slider:Add Pause", "slider:Delete Pause", "slider:Add Custom G-code", "slider:Edit Custom G-code",
            "slider:Delete Custom G-code", "slider:Add Custom Template", "slider:Delete Custom Template",
            "option:PausePrints", "option:CustomGCodes"]
+evidence = ["abi:orca_plater_custom_gcode_add", "client:struct CustomGcodeSheet",
+            "client:case .pausePrint"]
 work = "Bridge + UI"
-priority = 201
+gap = "pause + custom G-code add/delete done (Preview Tick menu, tick sheet, toolpath markers); in-place EDIT of a custom tick is delete+re-add; custom TEMPLATES are a typed unsupported capability at the Bridge (preset-template store is desktop-side)"
+note = "Preview Tick menu (pause / custom G-code with text entry) at the top visible layer; tick sheet lists and deletes; markers render in the toolpath"
 
 [[feature]]
 id = "preview.jump-to-layer"

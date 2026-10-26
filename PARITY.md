@@ -18,11 +18,11 @@ Status: ✅ done · 🟡 partial · ❌ missing · ⏸️ deferred · ➖ na. Pa
 |---|---|---|---|---|---|---|---|
 | Plate / 3D editor | 64 | 33 | 4 | 19 | 7 | 1 | 56% |
 | Prepare / presets / settings | 25 | 10 | 5 | 10 | 0 | 0 | 50% |
-| Preview / G-code | 17 | 10 | 0 | 7 | 0 | 0 | 59% |
+| Preview / G-code | 17 | 10 | 2 | 5 | 0 | 0 | 65% |
 | Device / printing | 19 | 3 | 1 | 13 | 1 | 1 | 19% |
 | Files / projects / app integration | 12 | 5 | 4 | 2 | 1 | 0 | 58% |
 | App / preferences / help | 15 | 1 | 1 | 5 | 0 | 8 | 21% |
-| **Total** | **152** | **62** | **15** | **56** | **9** | **10** | **49%** |
+| **Total** | **152** | **62** | **17** | **54** | **9** | **10** | **50%** |
 
 ### Desktop surface coverage (items)
 
@@ -33,10 +33,10 @@ Status: ✅ done · 🟡 partial · ❌ missing · ⏸️ deferred · ➖ na. Pa
 | Menu bar (`menu`) | MainFrame.cpp | 75 | 31 | 6 | 16 | 13 | 9 | 52% |
 | Right-click menus (`context`) | GUI_Factories.cpp | 81 | 52 | 7 | 18 | 4 | 0 | 69% |
 | Keyboard/mouse actions (`kb`) | KBShortcutsDialog.cpp | 81 | 8 | 43 | 26 | 2 | 2 | 37% |
-| Layer slider menu (`slider`) | IMSlider.cpp | 11 | 1 | 0 | 10 | 0 | 0 | 9% |
+| Layer slider menu (`slider`) | IMSlider.cpp | 11 | 1 | 10 | 0 | 0 | 0 | 55% |
 | Plate icons (`plate`) | PartPlate.cpp render_icons | 9 | 7 | 0 | 2 | 0 | 0 | 78% |
-| Preview color schemes (`view`) | libvgcode Types.hpp EViewType | 17 | 15 | 0 | 2 | 0 | 0 | 88% |
-| Preview visibility options (`option`) | libvgcode Types.hpp EOptionType | 9 | 6 | 0 | 3 | 0 | 0 | 67% |
+| Preview color schemes (`view`) | libvgcode Types.hpp EViewType | 17 | 15 | 1 | 1 | 0 | 0 | 91% |
+| Preview visibility options (`option`) | libvgcode Types.hpp EOptionType | 9 | 6 | 3 | 0 | 0 | 0 | 83% |
 | Print hosts (`host`) | PrintConfig.hpp PrintHostType | 16 | 3 | 2 | 11 | 0 | 0 | 25% |
 | File types (`format`) | GUI_App.hpp FileType | 16 | 7 | 1 | 4 | 3 | 1 | 50% |
 | Preferences (`pref`) | Preferences.cpp | 75 | 6 | 6 | 36 | 3 | 24 | 18% |
@@ -86,32 +86,32 @@ Status: ✅ done · 🟡 partial · ❌ missing · ⏸️ deferred · ➖ na. Pa
 39. ❌ **Import zip archive** · Files / projects / app integration · UI
 40. 🟡 **Project auto-backup / crash restore** · Files / projects / app integration · Bridge + UI — background 3MF autosave + one-shot launch restore (thumbnail-less, Application Support); no crash-mid-work restore interval
 41. ❌ **Model download links (Printables / MakerWorld / Thingiverse) and downloads folder** · Files / projects / app integration · UI
-42. ❌ **Per-layer filament (color) change + ColorPrint scheme** · Preview / G-code · Bridge + UI — Model::custom_gcode_per_print_z / CustomGCode.cpp are compiled
-43. ❌ **Pause / custom G-code / template at layer** · Preview / G-code · Bridge + UI
-44. ❌ **Object shells and center of gravity** · Preview / G-code · UI
-45. ❌ **Summary view** · Preview / G-code · UI
-46. ❌ **G-code line window** · Preview / G-code · Bridge + UI
-47. ❌ **Export toolpaths as OBJ** · Preview / G-code · Client-reimpl
-48. ❌ **Hardware-keyboard shortcuts: preview sliders** · Preview / G-code · UI
-49. ❌ **Duet host** · Device / printing · Client-reimpl
-50. ❌ **Repetier host** · Device / printing · Client-reimpl
-51. ❌ **AstroBox host** · Device / printing · Client-reimpl
-52. ❌ **MKS host** · Device / printing · Client-reimpl
-53. ❌ **ESP3D host** · Device / printing · Client-reimpl
-54. ❌ **Creality Print host + LAN discovery** · Device / printing · Client-reimpl
-55. ❌ **Obico host** · Device / printing · Client-reimpl
-56. ❌ **Flashforge host** · Device / printing · Client-reimpl
-57. ❌ **Upload queue** · Device / printing · UI
-58. ❌ **Printer discovery (Bonjour)** · Device / printing · UI
-59. ❌ **SimplyPrint host (cloud auth)** · Device / printing · Client-reimpl
-60. ❌ **ElegooLink host** · Device / printing · Client-reimpl
-61. ❌ **3DPrinterOS host** · Device / printing · Client-reimpl
-62. ❌ **Preferences screen** · App / preferences / help · UI
-63. ❌ **Hardware-keyboard shortcuts: global** · App / preferences / help · UI
-64. 🟡 **Light / dark appearance** · App / preferences / help · UI — dark only
-65. ❌ **Localization** · App / preferences / help · UI — iOS picks the language per app in Settings; OrcaPad strings are English only
-66. ❌ **Viewer quality options (MSAA, FXAA, shadows, SSAO, smooth normals, FPS)** · App / preferences / help · UI
-67. ❌ **Tip of the day** · App / preferences / help · UI
+42. ❌ **Object shells and center of gravity** · Preview / G-code · UI
+43. ❌ **Summary view** · Preview / G-code · UI
+44. ❌ **G-code line window** · Preview / G-code · Bridge + UI
+45. ❌ **Export toolpaths as OBJ** · Preview / G-code · Client-reimpl
+46. ❌ **Hardware-keyboard shortcuts: preview sliders** · Preview / G-code · UI
+47. ❌ **Duet host** · Device / printing · Client-reimpl
+48. ❌ **Repetier host** · Device / printing · Client-reimpl
+49. ❌ **AstroBox host** · Device / printing · Client-reimpl
+50. ❌ **MKS host** · Device / printing · Client-reimpl
+51. ❌ **ESP3D host** · Device / printing · Client-reimpl
+52. ❌ **Creality Print host + LAN discovery** · Device / printing · Client-reimpl
+53. ❌ **Obico host** · Device / printing · Client-reimpl
+54. ❌ **Flashforge host** · Device / printing · Client-reimpl
+55. ❌ **Upload queue** · Device / printing · UI
+56. ❌ **Printer discovery (Bonjour)** · Device / printing · UI
+57. ❌ **SimplyPrint host (cloud auth)** · Device / printing · Client-reimpl
+58. ❌ **ElegooLink host** · Device / printing · Client-reimpl
+59. ❌ **3DPrinterOS host** · Device / printing · Client-reimpl
+60. ❌ **Preferences screen** · App / preferences / help · UI
+61. ❌ **Hardware-keyboard shortcuts: global** · App / preferences / help · UI
+62. 🟡 **Light / dark appearance** · App / preferences / help · UI — dark only
+63. ❌ **Localization** · App / preferences / help · UI — iOS picks the language per app in Settings; OrcaPad strings are English only
+64. ❌ **Viewer quality options (MSAA, FXAA, shadows, SSAO, smooth normals, FPS)** · App / preferences / help · UI
+65. ❌ **Tip of the day** · App / preferences / help · UI
+66. 🟡 **Pause / custom G-code / template at layer** · Preview / G-code · Bridge + UI — pause + custom G-code add/delete done (Preview Tick menu, tick sheet, toolpath markers); in-place EDIT of a custom tick is delete+re-add; custom TEMPLATES are a typed unsupported capability at the Bridge (preset-template store is desktop-side)
+67. 🟡 **Per-layer filament (color) change + ColorPrint scheme** · Preview / G-code · Bridge + UI — colour-change TICKS + slice consumption (engine colour-change events render as markers) done; the full ColorPrint extrusion-recoloring scheme is not implemented
 68. 🟡 **PrusaLink / Prusa Connect hosts** · Device / printing · Client-reimpl — PrusaLink upload + select-and-print done (HTTP digest, user maker, per-upload session); Prusa Connect (cloud) not implemented
 69. 🟡 **Export objects as STL** · Files / projects / app integration · Bridge + UI — per-object binary STL done (ABI v33, merged parts, re-import contract test); the export-all-objects variants are not implemented
 70. 🟡 **Export sliced 3MF (.gcode.3mf)** · Files / projects / app integration · Bridge + UI — ALL-plates export only (desktop's per-plate export shares the same engine path but is not exposed separately)
@@ -232,12 +232,12 @@ Status: ✅ done · 🟡 partial · ❌ missing · ⏸️ deferred · ➖ na. Pa
 | Seams, retractions, unretractions | ✅ | **option**: Seams, Retractions, Unretractions | `client:var showSeams`, `client:var showRetractions` | — |
 | Travel moves | ✅ | **option**: Travels | `client:var showTravel` | — |
 | Wipe and tool-change markers | ✅ | **option**: Wipes, ToolChanges | `client:showWipes`, `client:showToolChanges` | Wipe moves render as short lines under their own toggle; tool-change points are cross markers (ABI v14 marker segments) |
+| Pause / custom G-code / template at layer | 🟡 | **slider**: Add Pause, Delete Pause, Add Custom G-code, Edit Custom G-code, Delete Custom G-code, Add Custom Template, Delete Custom Template; **option**: PausePrints +1 | `abi:orca_plater_custom_gcode_add`, `client:struct CustomGcodeSheet`, `client:case .pausePrint` | Gap: pause + custom G-code add/delete done (Preview Tick menu, tick sheet, toolpath markers); in-place EDIT of a custom tick is delete+re-add; custom TEMPLATES are a typed unsupported capability at the Bridge (preset-template store is desktop-side) · Work: Bridge + UI · Preview Tick menu (pause / custom G-code with text entry) at the top visible layer; tick sheet lists and deletes; markers render in the toolpath |
+| Per-layer filament (color) change + ColorPrint scheme | 🟡 | **view**: ColorPrint; **slider**: Change Filament, Filament, Delete Filament Change; **option**: ColorChanges | `abi:orca_plater_custom_gcode_add`, `client:struct CustomGcodeSheet`, `client:case .colorChange` | Gap: colour-change TICKS + slice consumption (engine colour-change events render as markers) done; the full ColorPrint extrusion-recoloring scheme is not implemented · Work: Bridge + UI · ABI v24 ticks (plate-bound since ABI v32): Preview Tick menu adds colour changes per extruder at the top layer; delete via the tick sheet; slicing consumes them through the engine's custom-gcode path |
 | Export toolpaths as OBJ | ❌ | **menu**: Export toolpaths as OBJ | — | Work: Client-reimpl |
 | G-code line window | ❌ | **menu**: Show G-code Window | — | Work: Bridge + UI |
 | Hardware-keyboard shortcuts: preview sliders | ❌ | **kb**: Vertical slider - Move active thumb Up, Vertical slider - Move active thumb Down, Horizontal slider - Move active thumb Left, Horizontal slider - Move active thumb Right, Horizontal slider - Move to start position, Horizontal slider - Move to last position, Move slider 5x faster, On/Off one layer mode of the vertical slider +1 | — | Work: UI |
 | Object shells and center of gravity | ❌ | `src/slic3r/GUI/GCodeViewer.hpp` | — | Work: UI |
-| Pause / custom G-code / template at layer | ❌ | **slider**: Add Pause, Delete Pause, Add Custom G-code, Edit Custom G-code, Delete Custom G-code, Add Custom Template, Delete Custom Template; **option**: PausePrints +1 | — | Work: Bridge + UI |
-| Per-layer filament (color) change + ColorPrint scheme | ❌ | **view**: ColorPrint; **slider**: Change Filament, Filament, Delete Filament Change; **option**: ColorChanges | — | Work: Bridge + UI · Model::custom_gcode_per_print_z / CustomGCode.cpp are compiled |
 | Summary view | ❌ | **view**: Summary | — | Work: UI |
 
 ## Device / printing
@@ -570,16 +570,16 @@ Status: ✅ done · 🟡 partial · ❌ missing · ⏸️ deferred · ➖ na. Pa
 | `kb:{key Left mouse button}` | src/slic3r/GUI/KBShortcutsDialog.cpp:219 | plate.camera-gestures | ✅ |
 | `kb:{key Middle mouse button}` | src/slic3r/GUI/KBShortcutsDialog.cpp:220 | plate.camera-gestures | ✅ |
 | `kb:{key Right mouse button}` | src/slic3r/GUI/KBShortcutsDialog.cpp:221 | plate.camera-gestures | ✅ |
-| `slider:Add Custom G-code` | src/slic3r/GUI/IMSlider.cpp:1501 | preview.pause-custom-gcode | ❌ |
-| `slider:Add Custom Template` | src/slic3r/GUI/IMSlider.cpp:1507 | preview.pause-custom-gcode | ❌ |
-| `slider:Add Pause` | src/slic3r/GUI/IMSlider.cpp:1495 | preview.pause-custom-gcode | ❌ |
-| `slider:Change Filament` | src/slic3r/GUI/IMSlider.cpp:1521 | preview.color-print | ❌ |
-| `slider:Delete Custom G-code` | src/slic3r/GUI/IMSlider.cpp:1565 | preview.pause-custom-gcode | ❌ |
-| `slider:Delete Custom Template` | src/slic3r/GUI/IMSlider.cpp:1556 | preview.pause-custom-gcode | ❌ |
-| `slider:Delete Filament Change` | src/slic3r/GUI/IMSlider.cpp:1583 | preview.color-print | ❌ |
-| `slider:Delete Pause` | src/slic3r/GUI/IMSlider.cpp:1550 | preview.pause-custom-gcode | ❌ |
-| `slider:Edit Custom G-code` | src/slic3r/GUI/IMSlider.cpp:1562 | preview.pause-custom-gcode | ❌ |
-| `slider:Filament` | src/slic3r/GUI/IMSlider.cpp:1529 | preview.color-print | ❌ |
+| `slider:Add Custom G-code` | src/slic3r/GUI/IMSlider.cpp:1501 | preview.pause-custom-gcode | 🟡 |
+| `slider:Add Custom Template` | src/slic3r/GUI/IMSlider.cpp:1507 | preview.pause-custom-gcode | 🟡 |
+| `slider:Add Pause` | src/slic3r/GUI/IMSlider.cpp:1495 | preview.pause-custom-gcode | 🟡 |
+| `slider:Change Filament` | src/slic3r/GUI/IMSlider.cpp:1521 | preview.color-print | 🟡 |
+| `slider:Delete Custom G-code` | src/slic3r/GUI/IMSlider.cpp:1565 | preview.pause-custom-gcode | 🟡 |
+| `slider:Delete Custom Template` | src/slic3r/GUI/IMSlider.cpp:1556 | preview.pause-custom-gcode | 🟡 |
+| `slider:Delete Filament Change` | src/slic3r/GUI/IMSlider.cpp:1583 | preview.color-print | 🟡 |
+| `slider:Delete Pause` | src/slic3r/GUI/IMSlider.cpp:1550 | preview.pause-custom-gcode | 🟡 |
+| `slider:Edit Custom G-code` | src/slic3r/GUI/IMSlider.cpp:1562 | preview.pause-custom-gcode | 🟡 |
+| `slider:Filament` | src/slic3r/GUI/IMSlider.cpp:1529 | preview.color-print | 🟡 |
 | `slider:Jump to Layer` | src/slic3r/GUI/IMSlider.cpp:1513 | preview.jump-to-layer | ✅ |
 | `plate:Arrange objects on current plate` | src/slic3r/GUI/PartPlate.cpp:1142 | plate.arrange | ✅ |
 | `plate:Auto orient objects on current plate` | src/slic3r/GUI/PartPlate.cpp:1135 | plate.orient | ✅ |
@@ -593,7 +593,7 @@ Status: ✅ done · 🟡 partial · ❌ missing · ⏸️ deferred · ➖ na. Pa
 | `view:Acceleration` | src/libvgcode/include/Types.hpp:98 | preview.schemes | ✅ |
 | `view:ActualSpeed` | src/libvgcode/include/Types.hpp:86 | preview.schemes | ✅ |
 | `view:ActualVolumetricFlowRate` | src/libvgcode/include/Types.hpp:90 | preview.actual-flow | ✅ |
-| `view:ColorPrint` | src/libvgcode/include/Types.hpp:84 | preview.color-print | ❌ |
+| `view:ColorPrint` | src/libvgcode/include/Types.hpp:84 | preview.color-print | 🟡 |
 | `view:FanSpeed` | src/libvgcode/include/Types.hpp:93 | preview.schemes | ✅ |
 | `view:FeatureType` | src/libvgcode/include/Types.hpp:83 | preview.schemes | ✅ |
 | `view:Height` | src/libvgcode/include/Types.hpp:87 | preview.schemes | ✅ |
@@ -607,9 +607,9 @@ Status: ✅ done · 🟡 partial · ❌ missing · ⏸️ deferred · ➖ na. Pa
 | `view:Tool` | src/libvgcode/include/Types.hpp:101 | preview.schemes | ✅ |
 | `view:VolumetricFlowRate` | src/libvgcode/include/Types.hpp:89 | preview.schemes | ✅ |
 | `view:Width` | src/libvgcode/include/Types.hpp:88 | preview.schemes | ✅ |
-| `option:ColorChanges` | src/libvgcode/include/Types.hpp:174 | preview.color-print | ❌ |
-| `option:CustomGCodes` | src/libvgcode/include/Types.hpp:176 | preview.pause-custom-gcode | ❌ |
-| `option:PausePrints` | src/libvgcode/include/Types.hpp:175 | preview.pause-custom-gcode | ❌ |
+| `option:ColorChanges` | src/libvgcode/include/Types.hpp:174 | preview.color-print | 🟡 |
+| `option:CustomGCodes` | src/libvgcode/include/Types.hpp:176 | preview.pause-custom-gcode | 🟡 |
+| `option:PausePrints` | src/libvgcode/include/Types.hpp:175 | preview.pause-custom-gcode | 🟡 |
 | `option:Retractions` | src/libvgcode/include/Types.hpp:170 | preview.markers | ✅ |
 | `option:Seams` | src/libvgcode/include/Types.hpp:172 | preview.markers | ✅ |
 | `option:ToolChanges` | src/libvgcode/include/Types.hpp:173 | preview.wipes-toolchanges | ✅ |

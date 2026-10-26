@@ -882,6 +882,43 @@ final class DocumentStore {
         clearPreview()
     }
 
+    // MARK: Custom G-code at layers (desktop layer ticks, selected plate)
+
+    /// The selected plate's custom G-code ticks (nil on engine failure).
+    func customGcodes() async -> [EnginePlater.CustomGcodeItem]? {
+        guard let plater else { return nil }
+        let result = await BackgroundWork.run(operation: "read custom G-code") {
+            try plater.customGcodes()
+        }
+        switch result {
+        case .success(let items):
+            return items
+        case .failure(let failure):
+            status.report(.document, failure: failure)
+            return nil
+        }
+    }
+
+    /// Adds a tick at `printZ` on the selected plate (one undo step).
+    func addCustomGcode(
+        printZ: Double, kind: EnginePlater.CustomGcodeKind,
+        extruder: Int, color: String, extra: String
+    ) async {
+        _ = await applyMutation(
+            .addCustomGcode(
+                printZ: printZ, kind: kind, extruder: extruder,
+                color: color, extra: extra),
+            operation: "add custom G-code"
+        )
+    }
+
+    func deleteCustomGcode(printZ: Double) async {
+        _ = await applyMutation(
+            .deleteCustomGcode(printZ: printZ),
+            operation: "delete custom G-code"
+        )
+    }
+
     // MARK: Settings clipboard (desktop Copy / Paste Process Settings)
 
     private(set) var settingsClipboard: [String: String]?

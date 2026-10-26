@@ -237,6 +237,9 @@ final class ToolpathRenderer: NSObject, MTKViewDelegate {
                 case .seam: visible = key.showSeams
                 case .retract, .unretract: visible = key.showRetractions
                 case .toolChange: visible = key.showToolChanges
+                case .colorChange, .pausePrint, .customGCode:
+                    // Layer ticks (desktop colour-change/pause markers).
+                    visible = key.showToolChanges
                 default: visible = false
                 }
                 if visible {
@@ -296,6 +299,8 @@ final class ToolpathRenderer: NSObject, MTKViewDelegate {
         case .retract: return SIMD4(0.95, 0.25, 0.25, 1)
         case .unretract: return SIMD4(0.3, 0.85, 0.3, 1)
         case .toolChange: return SIMD4(0.65, 0.45, 1.0, 1)
+        case .colorChange: return SIMD4(1.0, 0.85, 0.2, 1)
+        case .pausePrint: return SIMD4(1.0, 0.45, 0.75, 1)
         default: return SIMD4(0.4, 0.6, 1.0, 1)
         }
     }

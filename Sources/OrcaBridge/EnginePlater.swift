@@ -99,6 +99,45 @@ public final class EnginePlater: @unchecked Sendable {
         /// Needs the presets session (machine volume).
         case scaleToFit(objectID: ObjectID, instanceID: InstanceID)
         case convertUnits(objectID: ObjectID, UnitConversion)
+        /// Per-layer custom G-code on the SELECTED plate (ABI v24/v32):
+        /// colour change / pause / tool change / raw custom G-code.
+        case addCustomGcode(printZ: Double, kind: CustomGcodeKind,
+                            extruder: Int, color: String, extra: String)
+        case deleteCustomGcode(printZ: Double)
+    }
+
+    /// Desktop layer-tick custom G-code types (CustomGCode::Type).
+    public enum CustomGcodeKind: Int32, Sendable, CaseIterable {
+        case colorChange = 0
+        case pausePrint = 1
+        case toolChange = 2
+        /// Read-only: projects may carry template ticks; ADDING one is a
+        /// typed unsupported capability at the Bridge.
+        case template = 3
+        case custom = 4
+
+        public var label: String {
+            switch self {
+            case .colorChange: return "Colour change"
+            case .pausePrint: return "Pause print"
+            case .toolChange: return "Tool change"
+            case .template: return "Template"
+            case .custom: return "Custom G-code"
+            }
+        }
+    }
+
+    /// One layer tick (ascending print_z order).
+    public struct CustomGcodeItem: Identifiable, Sendable, Equatable {
+        public let printZ: Double
+        public let kind: CustomGcodeKind
+        /// 1-based extruder (colour / tool changes).
+        public let extruder: Int
+        /// #rrggbb for colour changes, pause message otherwise.
+        public let color: String
+        /// G-code text (custom) or message (pause).
+        public let extra: String
+        public var id: Double { printZ }
     }
 
     /// One (object, instance) pair of a multi-selection.
@@ -241,6 +280,39 @@ public final class EnginePlater: @unchecked Sendable {
             throw invariant(operation: operation, "Bridge returned a malformed key list")
         }
         return keys
+    }
+
+    /// The selected plate's custom G-code ticks, ascending print_z.
+    public func customGcodes() throws -> [CustomGcodeItem] {
+        try lock.withLock {
+            var count: Int32 = 0
+            try BridgeResult.consume(
+                orca_plater_custom_gcode_count(handle, &count),
+                operation: "read custom G-code count"
+            )
+            var items: [CustomGcodeItem] = []
+            items.reserveCapacity(Int(count))
+            for index in 0..<count {
+                var raw = orca_custom_gcode_item()
+                try BridgeResult.consume(
+                    orca_plater_custom_gcode_item(handle, index, &raw),
+                    operation: "read custom G-code item"
+                )
+                defer { orca_custom_gcode_item_dispose(&raw) }
+                guard let kind = CustomGcodeKind(rawValue: raw.type) else {
+                    throw BridgeError.local(
+                        .internalInvariant, operation: "read custom G-code item",
+                        diagnostic: "engine returned an unsupported custom G-code type \(raw.type)"
+                    )
+                }
+                let color = try consumeBridgeString(&raw.color, operation: "custom G-code").get()
+                let extra = try consumeBridgeString(&raw.extra, operation: "custom G-code").get()
+                items.append(CustomGcodeItem(
+                    printZ: raw.print_z, kind: kind, extruder: Int(raw.extruder),
+                    color: color, extra: extra))
+            }
+            return items
+        }
     }
 
     /// Current overrides of an object (volumeID nil) or one of its volumes.
@@ -735,6 +807,25 @@ public final class EnginePlater: @unchecked Sendable {
                 )
                 createdObjectCount = 1
                 createdObjectID = try Self.objectID(rawObjectID, operation: "convert units")
+
+            case .addCustomGcode(let printZ, let kind, let extruder, let color, let extra):
+                try color.withCString { colorPointer in
+                    try extra.withCString { extraPointer in
+                        try BridgeResult.consume(
+                            orca_plater_custom_gcode_add(
+                                handle, printZ, kind.rawValue, Int32(extruder),
+                                colorPointer, extraPointer, &mutationRevision
+                            ),
+                            operation: "add custom G-code"
+                        )
+                    }
+                }
+
+            case .deleteCustomGcode(let printZ):
+                try BridgeResult.consume(
+                    orca_plater_custom_gcode_delete(handle, printZ, &mutationRevision),
+                    operation: "delete custom G-code"
+                )
 
             case .pasteObject(let bedCenter):
                 var rawObjectID: UInt64 = 0
