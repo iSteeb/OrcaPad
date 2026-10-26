@@ -97,6 +97,21 @@
 
 ## PROGRESS
 
+- [2026-10-26 CODE] 0.10 scope COMPLETE (parity 50%: 62 done, 19 partial):
+  Wave 0 claims (Duet/FlashAir hosts, PrusaLink partial, About); Wave 1
+  (new project, one-layer mode, wipe+tool-change markers, actual-flow
+  scheme, colour swatch picker); Wave 2 (ABI v33 exports: object STL,
+  generic 3MF, sliced .gcode.3mf via shared per-plate slice core; recent
+  projects); Flagships: custom G-code at layers (pause/custom/colour
+  ticks + tick sheet + markers), cut tool (CutUtils in the closure, ABI
+  v34 plane cuts + Cut sheet), config/preset-bundle import-export
+  (ABI v35: export current selection, single-preset json import with
+  kind inference, vendor-bundle folder import; audit gate extended for
+  the 4th preset-free overlay path). Gates: host 51,547 PASS, archive
+  313 TUs, xtool green, audit PASS, parity 50%. Next: 0.11 PAINTING
+  (unlocked) - TriangleSelector facet state through the Bridge, touch
+  brush gizmo, facet rendering, slicer consumption.
+
 - [2026-10-26 CODE] Review-fix sweep (comprehensive audit of Bridge +
   client): ABI v31->v32. Bridge: orca_presets_set_value now parses into a
   clone and returns typed INVALID_CONFIGURATION on parse failure (upstream
@@ -189,6 +204,10 @@
   host key is `host_type`.
 
 ## OUTCOMES
+
+- [2026-10-26] 0.10 milestone: waves 0-2 + all three flagships landed
+  (parity 42% -> 50% in one day, ABI v31 -> v35). release-0.10.0 tagged.
+
 
 - [2026-10-26] Review-fix sweep complete (parity 40%->42%, 51->54 done):
   every bug from the Bridge+client audit fixed - copy/cut, silent preset
