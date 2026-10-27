@@ -64,6 +64,7 @@ final class DocumentStore {
 
     init(status: StatusCenter) {
         self.status = status
+        loadRecentModels()
     }
 
     var isReady: Bool { plater != nil && scene != nil }
@@ -131,8 +132,61 @@ final class DocumentStore {
             install(commit.mutation.snapshot)
             frameRequest += 1
             status.report(.document, commit.status)
+            recordRecentModel(source)
         case .failure(let failure):
             status.report(.document, failure: failure)
+        }
+    }
+
+    // MARK: Recent models (File menu "Recent", desktop recent-files parity)
+
+    /// One recently imported model: source path + import date. Plain value —
+    /// recent models are derived UI state, never engine state.
+    struct RecentFile: Codable, Identifiable, Equatable, Sendable {
+        let url: URL
+        let date: Date
+
+        var id: String { url.absoluteString }
+    }
+
+    /// Recently imported models, newest first. Persisted in UserDefaults
+    /// (the Projects half of the Recent menu derives from the filesystem,
+    /// models have no fixed home so the list must be kept explicitly).
+    /// Re-import goes through `importModel` again — the original path must
+    /// still be readable (iOS grants file-picker access per session; a
+    /// revoked path fails loudly through the normal import error path).
+    private(set) var recentModels: [RecentFile] = []
+    private static let recentModelsKey = "recent.models"
+    /// "recent.files.max" (@AppStorage key, default 10) bounds the list.
+    private static var recentFilesLimit: Int {
+        let stored = UserDefaults.standard.integer(forKey: "recent.files.max")
+        return stored > 0 ? stored : 10
+    }
+
+    private func loadRecentModels() {
+        guard let data = UserDefaults.standard.data(forKey: Self.recentModelsKey) else { return }
+        do {
+            recentModels = try JSONDecoder().decode([RecentFile].self, from: data)
+        } catch {
+            // Corrupt/persisted-incompatible list: drop it and say so (the
+            // list rebuilds from the next imports) — never block startup.
+            status.report(.document, failure: AppFailure.wrap(
+                error, operation: "read recent models"))
+        }
+    }
+
+    private func recordRecentModel(_ url: URL) {
+        var models = recentModels.filter { $0.url != url }
+        models.insert(RecentFile(url: url, date: Date()), at: 0)
+        let limit = Self.recentFilesLimit
+        if models.count > limit { models = Array(models.prefix(limit)) }
+        recentModels = models
+        do {
+            let data = try JSONEncoder().encode(models)
+            UserDefaults.standard.set(data, forKey: Self.recentModelsKey)
+        } catch {
+            status.report(.document, failure: AppFailure.wrap(
+                error, operation: "save recent models"))
         }
     }
 
@@ -297,6 +351,126 @@ final class DocumentStore {
         } catch {
             status.report(.document, failure: AppFailure.wrap(
                 error, operation: "prepare sliced 3MF export"))
+        }
+    }
+
+    /// Desktop "Export all objects as one STL": every object's mesh through
+    /// its first instance in ONE binary STL (ABI v40).
+    func exportAllSTL(projectName: String) async {
+        guard let plater, !isBusy else {
+            status.report(.document, "export blocked: document is busy")
+            return
+        }
+        let name = (projectName.isEmpty ? "plater" : projectName)
+        isMutating = true
+        let result = await BackgroundWork.run(operation: "export all STL") {
+            let url = try EnginePaths.exportURL(
+                name: name + "_all", pathExtension: "stl")
+            try plater.exportAllSTL(to: url.path)
+            return url
+        }
+        isMutating = false
+        switch result {
+        case .success(let url):
+            lastExport = url
+            status.report(.document, "STL exported: \(url.lastPathComponent)")
+        case .failure(let failure):
+            status.report(.document, failure: failure)
+        }
+    }
+
+    /// Desktop "Export objects as STLs": one binary STL per object (the
+    /// single-object export looped over the current snapshot).
+    func exportEachSTL() async {
+        guard let plater, let scene, !isBusy else {
+            status.report(.document, "export blocked: document is busy")
+            return
+        }
+        let objects = scene.objects
+        isMutating = true
+        let result = await BackgroundWork.run(operation: "export objects as STLs") {
+            () -> [URL] in
+            var urls: [URL] = []
+            for object in objects {
+                let url = try EnginePaths.exportURL(name: object.name, pathExtension: "stl")
+                try plater.exportSTL(objectID: object.id, to: url.path)
+                urls.append(url)
+            }
+            return urls
+        }
+        isMutating = false
+        switch result {
+        case .success(let urls):
+            lastExport = urls.last
+            status.report(
+                .document,
+                urls.count == 1
+                    ? "STL exported: \(urls[0].lastPathComponent)"
+                    : "\(urls.count) STLs exported to Files ▸ Exports")
+        case .failure(let failure):
+            status.report(.document, failure: failure)
+        }
+    }
+
+    /// Desktop "Export plate sliced file": the sliced-3MF export restricted
+    /// to the SELECTED plate (ABI v40). An empty plate is rejected by the
+    /// Bridge with a typed error — surfaced here as the status message.
+    func exportGcode3mfCurrentPlate(
+        projectName: String, presets: EnginePresets, bed: EngineBed
+    ) async {
+        guard let input = beginSlicing() else {
+            status.report(.document, "export blocked: document is not ready or is busy")
+            return
+        }
+        defer { finishSlicing() }
+        guard let plate = currentPlate else {
+            status.report(.document, failure: .invariant(
+                operation: "export plate sliced 3MF",
+                diagnostic: "no plate is selected"))
+            return
+        }
+        let name = projectName.isEmpty ? "plater" : projectName
+        do {
+            let url = try EnginePaths.gcodeOutputURL(
+                sceneName: (name as NSString).deletingPathExtension
+                    + "_plate\(plate.index + 1).gcode")
+            let target = url.deletingPathExtension().appendingPathExtension("3mf")
+            let job = try SliceJob()
+            do {
+                let rgba = try ThumbnailService.render(scene: input.snapshot, bed: bed)
+                try job.setThumbnail(size: ThumbnailService.size, rgba: rgba)
+            } catch {
+                status.report(.document, failure: AppFailure.wrap(
+                    error, operation: "render export thumbnail"))
+            }
+            let plateIndex = plate.index
+            let progressCallback: @Sendable (Int, String) -> Void = {
+                [weak self] percent, message in
+                Task { @MainActor in
+                    self?.status.update(.document, "export 3MF: \(percent)% \(message)")
+                }
+            }
+            let result = await BackgroundWork.run(operation: "export plate sliced 3MF") {
+                try input.plater.exportGcode3mfPlate(
+                    plateIndex: plateIndex,
+                    to: target.path, presets: presets, job: job,
+                    progress: progressCallback)
+            }
+            switch result {
+            case .success(let sliceResult):
+                lastExport = target
+                let minutes = Int(sliceResult.timeEstimateSeconds / 60)
+                let warningNote = sliceResult.warnings.isEmpty
+                    ? "" : " \u{00b7} \(sliceResult.warnings.count) warning(s)"
+                status.report(
+                    .document,
+                    "sliced 3MF ready: \(target.lastPathComponent) \u{00b7} ~\(minutes) min print\(warningNote)")
+            case .failure(let failure):
+                status.report(.document, failure: failure)
+            }
+        } catch {
+            status.report(.document, failure: AppFailure.wrap(
+                error, operation: "prepare plate sliced 3MF export"))
         }
     }
 
@@ -1117,6 +1291,223 @@ final class DocumentStore {
         }
     }
 
+    // MARK: Measure gizmo (desktop GLGizmoMeasure, ABI v40)
+
+    /// The engine measure session over the measured object's merged mesh
+    /// (OBJECT space; triangle indices match the snapshot mesh 1:1). The
+    /// CPU-heavy build crosses BackgroundWork; pick/between are fast pure
+    /// calls on the copied mesh but still stay off the main actor.
+    private(set) var measureContext: EnginePlater.MeasureContext?
+    private(set) var measureObjectID: ObjectID?
+    /// Picked features, slots A and B (nil until picked).
+    private(set) var measureFeatures: [EnginePlater.SurfaceFeature?] = [nil, nil]
+    private(set) var measureResult: EnginePlater.FeatureMeasurement?
+    /// The mesh + document revision the context was built for (the session
+    /// is invalidated on any change — see `install`).
+    private var measureMeshRevision: UInt64?
+    private var measureRevision: DocumentRevision?
+    private var isBuildingMeasure = false
+
+    /// Whether a measure session is active (panel + overlay visibility).
+    var isMeasuring: Bool {
+        measureObjectID != nil || measureFeatures.contains { $0 != nil }
+    }
+
+    /// One measure tap: the merged-mesh triangle + raw object-space hit
+    /// point of the tapped facet (from the canvas FacePick). Builds the
+    /// session on first tap / different object, picks the feature, fills
+    /// slot A then B, computes the measurement, and resets on the tap
+    /// after a complete pair (desktop pair semantics).
+    func handleMeasureTap(
+        objectID: ObjectID, triangleIndex: Int32, objectPoint: SIMD3<Double>
+    ) async {
+        guard !isBuildingMeasure else { return }
+        // A different object starts a fresh session (desktop keeps one
+        // measuring per mesh).
+        if measureObjectID != objectID { clearMeasure() }
+        guard let context = await ensureMeasureContext(objectID: objectID) else { return }
+        let pickResult = await BackgroundWork.run(operation: "measure pick") {
+            try context.pick(faceIndex: triangleIndex, point: objectPoint)
+        }
+        switch pickResult {
+        case .failure(let failure):
+            status.report(.document, failure: failure)
+        case .success(let feature):
+            // The session may have been invalidated while the pick ran (any
+            // document change clears it) — a stale pick is dropped; the
+            // user taps again.
+            guard measureObjectID == objectID else { return }
+            // A complete A+B measurement: this tap restarts the pair.
+            if measureResult != nil || measureFeatures[1] != nil {
+                measureFeatures = [feature, nil]
+                measureResult = nil
+                return
+            }
+            if let a = measureFeatures[0] {
+                let between = await BackgroundWork.run(operation: "measure between") {
+                    try context.between(a, feature)
+                }
+                switch between {
+                case .success(let measurement):
+                    guard measureObjectID == objectID else { return }
+                    measureFeatures[1] = feature
+                    measureResult = measurement
+                case .failure(let failure):
+                    status.report(.document, failure: failure)
+                }
+            } else {
+                measureFeatures[0] = feature
+            }
+        }
+    }
+
+    /// Builds (and caches) the measure context for one object. Any document
+    /// change while the mesh is being analyzed makes the context stale —
+    /// its triangle indices are pinned to the tapped mesh — so it is
+    /// dropped and the user taps again.
+    private func ensureMeasureContext(
+        objectID: ObjectID
+    ) async -> EnginePlater.MeasureContext? {
+        if let measureContext, measureObjectID == objectID { return measureContext }
+        clearMeasure()
+        guard let plater, let object = scene?.object(id: objectID), !isBusy else {
+            status.report(.document, "measure blocked: document is busy or object missing")
+            return nil
+        }
+        isBuildingMeasure = true
+        defer { isBuildingMeasure = false }
+        let revisionAtRequest = scene?.revision
+        status.report(.document, "measure: analyzing \(object.name)…")
+        let result = await BackgroundWork.run(operation: "build measure context") {
+            try plater.measureContext(objectID: objectID)
+        }
+        switch result {
+        case .success(let context):
+            guard scene?.revision == revisionAtRequest,
+                  scene?.object(id: objectID)?.mesh.revision == object.mesh.revision
+            else {
+                status.report(
+                    .document, "measure: the object changed while analyzing — tap again")
+                return nil
+            }
+            measureContext = context
+            measureObjectID = objectID
+            measureMeshRevision = object.mesh.revision
+            measureRevision = revisionAtRequest
+            return context
+        case .failure(let failure):
+            status.report(.document, failure: failure)
+            return nil
+        }
+    }
+
+    /// Clears the session: features, measurement and the context (its
+    /// deinit disposes the engine side) — the panel's Clear button.
+    func clearMeasure() {
+        measureContext = nil
+        measureObjectID = nil
+        measureFeatures = [nil, nil]
+        measureResult = nil
+        measureMeshRevision = nil
+        measureRevision = nil
+    }
+
+    /// Assembles the renderer overlay payload (object space); `labelText`
+    /// is the units-formatted distance (the panel owns units).
+    func measureOverlay(labelText: String?) -> Renderer.MeasureOverlay? {
+        guard let measureObjectID else { return nil }
+        let result = measureResult
+        return Renderer.MeasureOverlay(
+            objectID: measureObjectID,
+            features: measureFeatures,
+            from: result?.hasDistance == true ? result?.from : nil,
+            to: result?.hasDistance == true ? result?.to : nil,
+            labelText: result?.hasDistance == true ? labelText : nil
+        )
+    }
+
+    // MARK: Simplify / Subdivide (desktop Simplify gizmo + "Subdivision mesh", ABI v40)
+
+    /// The volume simplify/subdivide acts on: the selected part when one is
+    /// refined, else the object's first part (single-mesh imports carry
+    /// exactly one part volume — same target as the painter gizmo).
+    private var selectedMeshVolumeID: VolumeID? {
+        guard let selection else { return nil }
+        if let volumeID = selection.volumeID { return volumeID }
+        return scene?.object(id: selection.objectID)?
+            .volumes.first(where: { $0.role == .part })?.id
+    }
+
+    /// Desktop Simplify gizmo (quadric edge collapse, one undo step
+    /// "Simplify"): either toward a wanted triangle count or by quality
+    /// (maxError 1e-3…1, the desktop presets). Status reports the counts.
+    func simplifySelected(
+        useCount: Bool, wantedCount: UInt32, maxError: Double
+    ) async {
+        guard let selection, let volumeID = selectedMeshVolumeID else {
+            status.report(.document, failure: .invariant(
+                operation: "simplify",
+                diagnostic: "select an object with a part volume"))
+            return
+        }
+        let before = (scene?.object(id: selection.objectID)?.mesh.indices.count ?? 0) / 3
+        if let mutation = await applyMutation(
+            .simplifyVolume(
+                objectID: selection.objectID,
+                volumeID: volumeID,
+                useCount: useCount,
+                wantedCount: wantedCount,
+                maxError: maxError),
+            operation: "simplify"
+        ) {
+            let after = (mutation.snapshot.object(id: selection.objectID)?
+                .mesh.indices.count ?? 0) / 3
+            status.report(.document, "simplified: \(before) → \(after) triangles")
+        }
+    }
+
+    /// Desktop "Subdivision mesh" (igl Loop, ×4 triangles, one undo step).
+    /// The Bridge typed-rejects meshes over 1M faces — that failure surfaces
+    /// through the mutation's status report.
+    func subdivideSelected() async {
+        guard let selection, let volumeID = selectedMeshVolumeID else {
+            status.report(.document, failure: .invariant(
+                operation: "subdivide",
+                diagnostic: "select an object with a part volume"))
+            return
+        }
+        let before = (scene?.object(id: selection.objectID)?.mesh.indices.count ?? 0) / 3
+        if let mutation = await applyMutation(
+            .subdivideVolume(objectID: selection.objectID, volumeID: volumeID),
+            operation: "subdivide"
+        ) {
+            let after = (mutation.snapshot.object(id: selection.objectID)?
+                .mesh.indices.count ?? 0) / 3
+            status.report(.document, "subdivided: \(before) → \(after) triangles")
+        }
+    }
+
+    // MARK: Hidden objects (desktop GUI_Factories "Hide"/"Show")
+
+    /// View-only per-object visibility. Desktop semantics: a render flag on
+    /// the GLVolume — NOT engine state, NOT persisted, and hidden objects
+    /// still SLICE (this is not the printable toggle). Deleted objects are
+    /// pruned from the set on every authoritative install.
+    private(set) var hiddenObjectIDs: Set<ObjectID> = []
+
+    func setHidden(_ hidden: Bool, objectID: ObjectID) {
+        if hidden {
+            hiddenObjectIDs.insert(objectID)
+        } else {
+            hiddenObjectIDs.remove(objectID)
+        }
+    }
+
+    func showAllHidden() {
+        guard !hiddenObjectIDs.isEmpty else { return }
+        hiddenObjectIDs.removeAll()
+    }
+
     // MARK: Custom G-code at layers (desktop layer ticks, selected plate)
 
     /// The selected plate's custom G-code ticks (nil on engine failure).
@@ -1144,6 +1535,20 @@ final class DocumentStore {
                 printZ: printZ, kind: kind, extruder: extruder,
                 color: color, extra: extra),
             operation: "add custom G-code"
+        )
+    }
+
+    /// ABI v40 edit: replaces the tick at `printZ` in ONE undo step
+    /// (fails typed NOT_FOUND when it vanished mid-edit — no re-insert).
+    func editCustomGcode(
+        printZ: Double, kind: EnginePlater.CustomGcodeKind,
+        extruder: Int, color: String, extra: String
+    ) async {
+        _ = await applyMutation(
+            .editCustomGcode(
+                printZ: printZ, kind: kind, extruder: extruder,
+                color: color, extra: extra),
+            operation: "edit custom G-code"
         )
     }
 
@@ -1844,6 +2249,21 @@ final class DocumentStore {
         }
         if multiSelection.count <= 1 { multiSelection = [] }
         presentationRevision += 1
+        // Hidden objects are view-only client state: deleted objects leave
+        // the set (newProject/openProject replace the whole object list).
+        hiddenObjectIDs.formIntersection(
+            Set(authoritativeScene.objects.map(\.id)))
+        // Measure gizmo (ABI v40): the session's triangle indices are pinned
+        // to ONE document + mesh revision — any document change, or the
+        // measured object's replacement/deletion, invalidates it (dispose +
+        // clear; desktop keeps one Measure session per mesh state).
+        if let measureObjectID {
+            let meshStillCurrent = authoritativeScene.object(id: measureObjectID)?
+                .mesh.revision == measureMeshRevision
+            if authoritativeScene.revision != measureRevision || !meshStillCurrent {
+                clearMeasure()
+            }
+        }
         // Replay a bed sync that arrived while the engine was busy.
         if let pending = pendingBedSync {
             pendingBedSync = nil

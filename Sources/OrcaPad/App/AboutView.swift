@@ -9,6 +9,10 @@ import SwiftUI
 /// only; resources are bundled read-only files.
 struct AboutView: View {
     @Environment(\.dismiss) private var dismiss
+    /// Tip of the Day (app.tips) is reachable from here: the Plate File
+    /// menu is off-limits to this file's ownership, and About is the app's
+    /// natural "help" surface.
+    @State private var tipsPresented = false
 
     /// Read-only license material bundled under Resources/Licenses.
     private struct LicenseResources {
@@ -116,6 +120,9 @@ struct AboutView: View {
                     Button("Done") { dismiss() }
                 }
             }
+            .sheet(isPresented: $tipsPresented) {
+                TipsSheet()
+            }
         }
         .preferredColorScheme(.dark)
     }
@@ -173,6 +180,14 @@ struct AboutView: View {
                 )
                 .font(.footnote)
                 .foregroundStyle(.secondary)
+            }
+
+            Section {
+                Button {
+                    tipsPresented = true
+                } label: {
+                    Label("Tip of the Day", systemImage: "lightbulb")
+                }
             }
 
             Section("License — GNU AGPL v3.0") {

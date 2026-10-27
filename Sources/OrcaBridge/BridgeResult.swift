@@ -50,7 +50,7 @@ public struct BridgeError: Error, Sendable, LocalizedError {
     }
 }
 
-private let expectedBridgeABIVersion: UInt32 = 39
+private let expectedBridgeABIVersion: UInt32 = 40
 
 func bridgeABIFailure(operation: String) -> BridgeError? {
     let actual = orca_bridge_abi_version()

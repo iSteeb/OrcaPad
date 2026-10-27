@@ -7,7 +7,7 @@ extern "C" {
 #endif
 
 /// Version of the C ABI contract in this header. Callers verify it at runtime.
-#define ORCA_BRIDGE_ABI_VERSION ((uint32_t)39)
+#define ORCA_BRIDGE_ABI_VERSION ((uint32_t)40)
 
 typedef int32_t orca_status_code;
 #define ORCA_STATUS_OK                     ((orca_status_code)0)
@@ -424,6 +424,114 @@ orca_result orca_plater_add_text_object(orca_plater *plater,
                                         double bed_center_y,
                                         orca_object_id *out_object_id,
                                         orca_revision *out_revision);
+
+// --- measure (desktop GLGizmoMeasure, ABI v40) -------------------------------
+
+typedef struct orca_measure orca_measure;
+
+/// Builds the desktop Measure::Measuring over the object's MERGED mesh
+/// (object space — the same mesh the scene snapshot carries, so triangle
+/// indices from client picking map 1:1). Construction segments planes and
+/// is CPU-heavy: keep one context per measured object and dispose it when
+/// the selection or the object's mesh_revision changes. Not a mutation.
+orca_result orca_plater_object_measure(orca_plater *plater,
+                                       orca_object_id object_id,
+                                       orca_measure **out);
+void orca_measure_dispose(orca_measure *measure);
+
+#define ORCA_MEASURE_POINT  ((uint8_t)0)
+#define ORCA_MEASURE_EDGE   ((uint8_t)1)
+#define ORCA_MEASURE_CIRCLE ((uint8_t)2)
+#define ORCA_MEASURE_PLANE  ((uint8_t)3)
+
+/// One picked surface feature, OBJECT space (mm). POINT: point_a.
+/// EDGE: point_a/point_b. CIRCLE: point_a=center, radius, normal.
+/// PLANE: point_a=center-ish anchor, normal, area_mm2, plane_index.
+typedef struct {
+    uint8_t type;               // ORCA_MEASURE_*
+    uint8_t reserved[3];
+    double point_a[3];
+    double point_b[3];
+    double normal[3];           // CIRCLE / PLANE
+    double radius;              // CIRCLE, mm
+    double area;                // PLANE, mm^2
+    int32_t plane_index;        // PLANE (>= 0); -1 otherwise
+    int32_t reserved2;
+} orca_surface_feature;
+
+/// Desktop hover: the feature under `point` (object space) on triangle
+/// `face_index` of the merged mesh. NOT_FOUND when the engine finds no
+/// feature there. Read-only.
+orca_result orca_measure_pick(orca_measure *measure,
+                              int32_t face_index,
+                              double px, double py, double pz,
+                              orca_surface_feature *out);
+
+/// Measurement between two picked features (desktop update_measurement_
+/// result): Euclidean distance (infinite first, strict fallback), the
+/// per-axis delta when defined, and the edge/edge angle when defined.
+typedef struct {
+    double from[3];
+    double to[3];               // closest points when has_distance
+    double distance;            // mm
+    double xyz[3];              // per-axis delta when has_xyz
+    double angle_radians;       // when has_angle
+    uint8_t has_distance;
+    uint8_t has_xyz;
+    uint8_t has_angle;
+    uint8_t reserved;
+} orca_measurement;
+
+orca_result orca_measure_between(const orca_measure *measure,
+                                 const orca_surface_feature *a,
+                                 const orca_surface_feature *b,
+                                 orca_measurement *out);
+
+// --- mesh simplify / subdivide (desktop Simplify gizmo + smooth mesh, v40) ----
+
+/// Desktop Simplify (GLGizmoSimplify -> its_quadric_edge_collapse) on one
+/// volume's mesh. use_count != 0 drives toward `wanted_count` triangles;
+/// use_count == 0 drives by quality (`max_error` >= 0, desktop quality
+/// presets span 1e-3..1). Facet-paint annotations of the volume are
+/// cleared (their triangle indices no longer map). One undo step
+/// "Simplify"; out_triangles receives the resulting count.
+orca_result orca_plater_volume_simplify(orca_plater *plater,
+                                        orca_object_id object_id,
+                                        orca_volume_id volume_id,
+                                        uint8_t use_count,
+                                        uint32_t wanted_count,
+                                        double max_error,
+                                        uint32_t *out_triangles,
+                                        orca_revision *out_revision);
+
+/// Desktop "Subdivision mesh" (ObjectList::smooth_mesh ->
+/// TriangleMeshDeal::smooth_triangle_mesh, igl Loop subdivision): 4x the
+/// triangles, one undo step "Subdivide". Typed INVALID_ARGUMENT when the
+/// result would exceed 4,000,000 triangles (desktop warns past 1M; the
+/// cap protects the device memory budget). Paint annotations are cleared.
+orca_result orca_plater_volume_subdivide(orca_plater *plater,
+                                         orca_object_id object_id,
+                                         orca_volume_id volume_id,
+                                         uint32_t *out_triangles,
+                                         orca_revision *out_revision);
+
+// --- exports v40: all-objects STL + per-plate sliced 3MF ----------------------
+
+/// Desktop "Export all objects as one STL" (store_stl over the Model:
+/// every object's mesh through its first instance). "as STLs" is the
+/// per-object export looped by the client. Not a mutation.
+orca_result orca_plater_export_stl_all(orca_plater *plater,
+                                       const char *path, uint8_t binary);
+
+/// Desktop slider-tick EDIT: replaces the item at `print_z` (within 1e-6)
+/// — type, extruder, colour and text — in ONE undo step. NOT_FOUND when
+/// no item sits at that height. (Desktop templates are stored client-side
+/// and insert as CUSTOM ticks with the template text.)
+orca_result orca_plater_custom_gcode_edit(orca_plater *plater,
+                                           double print_z,
+                                           int32_t type, int32_t extruder,
+                                           const char *color, const char *extra,
+                                           orca_revision *out_revision);
 
 // --- painting (desktop painter gizmos, ABI v36) ------------------------------
 
@@ -1186,6 +1294,18 @@ orca_result orca_plater_export_gcode_3mf(orca_plater *plater,
                                          orca_progress_fn progress, void *ctx,
                                          orca_slice_job *job,
                                          orca_slice_report *out_report);
+
+/// Desktop "Export plate sliced file" (ABI v40): the sliced-3MF export
+/// restricted to ONE plate (`plate_index`, 0-based). Same report and
+/// progress semantics as orca_plater_export_gcode_3mf.
+orca_result orca_plater_export_gcode_3mf_plate(orca_plater *plater,
+                                                orca_presets *presets,
+                                                int32_t plate_index,
+                                                const char *path,
+                                                orca_progress_fn progress,
+                                                void *ctx,
+                                                orca_slice_job *job,
+                                                orca_slice_report *out_report);
 
 #if defined(__cplusplus)
 }

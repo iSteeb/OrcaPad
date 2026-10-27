@@ -196,7 +196,7 @@ struct HeightRangesSheet: View {
         }
         let revisionBefore = document.scene?.revision
         Task {
-            await document.setHeightRanges(objectID: objectID, ranges: ranges)
+            _ = await document.setHeightRanges(objectID: objectID, ranges: ranges)
             if document.scene?.revision != revisionBefore {
                 dismiss()
             }

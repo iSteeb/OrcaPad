@@ -2,6 +2,7 @@
 // Copyright (c) 2026 OrcaPad contributors
 
 import MetalKit
+import Observation
 import OrcaBridge
 import os
 import simd
@@ -21,6 +22,9 @@ enum GizmoMode: String, CaseIterable, Sendable {
     case select
     /// Desktop painter gizmos (ABI v36): tap-paint with a sphere brush.
     case paint
+    /// Desktop Measure gizmo (ABI v40): tap two surface features, read
+    /// the distance / per-axis delta / angle between them.
+    case measure
 
     /// Menu label + symbol for the Tools menu and the collapsible panel.
     var menuLabel: String {
@@ -31,6 +35,7 @@ enum GizmoMode: String, CaseIterable, Sendable {
         case .layFlat: return "Lay flat"
         case .select: return "Select"
         case .paint: return "Paint"
+        case .measure: return "Measure"
         }
     }
 
@@ -42,6 +47,7 @@ enum GizmoMode: String, CaseIterable, Sendable {
         case .scale: return "arrow.up.left.and.arrow.down.right"
         case .layFlat: return "square.bottomhalf.filled"
         case .select: return "rectangle.dashed"
+        case .measure: return "ruler"
         }
     }
 }
@@ -132,6 +138,10 @@ final class Renderer: NSObject, MTKViewDelegate {
         let indexCount: Int
         let bboxMin: SIMD3<Float>   // object-local (packed) space
         let bboxMax: SIMD3<Float>
+        /// Mesh pivot in raw object (engine-axis) space: packed viewer
+        /// positions are `engineToViewer · (p − pivot)` (the measure
+        /// overlay maps object-space features back through it).
+        let pivot: SIMD3<Float>
         /// Inverted-hull selection outline width (object-space mm).
         let outlineWidth: Float
         let pickPositions: [SIMD3<Float>]  // packed viewer-space (pre-instance)
@@ -176,6 +186,47 @@ final class Renderer: NSObject, MTKViewDelegate {
     /// in the active layer, colored by paint state.
     private var paintOverlay: [VertexPC] = []
     private var paintOverlayCount = 0
+
+    // Hidden objects (desktop GUI_Factories "Hide"/"Show", view-only): the
+    // Plate tab publishes the client-side set; every draw AND pick path
+    // skips hidden objects' instances. Desktop stores the flag per GLVolume
+    // (never persisted); hidden objects still SLICE — this is not the
+    // printable toggle. Render thumbnails deliberately keep hidden objects:
+    // they represent the print, and hidden objects print.
+    private var hiddenObjectIDs: Set<ObjectID> = []
+
+    func setHiddenObjectIDs(_ ids: Set<ObjectID>) {
+        guard ids != hiddenObjectIDs else { return }
+        hiddenObjectIDs = ids
+        // Overhang facets of hidden objects must leave the overlay.
+        rebuildOverhang()
+    }
+
+    // MARK: Measure-gizmo overlay (desktop GLGizmoMeasure, ABI v40)
+
+    /// Object-space measure state published by the Plate tab: the picked
+    /// features (slots A/B), the engine's measurement line endpoints and
+    /// the units-formatted label text (units are a client concern). All
+    /// positions are OBJECT space — the renderer transforms them through
+    /// the object's SELECTED instance matrix (features are per OBJECT, not
+    /// per instance; multi-instance objects draw on the selected instance
+    /// only, like the desktop gizmo).
+    struct MeasureOverlay {
+        let objectID: ObjectID
+        /// Slot A / slot B (nil until picked).
+        let features: [EnginePlater.SurfaceFeature?]
+        /// Measurement line endpoints (object space; nil until measured).
+        let from: SIMD3<Double>?
+        let to: SIMD3<Double>?
+        /// Distance label (nil until a distance exists).
+        let labelText: String?
+    }
+
+    private var measureOverlay: MeasureOverlay?
+
+    func setMeasureOverlay(_ overlay: MeasureOverlay?) {
+        measureOverlay = overlay
+    }
 
     // MARK: Viewer options (Plate View menu, desktop canvas "hamburger"
     // view menu parity — GLCanvas3D.cpp:9205-9257: Overhangs / Perspective /
@@ -256,7 +307,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         let limit = Float(sin(overhangThresholdDegrees * .pi / 180))
         var vertices: [VertexPC] = []
         vertices.reserveCapacity(256)
-        for obj in objects {
+        for obj in objects where !hiddenObjectIDs.contains(obj.objectID) {
             let positions = obj.pickPositions
             let indices = obj.pickIndices
             let triangleCount = indices.count / 3
@@ -310,7 +361,7 @@ final class Renderer: NSObject, MTKViewDelegate {
     private func publishLabels(in view: MTKView) {
         guard labelsEnabled else { return }
         var labels: [ObjectLabel] = []
-        for obj in objects {
+        for obj in objects where !hiddenObjectIDs.contains(obj.objectID) {
             guard obj.instances.contains(where: { $0.plate == currentPlateIndex })
             else { continue }
             let suffix = obj.instances.count > 1
@@ -968,6 +1019,7 @@ final class Renderer: NSObject, MTKViewDelegate {
                 indexCount: geometry.idx.count,
                 bboxMin: bounds.minimum,
                 bboxMax: bounds.maximum,
+                pivot: sceneObject.mesh.pivot,
                 outlineWidth: outlineWidth,
                 pickPositions: positions,
                 pickIndices: geometry.idx,
@@ -1105,7 +1157,7 @@ final class Renderer: NSObject, MTKViewDelegate {
                 bbMax = simd_max(bbMax, point)
             }
         }
-        for obj in objects {
+        for obj in objects where !hiddenObjectIDs.contains(obj.objectID) {
             for inst in obj.instances where inst.plate == currentPlateIndex {
                 let m = inst.model
                 for c in [obj.bboxMin,
@@ -1299,6 +1351,13 @@ final class Renderer: NSObject, MTKViewDelegate {
         let engineNormal: SIMD3<Double>
         /// Engine world-space hit point (paint strokes, ABI v36).
         let enginePoint: SIMD3<Double>
+        /// Merged-mesh triangle index — matches the scene snapshot's mesh
+        /// indices 1:1 (measure gizmo part/feature picking, ABI v40).
+        let triangleIndex: Int32
+        /// Raw OBJECT-space hit point (engine axes, pivot included) — the
+        /// coordinate space of the object's merged mesh and therefore of
+        /// `MeasureContext.pick`.
+        let objectPoint: SIMD3<Double>
     }
 
     func pickFace(at point: CGPoint, in view: MTKView) -> FacePick? {
@@ -1317,7 +1376,7 @@ final class Renderer: NSObject, MTKViewDelegate {
     func pickVolume(at point: CGPoint, in view: MTKView) -> VolumePick? {
         let ray = screenRay(at: point, in: view)
         var best: (pick: VolumePick, t: Float)?
-        for obj in objects {
+        for obj in objects where !hiddenObjectIDs.contains(obj.objectID) {
             for inst in obj.instances {
                 if let hit = rayCastObject(ray, object: obj, model: inst.model),
                    let range = PartRange.containing(hit.triangle, in: obj.partRanges),
@@ -1357,7 +1416,7 @@ final class Renderer: NSObject, MTKViewDelegate {
     ) -> (pick: FacePick, t: Float)? {
         let ray = screenRay(at: point, in: view)
         var best: (pick: FacePick, t: Float)?
-        for obj in objects {
+        for obj in objects where !hiddenObjectIDs.contains(obj.objectID) {
             for inst in obj.instances {
                 guard let hit = rayCastObject(ray, object: obj, model: inst.model) else { continue }
                 if best == nil || hit.t < best!.t {
@@ -1372,6 +1431,13 @@ final class Renderer: NSObject, MTKViewDelegate {
                     let enginePoint4 = CoordinateMapper.viewerToEngine * SIMD4(
                         worldPoint.x, worldPoint.y, worldPoint.z, 0)
                     let enginePoint = SIMD3(enginePoint4.x, enginePoint4.y, enginePoint4.z)
+                    // Raw object space (the merged mesh's own coordinates):
+                    // packed viewer positions are `engineToViewer · (p −
+                    // pivot)`, so p = pivot + viewerToEngine · packed.
+                    let object4 = CoordinateMapper.viewerToEngine * SIMD4<Float>(
+                        hit.point.x, hit.point.y, hit.point.z, 0)
+                    let objectPoint = SIMD3<Double>(Double(object4.x), Double(object4.y), Double(object4.z))
+                        + SIMD3<Double>(Double(obj.pivot.x), Double(obj.pivot.y), Double(obj.pivot.z))
                     best = (FacePick(
                         objectID: obj.objectID,
                         instanceID: inst.instanceID,
@@ -1381,7 +1447,9 @@ final class Renderer: NSObject, MTKViewDelegate {
                         enginePoint: SIMD3<Double>(
                             Double(enginePoint.x),
                             Double(enginePoint.y),
-                            Double(enginePoint.z))
+                            Double(enginePoint.z)),
+                        triangleIndex: Int32(hit.triangle),
+                        objectPoint: objectPoint
                     ), hit.t)
                 }
             }
@@ -1516,7 +1584,7 @@ final class Renderer: NSObject, MTKViewDelegate {
     func instancesIntersecting(rect: CGRect, in view: MTKView)
         -> [(objectID: ObjectID, instanceID: InstanceID)] {
         var hits: [(objectID: ObjectID, instanceID: InstanceID)] = []
-        for obj in objects {
+        for obj in objects where !hiddenObjectIDs.contains(obj.objectID) {
             outer: for inst in obj.instances {
                 var minX = CGFloat.greatestFiniteMagnitude
                 var minY = CGFloat.greatestFiniteMagnitude
@@ -1594,7 +1662,7 @@ final class Renderer: NSObject, MTKViewDelegate {
     private func gizmo(
         matching predicate: (RenderObject, InstanceDraw) -> Bool
     ) -> SelectedGizmo? {
-        for object in objects {
+        for object in objects where !hiddenObjectIDs.contains(object.objectID) {
             guard let instance = object.instances.first(where: { predicate(object, $0) }) else { continue }
             let model = instance.model
             let column0 = SIMD3(model.columns.0.x, model.columns.0.y, model.columns.0.z)
@@ -1620,9 +1688,10 @@ final class Renderer: NSObject, MTKViewDelegate {
         var vertices: [VertexPC] = []
         let accent = SIMD4<Float>(0.16, 0.80, 0.95, 1)
         switch gizmoMode {
-        case .layFlat, .select, .paint:
+        case .layFlat, .select, .paint, .measure:
             // no on-canvas gizmo: lay flat taps a facet; select draws the
-            // marquee rectangle; paint taps facets with the sphere brush
+            // marquee rectangle; paint taps facets with the sphere brush;
+            // measure taps features (its overlay is state, not a gizmo)
             break
         case .move:
             // Engine +X → viewer +X (red); engine +Y → viewer -Z (green),
@@ -1757,11 +1826,14 @@ final class Renderer: NSObject, MTKViewDelegate {
         // Before them: the selection outline shell (inverted hull — the
         // object's own front faces occlude the expanded back faces, leaving
         // a silhouette halo; depth-written so it participates in occlusion).
-        if objects.contains(where: { $0.instances.contains(where: \.selected) }) {
+        if objects.contains(where: {
+            !hiddenObjectIDs.contains($0.objectID) && $0.instances.contains(where: \.selected)
+        }) {
             encoder.pushDebugGroup("selection-outline")
             encoder.setRenderPipelineState(outlinePipeline)
             encoder.setDepthStencilState(depthState)
-            for obj in objects where obj.indexCount > 0 {
+            for obj in objects
+            where obj.indexCount > 0 && !hiddenObjectIDs.contains(obj.objectID) {
                 encoder.setVertexBuffer(obj.vb, offset: 0, index: 0)
                 for inst in obj.instances where inst.selected {
                     // A mirrored (left-handed) matrix flips winding: cull the
@@ -1788,7 +1860,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         encoder.setRenderPipelineState(litPipeline)
         encoder.setDepthStencilState(depthState)
         encoder.setCullMode(.none)
-        for obj in objects {
+        for obj in objects where !hiddenObjectIDs.contains(obj.objectID) {
             guard obj.indexCount > 0, !obj.instances.isEmpty else { continue }
             encoder.setVertexBuffer(obj.vb, offset: 0, index: 0)
             // Other plates render DIMMED (multi-plate visibility); the
@@ -1829,7 +1901,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         encoder.setRenderPipelineState(litBlendPipeline)
         encoder.setDepthStencilState(translucentDepthState)
         encoder.setCullMode(.none)
-        for obj in objects {
+        for obj in objects where !hiddenObjectIDs.contains(obj.objectID) {
             for draw in obj.volumes where draw.indexCount > 0 {
                 encoder.setVertexBuffer(draw.vb, offset: 0, index: 0)
                 for inst in obj.instances {
@@ -1926,7 +1998,8 @@ final class Renderer: NSObject, MTKViewDelegate {
         encoder.setRenderPipelineState(litBlendPipeline)
         encoder.setDepthStencilState(translucentDepthState)
         encoder.setCullMode(.none)
-        for obj in objects {
+        for obj in objects
+        where !hiddenObjectIDs.contains(obj.objectID) {
             guard let volumeID = obj.selectedVolumeID,
                   let range = obj.partRanges.first(where: { $0.volumeID == volumeID }),
                   range.count > 0 else { continue }
@@ -1986,6 +2059,44 @@ final class Renderer: NSObject, MTKViewDelegate {
                 encoder.setVertexBytes(&gizmoUniforms, length: MemoryLayout<LineUniforms>.stride, index: 1)
                 encoder.setVertexBytes(&outline, length: MemoryLayout<VertexPC>.stride * outline.count, index: 0)
                 encoder.drawPrimitives(type: .lineStrip, vertexStart: 0, vertexCount: outline.count)
+            }
+            encoder.popDebugGroup()
+        }
+
+        // Measure gizmo (desktop GLGizmoMeasure, ABI v40): object-space
+        // features transformed through the selected instance — feature
+        // markers (point sphere / edge / circle / plane disc), then the
+        // measurement line, depth-tested like the flatten planes.
+        if gizmoMode == .measure, let overlay = measureOverlay,
+           let geometry = measureGeometry(overlay) {
+            encoder.pushDebugGroup("measure")
+            if !geometry.fill.isEmpty {
+                encoder.setRenderPipelineState(pcBlendPipeline)
+                encoder.setDepthStencilState(translucentDepthState)
+                var measureUniforms = LineUniforms(mvp: viewProj)
+                encoder.setVertexBytes(
+                    &measureUniforms,
+                    length: MemoryLayout<LineUniforms>.stride, index: 1)
+                var fill = geometry.fill
+                encoder.setVertexBytes(
+                    &fill,
+                    length: MemoryLayout<VertexPC>.stride * fill.count, index: 0)
+                encoder.drawPrimitives(
+                    type: .triangle, vertexStart: 0, vertexCount: fill.count)
+            }
+            if geometry.lines.count >= 2 {
+                encoder.setRenderPipelineState(linePipeline)
+                encoder.setDepthStencilState(overlayDepthState)
+                var measureUniforms = LineUniforms(mvp: viewProj)
+                encoder.setVertexBytes(
+                    &measureUniforms,
+                    length: MemoryLayout<LineUniforms>.stride, index: 1)
+                var lines = geometry.lines
+                encoder.setVertexBytes(
+                    &lines,
+                    length: MemoryLayout<VertexPC>.stride * lines.count, index: 0)
+                encoder.drawPrimitives(
+                    type: .line, vertexStart: 0, vertexCount: lines.count)
             }
             encoder.popDebugGroup()
         }
@@ -2056,8 +2167,164 @@ final class Renderer: NSObject, MTKViewDelegate {
 
         // 3D object labels follow the settled camera of THIS frame.
         publishLabels(in: view)
+        publishMeasureLabel(in: view)
 
         trackFPS()
+    }
+
+    // MARK: Measure overlay geometry (object space → selected instance)
+
+    /// Feature-marker colors: slot A cyan (selection family), slot B amber,
+    /// measurement line white (desktop colors its hover/selection per
+    /// feature; OrcaPad keeps one color per slot).
+    private static let measureFeatureColorA = SIMD4<Float>(0.30, 0.95, 1.00, 1)
+    private static let measureFeatureColorB = SIMD4<Float>(1.00, 0.82, 0.25, 1)
+    private static let measureLineColor = SIMD4<Float>(1, 1, 1, 1)
+    private static let measurePlaneFill = SIMD4<Float>(0.30, 0.95, 1.00, 0.16)
+
+    /// Derives the measure overlay vertices in viewer world space from the
+    /// object-space overlay state. Also returns the measurement midpoint
+    /// (the 3D label anchor). Nil when the object/instance is gone (or
+    /// hidden) — nothing draws.
+    private func measureGeometry(
+        _ overlay: MeasureOverlay
+    ) -> (lines: [VertexPC], fill: [VertexPC], labelAnchor: SIMD3<Float>?)? {
+        guard let obj = objects.first(where: { $0.objectID == overlay.objectID }),
+              !hiddenObjectIDs.contains(overlay.objectID),
+              let inst = obj.instances.first(where: { $0.instanceID == primaryInstanceID })
+                  ?? obj.instances.first
+        else { return nil }
+        let model = inst.model
+        let pivot = obj.pivot
+        // Raw object space (engine axes) → packed viewer (expandFlat's own
+        // mapping) → world through the instance model.
+        func packed(_ p: SIMD3<Double>) -> SIMD3<Float> {
+            let shifted = SIMD3<Float>(Float(p.x), Float(p.y), Float(p.z)) - pivot
+            return SIMD3(shifted.x, shifted.z, -shifted.y)
+        }
+        func world(_ p: SIMD3<Double>) -> SIMD3<Float> {
+            let local = packed(p)
+            let w = model * SIMD4(local.x, local.y, local.z, 1)
+            return SIMD3(w.x, w.y, w.z)
+        }
+        // Object-space normal direction → world (mirroring flips it, like
+        // the overhang normals).
+        func worldDir(_ n: SIMD3<Double>) -> SIMD3<Float> {
+            let viewer = SIMD3<Float>(Float(n.x), Float(n.z), -Float(n.y))
+            let columns = model.columns
+            let direction = viewer.x * SIMD3(columns.0.x, columns.0.y, columns.0.z)
+                + viewer.y * SIMD3(columns.1.x, columns.1.y, columns.1.z)
+                + viewer.z * SIMD3(columns.2.x, columns.2.y, columns.2.z)
+            let length = simd_length(direction)
+            return length > 1e-9 ? direction / length : SIMD3(0, 1, 0)
+        }
+        let extent = simd_distance(obj.bboxMin, obj.bboxMax)
+        let markerRadius = max(extent * 0.012, 0.4)
+
+        var lines: [VertexPC] = []
+        var fill: [VertexPC] = []
+        func circle(
+            _ center: SIMD3<Float>, _ u: SIMD3<Float>, _ v: SIMD3<Float>,
+            radius: Float, color: SIMD4<Float>
+        ) {
+            let segments = 32
+            for index in 0..<segments {
+                let a0 = Float(index) / Float(segments) * 2 * .pi
+                let a1 = Float(index + 1) / Float(segments) * 2 * .pi
+                lines.append(VertexPC(
+                    position: center + (u * cos(a0) + v * sin(a0)) * radius, color: color))
+                lines.append(VertexPC(
+                    position: center + (u * cos(a1) + v * sin(a1)) * radius, color: color))
+            }
+        }
+        func pointMarker(_ point: SIMD3<Double>, color: SIMD4<Float>) {
+            let center = world(point)
+            circle(center, SIMD3(1, 0, 0), SIMD3(0, 0, 1), radius: markerRadius, color: color)
+            circle(center, SIMD3(1, 0, 0), SIMD3(0, 1, 0), radius: markerRadius, color: color)
+            circle(center, SIMD3(0, 1, 0), SIMD3(0, 0, 1), radius: markerRadius, color: color)
+        }
+        // An orthonormal basis ⊥ normal (for circles/plane discs).
+        func basis(_ normal: SIMD3<Float>) -> (SIMD3<Float>, SIMD3<Float>) {
+            let helper = abs(normal.y) < 0.9 ? SIMD3<Float>(0, 1, 0) : SIMD3<Float>(1, 0, 0)
+            let u = simd_normalize(simd_cross(normal, helper))
+            return (u, simd_cross(normal, u))
+        }
+
+        for (slot, feature) in overlay.features.enumerated() {
+            guard let feature else { continue }
+            let color = slot == 0
+                ? Renderer.measureFeatureColorA : Renderer.measureFeatureColorB
+            switch feature.kind {
+            case .point:
+                pointMarker(feature.pointA, color: color)
+            case .edge:
+                let a = world(feature.pointA)
+                let b = world(feature.pointB)
+                lines.append(VertexPC(position: a, color: color))
+                lines.append(VertexPC(position: b, color: color))
+                pointMarker(feature.pointA, color: color)
+                pointMarker(feature.pointB, color: color)
+            case .circle:
+                let center = world(feature.pointA)
+                let normal = worldDir(feature.normal)
+                let (u, v) = basis(normal)
+                circle(center, u, v, radius: Float(feature.radius), color: color)
+                // Normal tick so the hole axis is explicit.
+                lines.append(VertexPC(position: center, color: color))
+                lines.append(VertexPC(
+                    position: center + normal * max(Float(feature.radius) * 1.3, markerRadius * 3),
+                    color: color))
+            case .plane:
+                // The plane feature carries no outline polygon — draw its
+                // disc by area (r = √(A/π)), translucent like the flatten
+                // planes, plus outline and normal tick.
+                let center = world(feature.pointA)
+                let normal = worldDir(feature.normal)
+                let (u, v) = basis(normal)
+                let radius = max(sqrt(Float(max(feature.area, 0)) / .pi), markerRadius)
+                for index in 0..<24 {
+                    let a0 = Float(index) / 24 * 2 * .pi
+                    let a1 = Float(index + 1) / 24 * 2 * .pi
+                    let p0 = center + (u * cos(a0) + v * sin(a0)) * radius
+                    let p1 = center + (u * cos(a1) + v * sin(a1)) * radius
+                    fill.append(VertexPC(position: center, color: Renderer.measurePlaneFill))
+                    fill.append(VertexPC(position: p0, color: Renderer.measurePlaneFill))
+                    fill.append(VertexPC(position: p1, color: Renderer.measurePlaneFill))
+                }
+                circle(center, u, v, radius: radius, color: color)
+                lines.append(VertexPC(position: center, color: color))
+                lines.append(VertexPC(position: center + normal * radius * 1.15, color: color))
+            }
+        }
+
+        var labelAnchor: SIMD3<Float>?
+        if let from = overlay.from, let to = overlay.to {
+            let a = world(from)
+            let b = world(to)
+            lines.append(VertexPC(position: a, color: Renderer.measureLineColor))
+            lines.append(VertexPC(position: b, color: Renderer.measureLineColor))
+            pointMarker(from, color: Renderer.measureLineColor)
+            pointMarker(to, color: Renderer.measureLineColor)
+            labelAnchor = (a + b) * 0.5
+        }
+        return (lines, fill, labelAnchor)
+    }
+
+    /// Publishes the measure distance chip at the projected measurement
+    /// midpoint (the SwiftUI overlay draws it — ObjectLabelCenter pattern;
+    /// desktop renders the value in-canvas next to the line).
+    private func publishMeasureLabel(in view: MTKView) {
+        guard gizmoMode == .measure,
+              let overlay = measureOverlay,
+              let text = overlay.labelText,
+              let geometry = measureGeometry(overlay),
+              let anchor = geometry.labelAnchor,
+              let point = projectToScreen(anchor, in: view)
+        else {
+            MeasureLabelCenter.shared.update(nil)
+            return
+        }
+        MeasureLabelCenter.shared.update(MeasureLabel(text: text, point: point))
     }
 
     // MARK: Status publishing
@@ -2105,4 +2372,35 @@ struct OutlineUniforms {
     var model: simd_float4x4
     var color: SIMD4<Float>
     var width: Float
+}
+
+// MARK: - Measure label channel (renderer → SwiftUI overlay)
+
+/// One published measure chip: the distance text at the projected midpoint
+/// of the measurement line (desktop GLGizmoMeasure renders the value
+/// in-canvas; OrcaPad projects the point and a SwiftUI overlay draws the
+/// chip — exactly the ObjectLabel pattern).
+struct MeasureLabel: Equatable, Sendable {
+    let text: String
+    let point: CGPoint
+}
+
+/// Renderer → SwiftUI channel for the measure chip. The renderer publishes
+/// from its draw pass (main actor); the Plate tab's overlay reads `label`
+/// and positions the chip over the canvas. `update` drops identical frames
+/// so an idle camera does not churn SwiftUI at 60 fps.
+@MainActor
+@Observable
+final class MeasureLabelCenter {
+    static let shared = MeasureLabelCenter()
+
+    private(set) var label: MeasureLabel?
+
+    private init() {}
+
+    /// Publishes the current chip (nil = no measurement / mode off).
+    func update(_ label: MeasureLabel?) {
+        guard label != self.label else { return }
+        self.label = label
+    }
 }

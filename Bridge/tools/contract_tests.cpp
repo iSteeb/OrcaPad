@@ -276,7 +276,7 @@ static void test_md5_shim() {
 
 static void test_abi_version() {
     CHECK_EQ(orca_bridge_abi_version(), ORCA_BRIDGE_ABI_VERSION);
-    CHECK_EQ(ORCA_BRIDGE_ABI_VERSION, 39);
+    CHECK_EQ(ORCA_BRIDGE_ABI_VERSION, 40);
 }
 
 struct ProgressRecord {
@@ -3848,8 +3848,170 @@ static void test_exports(const std::string &dir, const std::string &data_dir) {
                                            (dir + "/x.gcode").c_str(),
                                            nullptr, nullptr, nullptr, &report));
     expect_code(p3, ORCA_STATUS_INVALID_ARGUMENT, "sliced 3mf wrong suffix");
+
+    // ABI v40: per-plate sliced 3MF (desktop "Export plate sliced file")
+    const std::string plate3mf = dir + "/plate0.gcode.3mf";
+    GUARD(p4, orca_plater_export_gcode_3mf_plate(plater, presets, 0,
+                                                 plate3mf.c_str(), nullptr,
+                                                 nullptr, nullptr, &report));
+    expect_ok(p4, "export plate sliced 3mf");
+    CHECK(report.gcode_bytes > 1000);
+    FILE *plate_file = fopen(plate3mf.c_str(), "rb");
+    CHECK(plate_file != nullptr);
+    if (plate_file) {
+        unsigned char magic[2] = {0, 0};
+        fread(&magic, 1, 2, plate_file);
+        fclose(plate_file);
+        CHECK(magic[0] == 'P' && magic[1] == 'K');
+    }
+    GUARD(p5, orca_plater_export_gcode_3mf_plate(plater, presets, 99,
+                                                 plate3mf.c_str(), nullptr,
+                                                 nullptr, nullptr, &report));
+    expect_code(p5, ORCA_STATUS_INVALID_ARGUMENT, "plate out of range");
+    // an existing but EMPTY plate is a typed INVALID_MODEL
+    orca_plate_id empty_plate = 0;
+    GUARD(p6, orca_plater_plate_add(plater, &empty_plate, &revision));
+    expect_ok(p6, "add empty plate");
+    GUARD(p7, orca_plater_export_gcode_3mf_plate(plater, presets, 1,
+                                                 plate3mf.c_str(), nullptr,
+                                                 nullptr, nullptr, &report));
+    expect_code(p7, ORCA_STATUS_INVALID_MODEL, "empty plate export");
     orca_slice_report_dispose(&report);
     orca_presets_free(presets);
+    orca_plater_free(plater);
+}
+
+// --- ABI v40: measure, simplify, subdivide, export-all STL --------------------
+
+static void test_measure_and_mesh_ops(const std::string &dir) {
+    orca_plater *plater = nullptr;
+    GUARD(g0, orca_plater_new(&plater));
+    expect_ok(g0, "plater_new");
+    orca_revision revision = 0;
+    const std::string cube = write_cube_stl(dir, "meshops_cube.stl");
+    orca_object_id object_id = 0;
+    GUARD(g1, import_one(plater, cube.c_str(), 100.0, 100.0, &object_id, &revision));
+    expect_ok(g1, "import cube");
+
+    // object + volume ids from the snapshot
+    orca_scene_snapshot snap;
+    memset(&snap, 0, sizeof snap);
+    GUARD(s0, orca_plater_snapshot(plater, &snap));
+    expect_ok(s0, "snapshot");
+    CHECK_EQ(snap.object_count, 1);
+    CHECK_EQ(snap.objects[0].index_count / 3, 12u); // 12 triangles
+    CHECK_EQ(snap.objects[0].volume_count, 1);
+    const orca_volume_id volume_id = snap.objects[0].volumes[0].id;
+    orca_scene_snapshot_dispose(&snap);
+
+    // --- measure: point pick at two corners of the bottom face -> distance
+    orca_measure *measure = nullptr;
+    GUARD(m0, orca_plater_object_measure(plater, object_id, &measure));
+    expect_ok(m0, "measure new");
+    CHECK(measure != nullptr);
+    orca_measure *bogus_measure = nullptr;
+    GUARD(m0b, orca_plater_object_measure(plater, 999999, &bogus_measure));
+    expect_code(m0b, ORCA_STATUS_NOT_FOUND, "measure missing object");
+    // import recenters the group: object space is -10..+10
+    orca_surface_feature corner_a{};
+    GUARD(m1, orca_measure_pick(measure, 0, -10.0, -10.0, -10.0, &corner_a));
+    expect_ok(m1, "pick corner a");
+    CHECK_EQ(corner_a.type, ORCA_MEASURE_POINT);
+    CHECK_NEAR(corner_a.point_a[0], -10.0, 1e-4);
+    CHECK_NEAR(corner_a.point_a[1], -10.0, 1e-4);
+    CHECK_NEAR(corner_a.point_a[2], -10.0, 1e-4);
+    orca_surface_feature corner_b{};
+    GUARD(m2, orca_measure_pick(measure, 0, 10.0, 10.0, -10.0, &corner_b));
+    expect_ok(m2, "pick corner b");
+    CHECK_EQ(corner_b.type, ORCA_MEASURE_POINT);
+    orca_measurement measurement;
+    memset(&measurement, 0, sizeof measurement);
+    GUARD(m3, orca_measure_between(measure, &corner_a, &corner_b, &measurement));
+    expect_ok(m3, "measure diagonal");
+    CHECK(measurement.has_distance);
+    CHECK_NEAR(measurement.distance, std::sqrt(800.0), 0.05); // 20 x 20 face
+    CHECK(measurement.has_xyz);
+    CHECK_NEAR(measurement.xyz[0], 20.0, 0.05);
+    CHECK_NEAR(measurement.xyz[1], 20.0, 0.05);
+    CHECK_NEAR(measurement.xyz[2], 0.0, 0.05);
+    GUARD(m3b, orca_measure_pick(measure, -1, 1.0, 1.0, 1.0, &corner_a));
+    expect_code(m3b, ORCA_STATUS_INVALID_ARGUMENT, "pick negative face");
+
+    // --- measure: plane pick mid-top-face -> plane feature with area
+    orca_surface_feature plane{};
+    GUARD(m4, orca_measure_pick(measure, 2, 0.0, 0.0, 10.0, &plane));
+    expect_ok(m4, "pick top plane");
+    CHECK_EQ(plane.type, ORCA_MEASURE_PLANE);
+    CHECK(plane.plane_index >= 0);
+    CHECK_NEAR(plane.normal[2], 1.0, 0.02); // +z top face
+    CHECK_NEAR(plane.area, 400.0, 25.0);   // 20 x 20mm face
+    orca_measurement plane_to_point;
+    memset(&plane_to_point, 0, sizeof plane_to_point);
+    GUARD(m5, orca_measure_between(measure, &plane, &corner_a, &plane_to_point));
+    expect_ok(m5, "plane to point");
+    CHECK(plane_to_point.has_distance || plane_to_point.has_xyz);
+    orca_measure_dispose(measure);
+
+    // --- simplify: quadric edge collapse on the single volume
+    uint32_t triangles = 0;
+    GUARD(q0, orca_plater_volume_simplify(plater, object_id, volume_id, 1, 12,
+                                           0.0, &triangles, &revision));
+    expect_code(q0, ORCA_STATUS_INVALID_ARGUMENT, "simplify to current count");
+    GUARD(q0b, orca_plater_volume_simplify(plater, object_id, 999999, 1, 6,
+                                            0.0, &triangles, &revision));
+    expect_code(q0b, ORCA_STATUS_NOT_FOUND, "simplify missing volume");
+    GUARD(q1, orca_plater_volume_simplify(plater, object_id, volume_id, 1, 6,
+                                          0.0, &triangles, &revision));
+    expect_ok(q1, "simplify to six faces");
+    CHECK(triangles >= 4);
+    CHECK(triangles < 12);
+    memset(&snap, 0, sizeof snap);
+    GUARD(q2, orca_plater_snapshot(plater, &snap));
+    expect_ok(q2, "snapshot after simplify");
+    CHECK_EQ(snap.objects[0].index_count / 3, triangles);
+    orca_scene_snapshot_dispose(&snap);
+    GUARD(q3, orca_plater_undo(plater, &revision));
+    expect_ok(q3, "undo simplify");
+    memset(&snap, 0, sizeof snap);
+    GUARD(q4, orca_plater_snapshot(plater, &snap));
+    expect_ok(q4, "snapshot after undo");
+    CHECK_EQ(snap.objects[0].index_count / 3, 12u);
+    orca_scene_snapshot_dispose(&snap);
+
+    // --- subdivide: igl Loop, exactly 4x faces, undo restores
+    GUARD(b0, orca_plater_volume_subdivide(plater, object_id, 999999,
+                                            &triangles, &revision));
+    expect_code(b0, ORCA_STATUS_NOT_FOUND, "subdivide missing volume");
+    GUARD(b1, orca_plater_volume_subdivide(plater, object_id, volume_id,
+                                            &triangles, &revision));
+    expect_ok(b1, "subdivide");
+    CHECK_EQ(triangles, 48u);
+    GUARD(b2, orca_plater_undo(plater, &revision));
+    expect_ok(b2, "undo subdivide");
+    memset(&snap, 0, sizeof snap);
+    GUARD(b3, orca_plater_snapshot(plater, &snap));
+    expect_ok(b3, "snapshot after subdivide undo");
+    CHECK_EQ(snap.objects[0].index_count / 3, 12u);
+    orca_scene_snapshot_dispose(&snap);
+
+    // --- export all objects as one STL: two objects -> one file
+    orca_object_id second = 0;
+    uint32_t second_count = 0;
+    GUARD(x0, orca_plater_import_model(plater, cube.c_str(), 140.0, 140.0,
+                                       &second, &second_count, &revision));
+    expect_ok(x0, "import second cube");
+    const std::string all_stl = dir + "/all.stl";
+    GUARD(x1, orca_plater_export_stl_all(plater, all_stl.c_str(), 1));
+    expect_ok(x1, "export stl all");
+    orca_object_id reimported = 0;
+    uint32_t reimported_count = 0;
+    GUARD(x2, orca_plater_import_model(plater, all_stl.c_str(), 100.0, 100.0,
+                                       &reimported, &reimported_count, &revision));
+    expect_ok(x2, "reimport all stl");
+    CHECK(reimported_count >= 1u);
+    GUARD(x3, orca_plater_export_stl_all(plater, nullptr, 1));
+    expect_code(x3, ORCA_STATUS_INVALID_ARGUMENT, "stl all null path");
+
     orca_plater_free(plater);
 }
 
@@ -4304,6 +4466,34 @@ static void test_custom_gcode(const std::string &dir, const std::string &data_di
     GUARD(e7, orca_plater_custom_gcode_item(plater, 3, &item));
     expect_code(e7, ORCA_STATUS_NOT_FOUND, "item out of range");
 
+    // ABI v40: in-place EDIT at a height (one undo step, keeps position)
+    GUARD(v40e, orca_plater_custom_gcode_edit(plater, 9.9, ORCA_CUSTOM_CUSTOM, 0,
+                                              "", "M999", &revision));
+    expect_code(v40e, ORCA_STATUS_NOT_FOUND, "edit absent height");
+    GUARD(v40e2, orca_plater_custom_gcode_edit(plater, 4.5, ORCA_CUSTOM_CUSTOM, 0,
+                                               "", "M300 S880 P100", &revision));
+    expect_ok(v40e2, "edit custom at 4.5");
+    GUARD(v40e3, orca_plater_custom_gcode_item(plater, 2, &item));
+    expect_ok(v40e3, "item 2 after edit");
+    CHECK_NEAR(item.print_z, 4.5, 1e-9);
+    CHECK_EQ(item.type, ORCA_CUSTOM_CUSTOM);
+    CHECK(strcmp(item.extra.data, "M300 S880 P100") == 0);
+    orca_custom_gcode_item_dispose(&item);
+    GUARD(v40e4, orca_plater_custom_gcode_edit(plater, 4.5, ORCA_CUSTOM_PAUSE_PRINT,
+                                                0, "", "Hold on", &revision));
+    expect_ok(v40e4, "edit type swap at 4.5");
+    GUARD(v40e6, orca_plater_undo(plater, &revision));
+    expect_ok(v40e6, "undo type swap");
+    GUARD(v40e7, orca_plater_custom_gcode_item(plater, 2, &item));
+    expect_ok(v40e7, "item 2 after undo");
+    CHECK_EQ(item.type, ORCA_CUSTOM_CUSTOM);
+    CHECK(strcmp(item.extra.data, "M300 S880 P100") == 0);
+    orca_custom_gcode_item_dispose(&item);
+    // restore the original text so the slice consumption below still sees it
+    GUARD(v40e8, orca_plater_custom_gcode_edit(plater, 4.5, ORCA_CUSTOM_CUSTOM,
+                                               0, "", "M300 S440 P200", &revision));
+    expect_ok(v40e8, "restore original custom text");
+
     // replace at the same height
     GUARD(g8, orca_plater_custom_gcode_add(plater, 1.2, ORCA_CUSTOM_COLOR_CHANGE, 1, "#00ff00",
                                            "", &revision));
@@ -4663,6 +4853,7 @@ int main() {
     test_custom_gcode(dir, data_dir);
     test_slice_cancel(dir);
     test_exports(dir, data_dir);
+    test_measure_and_mesh_ops(dir);
     test_cut(dir);
     test_config_io(dir, data_dir);
     test_painting(dir);

@@ -116,6 +116,16 @@ public final class EnginePlater: @unchecked Sendable {
         /// Desktop layer-range modifiers (ABI v39): REPLACES the object's
         /// height ranges in one undo step.
         case setHeightRanges(objectID: ObjectID, ranges: [HeightRange])
+        /// Desktop Simplify gizmo (ABI v40): quadric edge collapse on one
+        /// volume. useCount drives toward wantedCount triangles; otherwise
+        /// quality (maxError).
+        case simplifyVolume(objectID: ObjectID, volumeID: VolumeID,
+                            useCount: Bool, wantedCount: UInt32, maxError: Double)
+        /// Desktop "Subdivision mesh" (ABI v40): igl Loop, 4x faces.
+        case subdivideVolume(objectID: ObjectID, volumeID: VolumeID)
+        /// Desktop slider-tick EDIT (ABI v40): replaces the item at printZ.
+        case editCustomGcode(printZ: Double, kind: CustomGcodeKind,
+                             extruder: Int, color: String, extra: String)
     }
 
     /// One layer-height range (desktop height-range modifiers).
@@ -1081,6 +1091,39 @@ public final class EnginePlater: @unchecked Sendable {
                     operation: "set height ranges"
                 )
 
+            case .simplifyVolume(let objectID, let volumeID, let useCount,
+                                 let wantedCount, let maxError):
+                var triangles: UInt32 = 0
+                try BridgeResult.consume(
+                    orca_plater_volume_simplify(
+                        handle, objectID.rawValue, volumeID.rawValue,
+                        useCount ? 1 : 0, wantedCount, maxError,
+                        &triangles, &mutationRevision),
+                    operation: "simplify volume"
+                )
+
+            case .subdivideVolume(let objectID, let volumeID):
+                var triangles: UInt32 = 0
+                try BridgeResult.consume(
+                    orca_plater_volume_subdivide(
+                        handle, objectID.rawValue, volumeID.rawValue,
+                        &triangles, &mutationRevision),
+                    operation: "subdivide volume"
+                )
+
+            case .editCustomGcode(let printZ, let kind, let extruder,
+                                  let color, let extra):
+                try color.withCString { colorPointer in
+                    try extra.withCString { extraPointer in
+                        try BridgeResult.consume(
+                            orca_plater_custom_gcode_edit(
+                                handle, printZ, kind.rawValue, Int32(extruder),
+                                colorPointer, extraPointer, &mutationRevision),
+                            operation: "edit custom G-code"
+                        )
+                    }
+                }
+
             case .paintReset(let objectID, let volumeID, let layer):
                 try BridgeResult.consume(
                     orca_plater_volume_paint_reset(
@@ -1491,6 +1534,146 @@ public final class EnginePlater: @unchecked Sendable {
         }
     }
 
+    // MARK: Measure (ABI v40) — desktop GLGizmoMeasure
+
+    /// One picked surface feature, object space (mm).
+    public struct SurfaceFeature: Sendable, Equatable {
+        public enum Kind: UInt8, Sendable {
+            case point = 0
+            case edge = 1
+            case circle = 2
+            case plane = 3
+        }
+
+        public let kind: Kind
+        public let pointA: SIMD3<Double>
+        /// Edge second endpoint (other kinds: unused).
+        public let pointB: SIMD3<Double>
+        /// Circle centre->normal / plane normal.
+        public let normal: SIMD3<Double>
+        public let radius: Double
+        public let area: Double
+        public let planeIndex: Int32
+    }
+
+    /// Distance / per-axis delta / angle between two features.
+    public struct FeatureMeasurement: Sendable {
+        public let hasDistance: Bool
+        public let from: SIMD3<Double>
+        public let to: SIMD3<Double>
+        public let distance: Double
+        public let hasXYZ: Bool
+        public let xyz: SIMD3<Double>
+        public let hasAngle: Bool
+        public let angleRadians: Double
+    }
+
+    /// Engine Measure::Measuring over one object's merged mesh. Triangle
+    /// indices match the scene snapshot 1:1 (client picking feeds them
+    /// straight through). Rebuild when the object's mesh revision changes;
+    /// invalidate after document mutations that could replace the object.
+    public final class MeasureContext: @unchecked Sendable {
+        private var raw: OpaquePointer?
+        private let lock = NSLock()
+
+        fileprivate init(raw: OpaquePointer) {
+            self.raw = raw
+        }
+
+        deinit {
+            if let raw { orca_measure_dispose(raw) }
+        }
+
+        /// Desktop hover: the feature under a merged-mesh triangle point.
+        public func pick(faceIndex: Int32, point: SIMD3<Double>) throws -> SurfaceFeature {
+            try lock.withLock {
+                guard let raw else {
+                    throw BridgeError.local(
+                        .invalidHandle, operation: "measure pick",
+                        diagnostic: "measure context was disposed")
+                }
+                var feature = orca_surface_feature()
+                try BridgeResult.consume(
+                    orca_measure_pick(
+                        raw, faceIndex, point.x, point.y, point.z, &feature),
+                    operation: "measure pick"
+                )
+                return Self.decode(feature)
+            }
+        }
+
+        /// Desktop update_measurement_result: relation between features.
+        public func between(
+            _ a: SurfaceFeature, _ b: SurfaceFeature
+        ) throws -> FeatureMeasurement {
+            try lock.withLock {
+                guard let raw else {
+                    throw BridgeError.local(
+                        .invalidHandle, operation: "measure between",
+                        diagnostic: "measure context was disposed")
+                }
+                var rawA = Self.encode(a)
+                var rawB = Self.encode(b)
+                var measurement = orca_measurement()
+                try BridgeResult.consume(
+                    orca_measure_between(raw, &rawA, &rawB, &measurement),
+                    operation: "measure between"
+                )
+                return FeatureMeasurement(
+                    hasDistance: measurement.has_distance != 0,
+                    from: SIMD3(measurement.from.0, measurement.from.1,
+                                measurement.from.2),
+                    to: SIMD3(measurement.to.0, measurement.to.1,
+                             measurement.to.2),
+                    distance: measurement.distance,
+                    hasXYZ: measurement.has_xyz != 0,
+                    xyz: SIMD3(measurement.xyz.0, measurement.xyz.1,
+                               measurement.xyz.2),
+                    hasAngle: measurement.has_angle != 0,
+                    angleRadians: measurement.angle_radians)
+            }
+        }
+
+        private static func decode(_ raw: orca_surface_feature) -> SurfaceFeature {
+            SurfaceFeature(
+                kind: SurfaceFeature.Kind(rawValue: raw.type) ?? .point,
+                pointA: SIMD3(raw.point_a.0, raw.point_a.1, raw.point_a.2),
+                pointB: SIMD3(raw.point_b.0, raw.point_b.1, raw.point_b.2),
+                normal: SIMD3(raw.normal.0, raw.normal.1, raw.normal.2),
+                radius: raw.radius, area: raw.area, planeIndex: raw.plane_index)
+        }
+
+        private static func encode(_ feature: SurfaceFeature) -> orca_surface_feature {
+            var raw = orca_surface_feature()
+            raw.type = feature.kind.rawValue
+            raw.point_a = (feature.pointA.x, feature.pointA.y, feature.pointA.z)
+            raw.point_b = (feature.pointB.x, feature.pointB.y, feature.pointB.z)
+            raw.normal = (feature.normal.x, feature.normal.y, feature.normal.z)
+            raw.radius = feature.radius
+            raw.area = feature.area
+            raw.plane_index = feature.planeIndex
+            return raw
+        }
+    }
+
+    /// Builds the measure context over the object's merged mesh (CPU-heavy:
+    /// plane segmentation). Engine mutex serialized; not a mutation.
+    public func measureContext(objectID: ObjectID) throws -> MeasureContext {
+        try lock.withLock {
+            var raw: OpaquePointer?
+            try BridgeResult.consume(
+                orca_plater_object_measure(handle, objectID.rawValue, &raw),
+                operation: "measure context"
+            )
+            guard let raw else {
+                throw BridgeError.local(
+                    .internalInvariant, operation: "measure context",
+                    diagnostic: "Bridge returned no measure context")
+            }
+            return MeasureContext(raw: raw)
+        }
+    }
+
     // MARK: Exports (ABI v33)
 
     /// Desktop object-list "Export STL": one object's merged mesh (binary).
@@ -1534,6 +1717,42 @@ public final class EnginePlater: @unchecked Sendable {
                 }
                 try BridgeResult.consume(result, operation: "export sliced 3MF")
                 return try SliceResult(decoding: report, operation: "export sliced 3MF")
+            }
+        }
+    }
+
+    /// Desktop "Export all objects as one STL" (ABI v40): every object's
+    /// mesh through its first instance. "as STLs" loops exportSTL.
+    public func exportAllSTL(to path: String) throws {
+        try lock.withLock {
+            let result = path.withCString { pointer in
+                orca_plater_export_stl_all(handle, pointer, 1)
+            }
+            try BridgeResult.consume(result, operation: "export all STL")
+        }
+    }
+
+    /// Desktop "Export plate sliced file": the sliced-3MF export restricted
+    /// to ONE plate (ABI v40). Blocking; progress as exportGcode3mf.
+    public func exportGcode3mfPlate(
+        plateIndex: Int,
+        to path: String,
+        presets: EnginePresets,
+        job: SliceJob,
+        progress: @escaping @Sendable (Int, String) -> Void
+    ) throws -> SliceResult {
+        try Self.withLockedHandles(plater: self, presets: presets) { platerHandle, presetHandle in
+            try Self.withProgressContext(progress) { callback, context in
+                var report = orca_slice_report()
+                defer { orca_slice_report_dispose(&report) }
+                let result = path.withCString { outputPointer in
+                    orca_plater_export_gcode_3mf_plate(
+                        platerHandle, presetHandle, Int32(plateIndex),
+                        outputPointer, callback, context, job.handle, &report
+                    )
+                }
+                try BridgeResult.consume(result, operation: "export plate sliced 3MF")
+                return try SliceResult(decoding: report, operation: "export plate sliced 3MF")
             }
         }
     }

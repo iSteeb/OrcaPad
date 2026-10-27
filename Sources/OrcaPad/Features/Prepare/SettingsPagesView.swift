@@ -3,6 +3,7 @@
 
 import OrcaBridge
 import SwiftUI
+import UIKit
 
 /// Desktop-parity settings for one preset kind, embeddable inside an outer
 /// List: a page strip (Quality / Strength / Speed / …) and the selected
@@ -295,6 +296,9 @@ struct SettingsEditorRowView: View {
     @State private var showTooltip = false
     @State private var editingMultiline = false
     @State private var multilineDraft = ""
+    /// Caret bridge for the multiline editor (see CaretTextEditor).
+    @State private var multilineCaret = CaretTextEditorController()
+    @State private var caretPosition = NSRange(location: 0, length: 0)
 
     /// The row's value as a single swatch colour when it IS one (plain or
     /// engine-quoted `#rrggbb`); nil keeps the raw text editor only.
@@ -475,14 +479,15 @@ struct SettingsEditorRowView: View {
     private var multilineSheet: some View {
         NavigationStack {
             VStack(spacing: 0) {
-                TextEditor(text: $multilineDraft)
-                    .font(.callout.monospaced())
-                    .autocorrectionDisabled()
-                    .textInputAutocapitalization(.never)
-                    .padding(8)
+                CaretTextEditor(
+                    text: $multilineDraft,
+                    controller: multilineCaret,
+                    onSelectionChange: { caretPosition = $0 }
+                )
+                .frame(maxWidth: .infinity, minHeight: 220, maxHeight: .infinity)
                 Divider()
                 // Placeholder insertion note (see insertPlaceholder).
-                Text("Placeholders are inserted at the end of the text.")
+                Text("Placeholders insert at the caret \u{00b7} \(caretDescription)")
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -496,7 +501,7 @@ struct SettingsEditorRowView: View {
                     Button("Cancel") { editingMultiline = false }
                 }
                 // Board cycle-0.15: placeholder browser — common {tokens}
-                // grouped by topic, one tap inserts.
+                // grouped by topic, one tap inserts AT THE CARET.
                 ToolbarItem(placement: .primaryAction) {
                     Menu {
                         ForEach(GcodePlaceholders.groups) { group in
@@ -525,11 +530,155 @@ struct SettingsEditorRowView: View {
         }
     }
 
-    /// Inserts a placeholder token at the END of the draft: SwiftUI's
-    /// TextEditor exposes no cursor/selection position on iOS 17 (the
-    /// deployment target), so the document approximation from the spec is
-    /// used — the user moves the token afterwards if needed.
+    /// "Ln 3 · Col 12" from the caret position inside the draft (the
+    /// caret is a UTF-16 offset, matching UITextView's selection).
+    private var caretDescription: String {
+        let units = Array(multilineDraft.utf16)
+        let location = min(max(caretPosition.location, 0), units.count)
+        var line = 1
+        var lastNewline = -1
+        for (offset, unit) in units.enumerated() where offset < location {
+            if unit == 0x0A {
+                line += 1
+                lastNewline = offset
+            }
+        }
+        let column = location - lastNewline
+        return "Ln \(line) \u{00b7} Col \(column)"
+    }
+
+    /// Inserts a placeholder token at the CARET (replacing the active
+    /// selection): SwiftUI's TextEditor exposes no cursor/selection on
+    /// iOS 17 (the deployment target), so the multiline editor is a
+    /// UITextView wrapper (CaretTextEditor) whose controller performs the
+    /// insertion — no more append-at-the-end workaround.
     private func insertPlaceholder(_ token: String) {
-        multilineDraft.append(token)
+        multilineCaret.insertAtCursor(token)
+    }
+}
+
+// MARK: - Multiline G-code editor (caret-aware UITextView wrapper)
+
+/// Handle for the sheet's CaretTextEditor: typed text lands at the caret,
+/// and the sheet observes selection changes. Main-actor confined (UIKit).
+@MainActor
+final class CaretTextEditorController {
+    private weak var textView: UITextView?
+    private var onTextChange: (String) -> Void = { _ in }
+    private var onSelectionChange: (NSRange) -> Void = { _ in }
+
+    /// Wires the mounted text view + the forwarding closures (set by the
+    /// representable's makeUIView).
+    func attach(
+        _ view: UITextView,
+        onTextChange: @escaping (String) -> Void,
+        onSelectionChange: @escaping (NSRange) -> Void
+    ) {
+        textView = view
+        self.onTextChange = onTextChange
+        self.onSelectionChange = onSelectionChange
+    }
+
+    func detach() {
+        textView = nil
+    }
+
+    var selectedRange: NSRange {
+        textView?.selectedRange ?? NSRange(location: 0, length: 0)
+    }
+
+    /// Inserts `text` at the caret (replacing the active selection) and
+    /// reports the change through the same path as typing. Returns false
+    /// when no text view is mounted (nothing to insert into).
+    @discardableResult
+    func insertAtCursor(_ text: String) -> Bool {
+        guard let textView else { return false }
+        let range = textView.selectedRange
+        let updated = (textView.text as NSString).replacingCharacters(
+            in: range, with: text)
+        textView.text = updated
+        textView.selectedRange = NSRange(
+            location: range.location + (text as NSString).length, length: 0)
+        onTextChange(updated)
+        onSelectionChange(textView.selectedRange)
+        return true
+    }
+
+    /// Typing / programmatic text change (from the coordinator).
+    fileprivate func textChanged(_ raw: String) {
+        onTextChange(raw)
+    }
+
+    /// Caret / selection move (from the coordinator).
+    fileprivate func selectionChanged(_ range: NSRange) {
+        onSelectionChange(range)
+    }
+}
+
+/// UITextView wrapper for the multiline G-code editor: iOS 17's TextEditor
+/// cannot report the caret or insert at it, so this wrapper provides
+/// onSelectionChange + insertAtCursor. Styling mirrors the old TextEditor
+/// (callout-size monospaced, transparent background, padded, min height).
+/// UIViewRepresentable is @MainActor (Swift 6): the coordinator and the
+/// controller are main-actor confined with the UIKit entry points.
+private struct CaretTextEditor: UIViewRepresentable {
+    @Binding var text: String
+    let controller: CaretTextEditorController
+    var onSelectionChange: (NSRange) -> Void = { _ in }
+
+    @MainActor
+    final class Coordinator: NSObject, UITextViewDelegate {
+        let controller: CaretTextEditorController
+
+        init(controller: CaretTextEditorController) {
+            self.controller = controller
+        }
+
+        func textViewDidChange(_ textView: UITextView) {
+            controller.textChanged(textView.text)
+        }
+
+        func textViewDidChangeSelection(_ textView: UITextView) {
+            controller.selectionChanged(textView.selectedRange)
+        }
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(controller: controller)
+    }
+
+    func makeUIView(context: Context) -> UITextView {
+        let view = UITextView()
+        view.delegate = context.coordinator
+        view.font = .monospacedSystemFont(ofSize: 16, weight: .regular)
+        view.backgroundColor = .clear
+        view.isEditable = true
+        view.isSelectable = true
+        view.isScrollEnabled = true
+        view.autocorrectionType = .no
+        view.autocapitalizationType = .none
+        view.keyboardType = .asciiCapable
+        view.smartDashesType = .no
+        view.smartQuotesType = .no
+        view.textContainerInset = UIEdgeInsets(top: 10, left: 6, bottom: 10, right: 6)
+        controller.attach(
+            view,
+            onTextChange: { newValue in text = newValue },
+            onSelectionChange: onSelectionChange)
+        // Set the text AFTER attaching: the programmatic selection change
+        // then already flows into the sheet's caret readout.
+        view.text = text
+        return view
+    }
+
+    func updateUIView(_ view: UITextView, context: Context) {
+        if view.text != text {
+            view.text = text
+        }
+    }
+
+    static func dismantleUIView(_ uiView: UITextView, coordinator: Coordinator) {
+        uiView.delegate = nil
+        coordinator.controller.detach()
     }
 }

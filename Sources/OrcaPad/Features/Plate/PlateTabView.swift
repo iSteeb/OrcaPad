@@ -67,6 +67,10 @@ struct PlateTabView: View {
     @State private var showGridlines = true
     @State private var viewerMSAA = true
     @State private var showFPS = true
+    @State private var simplifyPresented = false
+    @State private var subdivideConfirmation = false
+    /// Measure readout units (panel rows + the 3D midpoint label share it).
+    @AppStorage("units.inches") private var measureInches = false
 
     private var document: DocumentStore { environment.document }
 
@@ -145,6 +149,14 @@ struct PlateTabView: View {
                 onSelectState: { paintState = $0; document.paintState = $0 },
                 onChangeRadius: { paintRadius = $0; document.paintRadiusMM = $0 },
                 onClear: { Task { await document.clearPaint() } }
+            )
+            .padding(.bottom, 8)
+        }
+        if gizmoMode == .measure, document.isMeasuring {
+            MeasurePanel(
+                features: document.measureFeatures,
+                result: document.measureResult,
+                onClear: { document.clearMeasure() }
             )
             .padding(.bottom, 8)
         }
@@ -271,6 +283,11 @@ struct PlateTabView: View {
             ObjectLabelsOverlay()
                 .ignoresSafeArea()
 
+            // Measure distance chip at the projected measurement midpoint
+            // (renderer-published; never intercepts canvas gestures).
+            MeasureLabelOverlay()
+                .ignoresSafeArea()
+
             VStack {
                 // One wide pill bar (all former left-rail + top controls):
                 // Undo / Redo | Menu (file + objects) | Arrange | Tools.
@@ -379,6 +396,31 @@ struct PlateTabView: View {
                 }
             }
         }
+        .sheet(isPresented: $simplifyPresented) {
+            SimplifySheet(
+                objectName: selectedObjectName,
+                triangleCount: (document.selection.flatMap { id in
+                    document.scene?.object(id: id.objectID)?.mesh.indices.count
+                } ?? 0) / 3,
+                isBusy: document.isBusy) { useCount, wantedCount, maxError in
+                simplifyPresented = false
+                Task {
+                    await document.simplifySelected(
+                        useCount: useCount, wantedCount: wantedCount, maxError: maxError)
+                }
+            }
+        }
+        .confirmationDialog(
+            "Subdivide \(selectedObjectName)?",
+            isPresented: $subdivideConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("Subdivide", role: .destructive) {
+                Task { await document.subdivideSelected() }
+            }
+        } message: {
+            Text("Multiplies triangles ×4 (12k → 48k). Paint annotations are cleared.")
+        }
     }
 
     private enum ImportMode: Equatable {
@@ -423,7 +465,10 @@ struct PlateTabView: View {
                     cameraPerspective: cameraPerspective,
                     showLabels: showObjectLabels,
                     showGridlines: showGridlines,
-                    showFPS: showFPS
+                    showFPS: showFPS,
+                    hiddenObjectIDs: document.hiddenObjectIDs,
+                    measureOverlay: gizmoMode == .measure
+                        ? document.measureOverlay(labelText: measureLabelText) : nil
                 ),
                 manipulation: CanvasManipulation(
                     onSelect: { document.select(objectID: $0, instanceID: $1) },
@@ -469,6 +514,9 @@ struct PlateTabView: View {
                 onEnd: { Task { await document.commitSelectedTransform() } },
                 onPaint: { hit, viewDir in
                     Task { await document.paint(at: hit, viewDir: viewDir) }
+                },
+                onMeasureTap: { face in
+                    Task { await document.handleMeasureTap(face) }
                 }
                 )
             )
@@ -608,20 +656,38 @@ struct PlateTabView: View {
                             }
                         }
                         Button {
-                            let name = projectName.isEmpty ? defaultProjectName : projectName
-                            Task { await document.export3mf(projectName: name) }
+                            Task { await document.exportAllSTL(projectName: exportName) }
+                        } label: {
+                            Label("All objects as one STL…", systemImage: "cube.fill")
+                        }
+                        Button {
+                            Task { await document.exportEachSTL() }
+                        } label: {
+                            Label("Each object as an STL…", systemImage: "square.grid.3x3")
+                        }
+                        Button {
+                            Task { await document.export3mf(projectName: exportName) }
                         } label: {
                             Label("Generic 3MF…", systemImage: "shippingbox")
                         }
                         if let engine = environment.presets.engineForSlicing {
                             Button {
-                                let name = projectName.isEmpty ? defaultProjectName : projectName
                                 Task {
                                     await document.exportGcode3mf(
-                                        projectName: name, presets: engine, bed: bed)
+                                        projectName: exportName, presets: engine, bed: bed)
                                 }
                             } label: {
-                                Label("Sliced 3MF (.gcode.3mf)…", systemImage: "internaldrive")
+                                Label("Sliced 3MF · all plates…", systemImage: "internaldrive")
+                            }
+                            .disabled(
+                                document.scene?.objects.isEmpty != false || document.isBusy)
+                            Button {
+                                Task {
+                                    await document.exportGcode3mfCurrentPlate(
+                                        projectName: exportName, presets: engine, bed: bed)
+                                }
+                            } label: {
+                                Label("Sliced 3MF · current plate…", systemImage: "square.split.bottomthird")
                             }
                             .disabled(
                                 document.scene?.objects.isEmpty != false || document.isBusy)
@@ -636,14 +702,28 @@ struct PlateTabView: View {
                     }
                     .disabled(document.scene?.objects.isEmpty != false || document.isBusy)
                     let recentProjects = EnginePaths.recentProjects()
-                    if !recentProjects.isEmpty {
+                    let recentModels = document.recentModels
+                    if !recentProjects.isEmpty || !recentModels.isEmpty {
                         Menu {
-                            ForEach(recentProjects, id: \.absoluteString) { url in
-                                Button(url.deletingPathExtension().lastPathComponent) {
-                                    if document.scene?.objects.isEmpty == false {
-                                        replaceConfirmation = url
-                                    } else {
-                                        Task { await environment.openProject(url) }
+                            if !recentProjects.isEmpty {
+                                Section("Projects") {
+                                    ForEach(recentProjects, id: \.absoluteString) { url in
+                                        Button(url.deletingPathExtension().lastPathComponent) {
+                                            if document.scene?.objects.isEmpty == false {
+                                                replaceConfirmation = url
+                                            } else {
+                                                Task { await environment.openProject(url) }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            if !recentModels.isEmpty {
+                                Section("Models") {
+                                    ForEach(recentModels) { file in
+                                        Button(file.url.deletingPathExtension().lastPathComponent) {
+                                            importRecentModel(file.url)
+                                        }
                                     }
                                 }
                             }
@@ -919,6 +999,46 @@ struct PlateTabView: View {
         return base.isEmpty ? "OrcaPad project" : base
     }
 
+    /// Units-formatted distance for the 3D midpoint label (MeasurePanel
+    /// applies the same conversion to its rows).
+    private var measureLabelText: String? {
+        guard let result = document.measureResult, result.hasDistance else { return nil }
+        if measureInches {
+            return String(format: "%.3f in", result.distance / 25.4)
+        }
+        return String(format: "%.2f mm", result.distance)
+    }
+
+    /// Name of the selected object (sheet/dialog titles).
+    private var selectedObjectName: String {
+        document.selection.flatMap { id in
+            document.scene?.object(id: id.objectID)?.name
+        } ?? "object"
+    }
+
+    /// The export file base name: the project name field or the first
+    /// object's name (the existing export call sites' shared rule).
+    private var exportName: String {
+        projectName.isEmpty ? defaultProjectName : projectName
+    }
+
+    /// Recent-models re-import (File menu ▸ Recent ▸ Models): the normal
+    /// import path, bed-centered on the current plate.
+    private func importRecentModel(_ url: URL) {
+        Task {
+            if !document.isReady {
+                await environment.bootstrap()
+            }
+            guard document.isReady else { return }
+            let bedCenter = document.currentPlateCenter
+                ?? environment.presets.printVolume.map {
+                    SIMD2<Double>($0.centerX, $0.centerY)
+                }
+                ?? .zero
+            await document.importModel(from: url, bedCenter: bedCenter)
+        }
+    }
+
     /// Board §wave-b/5: publishes per-object hulls to the renderer's
     /// overlay channel. Reloaded on every document revision while the
     /// toggle is on (and cleared when it is off / the plate empties).
@@ -1033,7 +1153,7 @@ struct PlateTabView: View {
     private func importHandy(_ entry: HandyModels.Entry) {
         let url: URL
         do {
-            url = try HandyModels.bundledURL(for: entry)
+            url = try HandyModels.url(for: entry)
         } catch {
             environment.status.report(
                 .document,
@@ -1159,8 +1279,8 @@ struct PlateTabView: View {
                     objectID: target.objectID,
                     objectName: target.objectName,
                     zSpan: target.zSpan,
-                    loadRanges: { [weak document] in
-                        await document?.heightRanges(objectID: target.objectID) ?? []
+                    loadRanges: {
+                        await document.heightRanges(objectID: target.objectID)
                     }
                 )
             }
@@ -1231,6 +1351,19 @@ extension PlateTabView {
                         .accessibilityLabel("Has modifiers")
                 }
                 Button {
+                    document.setHidden(
+                        !document.hiddenObjectIDs.contains(object.id),
+                        objectID: object.id
+                    )
+                } label: {
+                    Image(systemName: document.hiddenObjectIDs.contains(object.id)
+                          ? "eye.slash" : "eye")
+                }
+                .buttonStyle(.borderless)
+                .accessibilityLabel(
+                    document.hiddenObjectIDs.contains(object.id)
+                        ? "Show object" : "Hide object")
+                Button {
                     Task { await document.addInstance(to: object.id) }
                 } label: {
                     Image(systemName: "plus.square.on.square")
@@ -1253,6 +1386,7 @@ extension PlateTabView {
                 settingsRows(objectID: object.id, volumeID: nil)
             }
         }
+        .opacity(document.hiddenObjectIDs.contains(object.id) ? 0.45 : 1)
         .contentShape(Rectangle())
         .onTapGesture {
             if document.hasMultiSelection, let instanceID = object.instances.first?.id {
@@ -1410,6 +1544,37 @@ extension PlateTabView {
                 }
             } label: {
                 Label("Convert units", systemImage: "ruler")
+            }
+            // Desktop Simplify gizmo + "Subdivision mesh" (ABI v40): mesh
+            // operations on the SELECTED object (like Cut above).
+            Button {
+                simplifyPresented = true
+            } label: {
+                Label("Simplify…", systemImage: "arrow.down.right.and.arrow.up.left")
+            }
+            .disabled(document.selection == nil || document.isBusy)
+            Button {
+                subdivideConfirmation = true
+            } label: {
+                Label("Subdivide", systemImage: "plus.rectangle.on.rectangle")
+            }
+            .disabled(document.selection == nil || document.isBusy)
+            // Desktop GUI_Factories "Hide"/"Show": view-only visibility
+            // (hidden objects still slice — not the printable toggle).
+            Divider()
+            let objectHidden = document.hiddenObjectIDs.contains(object.id)
+            Button {
+                document.setHidden(!objectHidden, objectID: object.id)
+            } label: {
+                Label(objectHidden ? "Show" : "Hide",
+                      systemImage: objectHidden ? "eye" : "eye.slash")
+            }
+            if !document.hiddenObjectIDs.isEmpty {
+                Button {
+                    document.showAllHidden()
+                } label: {
+                    Label("Show all", systemImage: "eye.circle")
+                }
             }
             Divider()
             Button {
@@ -2429,6 +2594,13 @@ private struct ManipulationPanel: View {
                 )
                 .font(.caption)
                 .foregroundStyle(.secondary)
+            case .measure:
+                Label(
+                    "Tap two features (points, edges, circles or faces) to measure them.",
+                    systemImage: "ruler"
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
             case .select:
                 Label(
                     "Drag on the plate to select by rectangle. Long-press an object to add it to the selection.",
@@ -3001,6 +3173,10 @@ private struct ToolsPanel<Content: View>: View {
             }
         case .layFlat:
             Text("tap a face of the object")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+        case .measure:
+            Text("tap two features to measure")
                 .font(.callout)
                 .foregroundStyle(.secondary)
         case .select:

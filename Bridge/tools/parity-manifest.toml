@@ -278,12 +278,10 @@ evidence = ["abi:orca_plater_add_shape_object", "abi:orca_plater_volume_add_shap
 id = "plate.handy-models"
 area = "plate"
 title = "Handy models (bundled test models)"
-status = "partial"
+status = "done"
 desktop = ["context:Add Handy models", "context:{_(model.label)}@append_submenu_add_handy_model", "format:FT_GALLERY"]
-evidence = ["client:HandyModels"]
-work = "UI"
-gap = "three bundled models (calibration cube, cylinder, bridge strip) instead of desktop's Draco-encoded gallery; no tolerance-test part"
-priority = 32
+evidence = ["client:HandyModels", 'client:Tolerance Test']
+note = "five generated models: calibration cube, cylinder, bridge strip, Calibration Pyramid 20mm and the Tolerance Test 0.3-0.7 (peg row + ring-gauge row on a 25x25x5 plate) - desktop's Draco-encoded gallery stays deferred with DRC; the tolerance part is desktop's gallery equivalent"
 
 [[feature]]
 id = "plate.height-range"
@@ -335,10 +333,11 @@ evidence = ["abi:orca_plater_set_printable", 'client:func setPrintable\(', "clie
 id = "plate.visibility"
 area = "plate"
 title = "Hide / show parts"
-status = "missing"
+status = "done"
 desktop = ["context:Hide"]
-work = "UI"
-priority = 33
+evidence = ['client:hiddenObjectIDs', 'client:func setHidden\(', 'client:func setHiddenObjectIDs']
+note = "Desktop semantics kept exactly: GLVolume::visible is a VIEW-only flag (hidden objects still slice; not persisted in 3MF) - client-side hidden set drives renderer filtering + object-list eye icons, context Hide/Show + Show all"
+
 
 [[feature]]
 id = "plate.instance-to-object"
@@ -400,28 +399,35 @@ note = "CutUtils.cpp entered the closure (cut_mesh is TriangleMeshSlicer, no CGA
 id = "plate.simplify"
 area = "plate"
 title = "Simplify mesh"
-status = "missing"
+status = "done"
 desktop = ["gizmo:Simplify", "context:Simplify Model"]
-work = "Closure + UI"
-priority = 27
+evidence = ["abi:orca_plater_volume_simplify", "tests:orca_plater_volume_simplify",
+            'client:struct SimplifySheet', 'client:func simplifySelected']
+note = "ABI v40: engine its_quadric_edge_collapse on the volume mesh (count mode mirrors the desktop gizmo: unbounded error; quality mode bounds by max_error with the desktop presets 1e-3..1). SimplifySheet with ratio/count + quality; paint annotations cleared (re-triangulated); one undo step"
+
 
 [[feature]]
 id = "plate.subdivide"
 area = "plate"
 title = "Subdivide (smooth) mesh"
-status = "missing"
+status = "done"
 desktop = ["context:Subdivision mesh"]
-work = "Closure + UI"
-priority = 36
+evidence = ["abi:orca_plater_volume_subdivide", "tests:orca_plater_volume_subdivide",
+            'client:func subdivideSelected']
+note = "ABI v40: TriangleMeshDeal::smooth_triangle_mesh (igl Loop subdivision, 4x faces) in the closure; typed rejection past 1M faces (desktop warns, OrcaPad protects the device); paint annotations cleared; one undo step 'Subdivide' with x4 confirmation"
+
 
 [[feature]]
 id = "plate.measure"
 area = "plate"
 title = "Measure tool"
-status = "missing"
+status = "done"
 desktop = ["gizmo:Measure"]
-work = "Closure + UI"
-priority = 28
+evidence = ["abi:orca_plater_object_measure", "abi:orca_measure_pick",
+            "abi:orca_measure_between", "tests:orca_measure_pick",
+            'client:struct MeasurePanel', 'client:func handleMeasureTap']
+note = "ABI v40: engine Measure::Measuring over the merged mesh (object space, snapshot triangle indices 1:1); tap-pick point/edge/circle/plane features (plane area from the engine's triangle list), two picks -> distance/xyz/angle via get_measurement; on-canvas markers (point spheres, edge lines, circle outlines, translucent planes) + distance chip; mm/in units"
+
 
 [[feature]]
 id = "plate.assembly"
@@ -879,12 +885,10 @@ priority = 111
 id = "prepare.edit-gcode"
 area = "prepare"
 title = "Custom G-code editor with placeholder browser"
-status = "partial"
+status = "done"
 desktop = ["dialog:EditGCodeDialog"]
-evidence = ["client:multiline", "client:GcodePlaceholders"]
-gap = "browser inserts at the END of the draft — iOS 17 TextEditor exposes no cursor position"
-work = "UI"
-priority = 115
+evidence = ['client:CaretTextEditor', 'client:func insertAtCursor']
+note = "UITextView wrapper exposes the caret: the placeholder browser inserts at the cursor with a Ln/Col readout (iOS 17 TextEditor cannot)"
 
 [[feature]]
 id = "prepare.physical-printers"
@@ -983,15 +987,14 @@ note = "ABI v24 ticks (plate-bound since ABI v32): Preview Tick menu adds colour
 id = "preview.pause-custom-gcode"
 area = "preview"
 title = "Pause / custom G-code / template at layer"
-status = "partial"
+status = "done"
 desktop = ["slider:Add Pause", "slider:Delete Pause", "slider:Add Custom G-code", "slider:Edit Custom G-code",
            "slider:Delete Custom G-code", "slider:Add Custom Template", "slider:Delete Custom Template",
            "option:PausePrints", "option:CustomGCodes"]
-evidence = ["abi:orca_plater_custom_gcode_add", "client:struct CustomGcodeSheet",
-            "client:case .pausePrint"]
-work = "Bridge + UI"
-gap = "pause + custom G-code add/delete done (Preview Tick menu, tick sheet, toolpath markers); in-place EDIT of a custom tick is delete+re-add; custom TEMPLATES are a typed unsupported capability at the Bridge (preset-template store is desktop-side)"
-note = "Preview Tick menu (pause / custom G-code with text entry) at the top visible layer; tick sheet lists and deletes; markers render in the toolpath"
+evidence = ["abi:orca_plater_custom_gcode_add", "abi:orca_plater_custom_gcode_edit",
+            "tests:orca_plater_custom_gcode_edit", 'client:struct CustomGcodeTickEditorSheet',
+            'client:CustomGcodeTemplatesStore']
+note = "add/delete/pause/custom via the Tick menu; ABI v40 edit replaces a tick IN PLACE (one undo step, typed NOT_FOUND when it vanished); templates are a client-side snippet store (desktop stores them in app config) offered from the Tick menu and insertable as custom ticks; markers render in the toolpath"
 
 [[feature]]
 id = "preview.jump-to-layer"
@@ -1068,10 +1071,11 @@ note = "ABI v37: engine convex_hull_3d + volume centroid per object; Plate View-
 id = "preview.gcode-window"
 area = "preview"
 title = "G-code line window"
-status = "missing"
+status = "done"
 desktop = ["menu:Show G-code Window"]
-work = "Bridge + UI"
-priority = 208
+evidence = ['client:struct GcodeLineWindowSheet', 'client:GcodeLineIndexer']
+note = "Streamed two-pass indexing of the G-code file (1MiB FileHandle chunks; layer->byte-range from ;LAYER_CHANGE / ; Z_HEIGHT markers inside the viewed ORCA_PLATE section); ~200 monospaced lines per switch read from byte ranges only (50MB+ files never load), line numbers, layer picker, auto-follows the scrubber"
+
 
 [[feature]]
 id = "preview.export-toolpaths"
@@ -1094,13 +1098,13 @@ evidence = ["abi:orca_gcode_load", "client:fileImporter"]
 id = "preview.keyboard"
 area = "preview"
 title = "Hardware-keyboard shortcuts: preview sliders"
-status = "missing"
+status = "done"
 desktop = ["kb:Vertical slider - Move active thumb Up", "kb:Vertical slider - Move active thumb Down",
            "kb:Horizontal slider - Move active thumb Left", "kb:Horizontal slider - Move active thumb Right",
            "kb:Horizontal slider - Move to start position", "kb:Horizontal slider - Move to last position",
            "kb:Move slider 5x faster", "kb:On/Off one layer mode of the vertical slider", "kb:On/Off G-code window"]
-work = "UI"
-priority = 220
+evidence = ['client:keyboardShortcut\(\.upArrow', 'client:keyboardShortcut\("g"']
+note = "up/down = layer band (Shift x5, start/last reachable by holding), left/right = in-layer scrubber (Shift x5), 1 = one-layer mode, g = G-code window; all write the same store state the on-screen sliders use"
 
 # =========================================================================
 # Device / printing
@@ -1348,12 +1352,11 @@ evidence = ["client:ShareLink"]
 id = "files.export-sliced-3mf"
 area = "files"
 title = "Export sliced 3MF (.gcode.3mf)"
-status = "partial"
+status = "done"
 desktop = ["menu:Export plate sliced file", "menu:Export all plate sliced file", "format:FT_GCODE_3MF"]
-evidence = ["abi:orca_plater_export_gcode_3mf", 'client:func exportGcode3mf\(']
-work = "Bridge + UI"
-gap = "ALL-plates export only (desktop's per-plate export shares the same engine path but is not exposed separately)"
-note = "ABI v33 Plater::export_gcode_3mf parity: every non-empty plate sliced (slice-all core) and embedded via SaveStrategy::WithGcode|SkipModel with per-plate PlateData gcode_file/membership, secure config and plate thumbnail; single all-plates export (desktop's per-plate variant uses the same engine path)"
+evidence = ["abi:orca_plater_export_gcode_3mf", "abi:orca_plater_export_gcode_3mf_plate",
+            "tests:orca_plater_export_gcode_3mf_plate", 'client:func exportGcode3mfCurrentPlate']
+note = "ABI v33 all-plates + ABI v40 per-plate export (desktop 'Export plate sliced file'): the same slice-all core restricted to one plate (typed INVALID_MODEL on an empty plate), both exposed in the File export menu"
 
 [[feature]]
 id = "files.export-generic-3mf"
@@ -1369,12 +1372,12 @@ note = "ABI v33 store_3mf (geometry-only interchange 3MF); Documents/Exports, sh
 id = "files.export-stl"
 area = "files"
 title = "Export objects as STL"
-status = "partial"
+status = "done"
 desktop = ["context:Export as one STL", "context:Export as STLs", "menu:Export all objects as one STL", "menu:Export all objects as STLs"]
-evidence = ["abi:orca_plater_object_export_stl", 'client:func exportSTL\(']
-work = "Bridge + UI"
-gap = "per-object binary STL done (ABI v33, merged parts, re-import contract test); the export-all-objects variants are not implemented"
-note = "ABI v33 per-object binary STL (merged parts) with a re-import contract test"
+evidence = ["abi:orca_plater_object_export_stl", "abi:orca_plater_export_stl_all",
+            "tests:orca_plater_export_stl_all", 'client:func exportAllSTL',
+            'client:func exportEachSTL']
+note = "ABI v33 per-object binary STL (merged parts, re-import contract test) + ABI v40 export_stl over the whole Model (every object through its first instance, one file) and the per-object loop for 'as STLs'"
 
 [[feature]]
 id = "files.export-drc"
@@ -1400,11 +1403,10 @@ note = "Hand-parsed EOCD/central-directory + Apple Compression raw-DEFLATE (meth
 id = "files.recent"
 area = "files"
 title = "Recent projects / files"
-status = "partial"
+status = "done"
 desktop = ["menu:Recent files", "pref:Maximum recent files", "pref:Add STL/STEP files to recent files list"]
-evidence = ['client:func recentProjects\(']
-work = "UI"
-gap = "recent PROJECTS only (Documents/Projects by date); recent imported models and the max-count preference are not tracked"
+evidence = ['client:func recentProjects\(', 'client:var recentModels', 'client:recent.files.max']
+note = "recent projects (Documents/Projects by date) AND recent imported models (persisted URLs, max-count preference recent.files.max default 10, capped list); the Recent menu shows both sections, models re-import on tap (stale entries fail loudly through the import error path)"
 
 [[feature]]
 id = "files.backup"
@@ -1519,10 +1521,11 @@ note = "In-app About + third-party licenses (Gate E W3): AboutView from the Plat
 id = "app.tips"
 area = "app"
 title = "Tip of the day"
-status = "missing"
+status = "done"
 desktop = ["menu:Show Tip of the Day"]
-work = "UI"
-priority = 408
+evidence = ['client:struct TipsSheet', 'client:enum TipCatalog']
+note = "10 real gesture/feature tips, once-per-launch sheet when enabled, Next/Don't-show controls, button on the About screen"
+
 
 [[feature]]
 id = "app.mouse-preferences"

@@ -142,6 +142,9 @@ void orca_result_dispose(orca_result *result) {
 #include "libslic3r/NSVGUtils.hpp"
 #include "libslic3r/EmbossShape.hpp"
 #include "libslic3r/TextConfiguration.hpp"
+#include "libslic3r/Measure.hpp"
+#include "libslic3r/QuadricEdgeCollapse.hpp"
+#include "libslic3r/TriangleMeshDeal.hpp"
 
 #include "nlohmann/json.hpp"
 
@@ -3323,6 +3326,421 @@ orca_result orca_plater_add_svg_object(orca_plater *plater,
     });
 }
 
+static bool orcapad_custom_type(int32_t type, Slic3r::CustomGCode::Type *out);
+static Slic3r::CustomGCode::Info &orcapad_plate_custom_gcodes(orca_plater *plater);
+
+// --- measure (desktop GLGizmoMeasure, ABI v40) --------------------------------
+
+struct orca_measure {
+    Slic3r::Measure::Measuring measuring;
+};
+
+/// Builds the measuring context over the object's merged PART mesh (the
+/// same raw_mesh() the scene snapshot carries — client picking triangle
+/// indices map 1:1). Not a mutation.
+orca_result orca_plater_object_measure(orca_plater *plater,
+                                        orca_object_id object_id,
+                                        orca_measure **out) {
+    constexpr const char *operation = "orca_plater_object_measure";
+    if (out) *out = nullptr;
+    if (!plater)
+        return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation,
+                            "plater handle is null");
+    if (!out)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "output pointer is null");
+    return orcapad_guard(operation, [&]() -> orca_result {
+        Slic3r::ModelObject *object = plater_obj(plater, object_id);
+        if (!object)
+            return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation,
+                                "object was not found");
+        const indexed_triangle_set its = object->raw_mesh().its;
+        if (its.indices.size() < 4 || its.vertices.empty())
+            return orcapad_fail(ORCA_STATUS_INVALID_MODEL, operation,
+                                "object mesh is too small to measure");
+        *out = new orca_measure{Slic3r::Measure::Measuring(its)};
+        return orcapad_ok();
+    });
+}
+
+void orca_measure_dispose(orca_measure *measure) { delete measure; }
+
+static void orcapad_vec3_to_array(const Slic3r::Vec3d &v, double out[3]) {
+    out[0] = v.x();
+    out[1] = v.y();
+    out[2] = v.z();
+}
+
+/// Desktop hover: the surface feature under a merged-mesh triangle point.
+orca_result orca_measure_pick(orca_measure *measure,
+                              int32_t face_index,
+                              double px, double py, double pz,
+                              orca_surface_feature *out) {
+    constexpr const char *operation = "orca_measure_pick";
+    if (out)
+        *out = orca_surface_feature{};
+    if (!measure)
+        return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation,
+                            "measure handle is null");
+    if (!out)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "output pointer is null");
+    if (face_index < 0 || !std::isfinite(px) || !std::isfinite(py) ||
+        !std::isfinite(pz))
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "face index or point is invalid");
+    return orcapad_guard(operation, [&]() -> orca_result {
+        const std::optional<Slic3r::Measure::SurfaceFeature> feature =
+            measure->measuring.get_feature(
+                static_cast<size_t>(face_index),
+                Slic3r::Vec3d(px, py, pz), Slic3r::Transform3d::Identity(),
+                false);
+        if (!feature || feature->get_type() == Slic3r::Measure::SurfaceFeatureType::Undef)
+            return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation,
+                                "no surface feature under the point");
+        out->plane_index = -1;
+        switch (feature->get_type()) {
+        case Slic3r::Measure::SurfaceFeatureType::Point:
+            out->type = ORCA_MEASURE_POINT;
+            orcapad_vec3_to_array(feature->get_point(), out->point_a);
+            break;
+        case Slic3r::Measure::SurfaceFeatureType::Edge: {
+            out->type = ORCA_MEASURE_EDGE;
+            const auto [a, b] = feature->get_edge();
+            orcapad_vec3_to_array(a, out->point_a);
+            orcapad_vec3_to_array(b, out->point_b);
+            break;
+        }
+        case Slic3r::Measure::SurfaceFeatureType::Circle: {
+            out->type = ORCA_MEASURE_CIRCLE;
+            const auto [center, radius, normal] = feature->get_circle();
+            orcapad_vec3_to_array(center, out->point_a);
+            orcapad_vec3_to_array(normal, out->normal);
+            out->radius = radius;
+            break;
+        }
+        case Slic3r::Measure::SurfaceFeatureType::Plane: {
+            out->type = ORCA_MEASURE_PLANE;
+            const auto [index, normal, point] = feature->get_plane();
+            orcapad_vec3_to_array(point, out->point_a);
+            orcapad_vec3_to_array(normal, out->normal);
+            out->plane_index = index;
+            // Plane area from the engine's own triangle list for the plane.
+            const std::vector<int> &triangles =
+                measure->measuring.get_plane_triangle_indices(index);
+            double area = 0.0;
+            for (int triangle : triangles) {
+                const auto &face =
+                    measure->measuring.get_its().indices[
+                        static_cast<size_t>(triangle)];
+                const Slic3r::Vec3f &v0 =
+                    measure->measuring.get_its().vertices[face.x()];
+                const Slic3r::Vec3f &v1 =
+                    measure->measuring.get_its().vertices[face.y()];
+                const Slic3r::Vec3f &v2 =
+                    measure->measuring.get_its().vertices[face.z()];
+                area += 0.5 *
+                    (v1 - v0).cross(v2 - v0).norm();
+            }
+            out->area = area;
+            break;
+        }
+        default:
+            return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation,
+                                "no surface feature under the point");
+        }
+        return orcapad_ok();
+    });
+}
+
+/// Rebuilds the engine feature from ABI values (pick/between round trip).
+static Slic3r::Measure::SurfaceFeature orcapad_feature_from_abi(
+    const orca_surface_feature *feature) {
+    const Slic3r::Vec3d a(feature->point_a[0], feature->point_a[1],
+                          feature->point_a[2]);
+    const Slic3r::Vec3d b(feature->point_b[0], feature->point_b[1],
+                          feature->point_b[2]);
+    switch (feature->type) {
+    case ORCA_MEASURE_POINT:
+        return Slic3r::Measure::SurfaceFeature(a);
+    case ORCA_MEASURE_EDGE:
+        return Slic3r::Measure::SurfaceFeature(
+            Slic3r::Measure::SurfaceFeatureType::Edge, a, b);
+    case ORCA_MEASURE_CIRCLE:
+        return Slic3r::Measure::SurfaceFeature(
+            Slic3r::Measure::SurfaceFeatureType::Circle, a, b,
+            std::nullopt, feature->radius);
+    case ORCA_MEASURE_PLANE:
+    default:
+        return Slic3r::Measure::SurfaceFeature(
+            Slic3r::Measure::SurfaceFeatureType::Plane, a,
+            Slic3r::Vec3d(feature->normal[0], feature->normal[1],
+                          feature->normal[2]),
+            std::nullopt,
+            static_cast<double>(feature->plane_index));
+    }
+}
+
+/// Desktop update_measurement_result: distance / xyz / angle.
+orca_result orca_measure_between(const orca_measure *measure,
+                                 const orca_surface_feature *a,
+                                 const orca_surface_feature *b,
+                                 orca_measurement *out) {
+    constexpr const char *operation = "orca_measure_between";
+    if (out) *out = orca_measurement{};
+    if (!measure)
+        return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation,
+                            "measure handle is null");
+    if (!a || !b || !out)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "feature or output pointer is null");
+    if (a->type > ORCA_MEASURE_PLANE || b->type > ORCA_MEASURE_PLANE)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "unknown surface feature type");
+    return orcapad_guard(operation, [&]() -> orca_result {
+        const Slic3r::Measure::MeasurementResult result =
+            Slic3r::Measure::get_measurement(
+                orcapad_feature_from_abi(a), orcapad_feature_from_abi(b),
+                true);
+        if (!result.has_any_data())
+            return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation,
+                                "no measurable relation between the features");
+        if (result.distance_infinite) {
+            out->has_distance = 1;
+            out->distance = result.distance_infinite->dist;
+            orcapad_vec3_to_array(result.distance_infinite->from, out->from);
+            orcapad_vec3_to_array(result.distance_infinite->to, out->to);
+        } else if (result.distance_strict) {
+            out->has_distance = 1;
+            out->distance = result.distance_strict->dist;
+            orcapad_vec3_to_array(result.distance_strict->from, out->from);
+            orcapad_vec3_to_array(result.distance_strict->to, out->to);
+        }
+        if (result.distance_xyz) {
+            out->has_xyz = 1;
+            orcapad_vec3_to_array(*result.distance_xyz, out->xyz);
+        }
+        if (result.angle) {
+            out->has_angle = 1;
+            out->angle_radians = result.angle->angle;
+        }
+        return orcapad_ok();
+    });
+}
+
+// --- mesh simplify / subdivide (desktop Simplify + smooth mesh, ABI v40) -------
+
+/// Clears the volume's paint annotations: quadric collapse / subdivision
+/// re-triangulates, so per-triangle facet states no longer map (the same
+/// choice the desktop gizmo makes when it cannot restore the painter).
+static void orcapad_clear_paint_annotations(Slic3r::ModelVolume *volume) {
+    volume->supported_facets.reset();
+    volume->seam_facets.reset();
+    volume->mmu_segmentation_facets.reset();
+    volume->fuzzy_skin_facets.reset();
+}
+
+/// Desktop Simplify gizmo: its_quadric_edge_collapse over one volume.
+orca_result orca_plater_volume_simplify(orca_plater *plater,
+                                         orca_object_id object_id,
+                                         orca_volume_id volume_id,
+                                         uint8_t use_count,
+                                         uint32_t wanted_count,
+                                         double max_error,
+                                         uint32_t *out_triangles,
+                                         orca_revision *out_revision) {
+    constexpr const char *operation = "orca_plater_volume_simplify";
+    if (out_triangles) *out_triangles = 0;
+    if (out_revision) *out_revision = 0;
+    if (!plater)
+        return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation,
+                            "plater handle is null");
+    if (!out_triangles || !out_revision)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "output pointer is null");
+    if (!std::isfinite(max_error) || max_error < 0.0)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "max error must be finite and non-negative");
+    if (use_count && wanted_count < 4)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "wanted triangle count must be at least 4");
+    return orcapad_guard(operation, [&]() -> orca_result {
+        Slic3r::ModelObject *object = plater_obj(plater, object_id);
+        if (!object)
+            return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation,
+                                "object was not found");
+        Slic3r::ModelVolume *volume = plater_volume(object, volume_id);
+        if (!volume)
+            return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation,
+                                "volume was not found");
+        indexed_triangle_set its = volume->mesh().its;
+        if (its.indices.size() < 8)
+            return orcapad_fail(ORCA_STATUS_INVALID_MODEL, operation,
+                                "mesh is too small to simplify");
+        if (use_count && wanted_count >= its.indices.size())
+            return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                                "wanted triangle count is not below the "
+                                "current count");
+        // Count mode mirrors the desktop gizmo: no error bound (nullptr);
+        // quality mode bounds by the caller's max_error.
+        float error = static_cast<float>(max_error);
+        Slic3r::its_quadric_edge_collapse(
+            its, use_count ? wanted_count : 0,
+            use_count ? nullptr : &error, nullptr, nullptr);
+        if (its.indices.size() < 4 || its.vertices.empty())
+            return orcapad_fail(ORCA_STATUS_ENGINE_FAILURE, operation,
+                                "quadric collapse emptied the mesh");
+        if (!orcapad_revision_available(*plater))
+            return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
+                                "document revision is exhausted");
+        OrcapadMutation mutation(*plater, "Simplify");
+        volume->set_mesh(std::move(its));
+        orcapad_clear_paint_annotations(volume);
+        orcapad_touch_object(*plater, object_id);
+        *out_triangles =
+            static_cast<uint32_t>(volume->mesh().its.indices.size());
+        *out_revision = mutation.commit();
+        return orcapad_ok();
+    });
+}
+
+/// Desktop "Subdivision mesh" (ObjectList::smooth_mesh): igl Loop, 4x faces.
+orca_result orca_plater_volume_subdivide(orca_plater *plater,
+                                          orca_object_id object_id,
+                                          orca_volume_id volume_id,
+                                          uint32_t *out_triangles,
+                                          orca_revision *out_revision) {
+    constexpr const char *operation = "orca_plater_volume_subdivide";
+    if (out_triangles) *out_triangles = 0;
+    if (out_revision) *out_revision = 0;
+    if (!plater)
+        return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation,
+                            "plater handle is null");
+    if (!out_triangles || !out_revision)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "output pointer is null");
+    return orcapad_guard(operation, [&]() -> orca_result {
+        Slic3r::ModelObject *object = plater_obj(plater, object_id);
+        if (!object)
+            return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation,
+                                "object was not found");
+        Slic3r::ModelVolume *volume = plater_volume(object, volume_id);
+        if (!volume)
+            return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation,
+                                "volume was not found");
+        const size_t faces = volume->mesh().its.indices.size();
+        if (faces == 0)
+            return orcapad_fail(ORCA_STATUS_INVALID_MODEL, operation,
+                                "volume has no mesh");
+        if (faces > 1000000)
+            return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                                "desktop warns subdividing past 1M faces; "
+                                "OrcaPad rejects it to protect the device");
+        bool ok = false;
+        Slic3r::TriangleMesh result =
+            Slic3r::TriangleMeshDeal::smooth_triangle_mesh(volume->mesh(), ok);
+        if (!ok || result.its.indices.empty() || result.its.vertices.empty())
+            return orcapad_fail(ORCA_STATUS_ENGINE_FAILURE, operation,
+                                "subdivision produced no mesh");
+        if (!orcapad_revision_available(*plater))
+            return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
+                                "document revision is exhausted");
+        OrcapadMutation mutation(*plater, "Subdivide");
+        volume->set_mesh(std::move(result));
+        orcapad_clear_paint_annotations(volume);
+        orcapad_touch_object(*plater, object_id);
+        *out_triangles =
+            static_cast<uint32_t>(volume->mesh().its.indices.size());
+        *out_revision = mutation.commit();
+        return orcapad_ok();
+    });
+}
+
+/// Desktop "Export all objects as one STL": store_stl over the whole Model
+/// (each object through its first instance). Not a mutation.
+orca_result orca_plater_export_stl_all(orca_plater *plater,
+                                       const char *path, uint8_t binary) {
+    constexpr const char *operation = "orca_plater_export_stl_all";
+    if (!plater)
+        return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation,
+                            "plater handle is null");
+    if (!path || !path[0])
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "path is empty");
+    struct stat probe;
+    if (stat(path, &probe) == 0 && !S_ISREG(probe.st_mode))
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "output path exists and is not a file");
+    return orcapad_guard(operation, [&]() -> orca_result {
+        if (plater->model.objects.empty())
+            return orcapad_fail(ORCA_STATUS_INVALID_MODEL, operation,
+                                "document contains no model object");
+        if (!Slic3r::store_stl(path, &plater->model, binary != 0))
+            return orcapad_fail(ORCA_STATUS_IO_FAILURE, operation,
+                                "engine failed to write the STL");
+        return orcapad_ok();
+    });
+}
+
+/// Desktop slider-tick EDIT: replace one item in a single undo step.
+orca_result orca_plater_custom_gcode_edit(orca_plater *plater,
+                                           double print_z,
+                                           int32_t type, int32_t extruder,
+                                           const char *color, const char *extra,
+                                           orca_revision *out_revision) {
+    constexpr const char *operation = "orca_plater_custom_gcode_edit";
+    if (out_revision) *out_revision = 0;
+    if (!plater)
+        return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation,
+                            "plater handle is null");
+    if (!color || !extra || !out_revision)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "color, extra or output pointer is null");
+    if (!std::isfinite(print_z) || print_z <= 0.0)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "print height must be positive");
+    Slic3r::CustomGCode::Type mapped{};
+    if (!orcapad_custom_type(type, &mapped))
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "unknown custom G-code type");
+    if (type == ORCA_CUSTOM_TEMPLATE)
+        return orcapad_fail(ORCA_STATUS_UNSUPPORTED_CAPABILITY, operation,
+                            "templates are stored client-side and insert "
+                            "as custom ticks");
+    if ((type == ORCA_CUSTOM_COLOR_CHANGE || type == ORCA_CUSTOM_TOOL_CHANGE) &&
+        extruder < 1)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "colour and tool changes need a 1-based extruder");
+    if (type == ORCA_CUSTOM_CUSTOM &&
+        std::string(extra).find_first_not_of(" \t\r\n") == std::string::npos)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "custom G-code text is empty");
+    return orcapad_guard(operation, [&]() -> orca_result {
+        if (!orcapad_revision_available(*plater))
+            return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
+                                "document revision is exhausted");
+        Slic3r::CustomGCode::Info &info = orcapad_plate_custom_gcodes(plater);
+        auto &gcodes = info.gcodes;
+        auto at = std::find_if(gcodes.begin(), gcodes.end(),
+                               [&](const Slic3r::CustomGCode::Item &item) {
+                                   return std::abs(item.print_z - print_z) <
+                                          1e-6;
+                               });
+        if (at == gcodes.end())
+            return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation,
+                                "no custom G-code item at that height");
+        OrcapadMutation mutation(*plater, "Edit custom G-code");
+        at->type = mapped;
+        at->extruder = extruder;
+        at->color = color;
+        at->extra = extra;
+        info.mode = Slic3r::CustomGCode::Undef;
+        Slic3r::CustomGCode::check_mode_for_custom_gcode_per_print_z(info);
+        *out_revision = mutation.commit();
+        return orcapad_ok();
+    });
+}
+
 // --- painting (desktop painter gizmos, ABI v36) --------------------------------
 
 /// Paint layer -> the volume's FacetsAnnotation.
@@ -6351,12 +6769,14 @@ orca_result orca_project_export_3mf(orca_plater *plater, const char *path) {
 /// SkipModel, exactly the file printers and Bambu Studio load from USB.
 /// Presets null = the preset-free overlay path. Blocking; progress scales
 /// across plates like slice-all.
-static orca_result orcapad_export_gcode_3mf(orca_plater *plater,
-                                            orca_presets *presets,
-                                            const char *path,
-                                            orca_progress_fn progress, void *ctx,
-                                            orca_slice_job *job,
-                                            orca_slice_report *out_report) {
+static orca_result orcapad_export_gcode_3mf_core(orca_plater *plater,
+                                                orca_presets *presets,
+                                                int32_t only_plate,
+                                                const char *path,
+                                                orca_progress_fn progress,
+                                                void *ctx,
+                                                orca_slice_job *job,
+                                                orca_slice_report *out_report) {
     constexpr const char *operation = "orca_plater_export_gcode_3mf";
     if (!plater)
         return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation,
@@ -6371,9 +6791,19 @@ static orca_result orcapad_export_gcode_3mf(orca_plater *plater,
     if (plater->model.objects.empty())
         return orcapad_fail(ORCA_STATUS_INVALID_MODEL, operation,
                             "document contains no model object");
+    if (only_plate >= 0 &&
+        static_cast<size_t>(only_plate) >= plater->plates.size())
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "plate index is out of range");
     return orcapad_guard(operation, [&]() -> orca_result {
         std::vector<int32_t> targets;
         orcapad_plates_with_objects(*plater, &targets);
+        if (only_plate >= 0) {
+            const bool listed = std::find(targets.begin(), targets.end(),
+                                          only_plate) != targets.end();
+            targets.clear();
+            if (listed) targets.push_back(only_plate);
+        }
         if (targets.empty())
             return orcapad_fail(ORCA_STATUS_INVALID_MODEL, operation,
                                 "every plate is empty");
@@ -6501,8 +6931,26 @@ orca_result orca_plater_export_gcode_3mf(orca_plater *plater,
                                          orca_slice_job *job,
                                          orca_slice_report *out_report) {
     if (out_report) *out_report = orca_slice_report{};
-    return orcapad_export_gcode_3mf(plater, presets, path, progress, ctx,
-                                    job, out_report);
+    return orcapad_export_gcode_3mf_core(plater, presets, -1, path, progress,
+                                         ctx, job, out_report);
+}
+
+/// Desktop "Export plate sliced file": one plate only (ABI v40).
+orca_result orca_plater_export_gcode_3mf_plate(orca_plater *plater,
+                                                orca_presets *presets,
+                                                int32_t plate_index,
+                                                const char *path,
+                                                orca_progress_fn progress,
+                                                void *ctx,
+                                                orca_slice_job *job,
+                                                orca_slice_report *out_report) {
+    if (out_report) *out_report = orca_slice_report{};
+    if (!plater)
+        return orcapad_fail(ORCA_STATUS_INVALID_HANDLE,
+                            "orca_plater_export_gcode_3mf_plate",
+                            "plater handle is null");
+    return orcapad_export_gcode_3mf_core(plater, presets, plate_index, path,
+                                         progress, ctx, job, out_report);
 }
 
 // --- physical printers -----------------------------------------------------

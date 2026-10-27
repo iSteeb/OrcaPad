@@ -49,6 +49,12 @@ struct SceneSync {
     var showGridlines = true
     /// FPS readout in the renderer status line (OrcaPad quality option).
     var showFPS = true
+    /// View-hidden objects (desktop Hide/Show, view-only): the renderer
+    /// skips these objects' instances in every draw and pick path.
+    var hiddenObjectIDs: Set<ObjectID> = []
+    /// Measure-gizmo overlay (desktop GLGizmoMeasure, ABI v40): object-space
+    /// features + measurement line + label text; nil = no session.
+    var measureOverlay: Renderer.MeasureOverlay? = nil
 }
 
 /// Manipulation callbacks from the canvas gestures (engine-space units).
@@ -83,6 +89,10 @@ struct CanvasManipulation {
     /// tap (desktop painter strokes; one stroke per tap). LAST member: the
     /// memberwise init order follows declaration order.
     var onPaint: ((SIMD3<Double>, SIMD3<Double>) -> Void)? = nil
+    /// Measure mode (ABI v40): the merged-mesh triangle index + raw
+    /// OBJECT-space hit point of the tap — DocumentStore builds/picks the
+    /// measure session. LAST member like onPaint.
+    var onMeasureTap: ((Renderer.FacePick) -> Void)? = nil
 }
 
 /// SwiftUI wrapper around MTKView + gesture recognizers.
@@ -144,6 +154,10 @@ struct MetalCanvas: UIViewRepresentable {
         coordinator.renderer?.setLabelsEnabled(scene.showLabels)
         coordinator.renderer?.setGridlinesVisible(scene.showGridlines)
         coordinator.renderer?.setFPSVisible(scene.showFPS)
+        // Hidden objects + measure overlay follow the client stores.
+        coordinator.renderer?.setHiddenObjectIDs(scene.hiddenObjectIDs)
+        coordinator.renderer?.setMeasureOverlay(
+            scene.gizmoMode == .measure ? scene.measureOverlay : nil)
         let needsSceneApply =
             scene.snapshot.documentID != coordinator.lastDocumentID ||
             scene.snapshot.revision != coordinator.lastDocumentRevision ||
@@ -281,6 +295,14 @@ struct MetalCanvas: UIViewRepresentable {
                     let viewDir = simd_normalize(-SIMD3<Double>(
                         Double(forward.x), Double(forward.y), Double(forward.z)))
                     manipulation?.onPaint?(face.enginePoint, viewDir)
+                }
+                return
+            }
+            if renderer.gizmoMode == .measure {
+                // Measure: taps pick surface features (points / edges /
+                // circles / planes); everything else stays camera control.
+                if let face = renderer.pickFace(at: location, in: view) {
+                    manipulation?.onMeasureTap?(face)
                 }
                 return
             }
@@ -443,8 +465,9 @@ struct MetalCanvas: UIViewRepresentable {
             renderer: Renderer
         ) -> DragState {
             let mode = renderer.gizmoMode
-            if mode == .paint {
-                // Strokes are taps; dragging stays camera control.
+            if mode == .paint || mode == .measure {
+                // Strokes/feature picks are taps; dragging stays camera
+                // control.
                 return .orbit
             }
             // Rectangle selection: a drag STARTING ON an instance draws the
@@ -476,6 +499,8 @@ struct MetalCanvas: UIViewRepresentable {
             }
             switch mode {
             case .paint:
+                return .orbit  // handled above; kept for exhaustiveness
+            case .measure:
                 return .orbit  // handled above; kept for exhaustiveness
             case .layFlat:
                 // Touch-hover: dragging across the object highlights the

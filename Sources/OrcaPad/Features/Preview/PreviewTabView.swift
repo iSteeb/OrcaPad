@@ -23,8 +23,13 @@ struct PreviewTabView: View {
     /// Desktop layer ticks: custom G-code (pause / colour change / custom).
     @State private var ticksPresented = false
     @State private var ticks: [EnginePlater.CustomGcodeItem] = []
-    @State private var customTextPresented = false
-    @State private var customText = ""
+    /// The shared add/edit tick editor (nil = dismissed).
+    @State private var tickEditor: TickEditorTarget?
+    /// Desktop "From template…" snippets (UserDefaults-backed).
+    @State private var templates = CustomGcodeTemplatesStore()
+    @State private var templatesPresented = false
+    /// Desktop "Show G-code Window": the viewed layer's G-code text.
+    @State private var lineWindowPresented = false
     /// Board §wave-b/4: toolpath → OBJ export, shared through the system
     /// sheet (the URL only exists after a background write).
     @State private var sharingOBJ: ShareURL?
@@ -36,6 +41,13 @@ struct PreviewTabView: View {
     private struct ShareURL: Identifiable {
         let url: URL
         var id: String { url.absoluteString }
+    }
+
+    /// Sheet(item:) driver for the add-tick editor (the list sheet owns
+    /// its nested EDIT editor; this one presents only from the Tick menu).
+    private struct TickEditorTarget: Identifiable {
+        let height: Double
+        var id: String { "add-\(height)" }
     }
 
     var body: some View {
@@ -100,6 +112,15 @@ struct PreviewTabView: View {
         .sheet(isPresented: $ticksPresented) {
             CustomGcodeSheet(
                 ticks: ticks,
+                slotCount: max(environment.presets.filamentSlots.count, 1),
+                onSaveEdit: { tick, kind, extruder, color, extra in
+                    Task {
+                        await environment.document.editCustomGcode(
+                            printZ: tick.printZ, kind: kind,
+                            extruder: extruder, color: color, extra: extra)
+                        await reloadTicks()
+                    }
+                },
                 onDelete: { printZ in
                     Task {
                         await environment.document.deleteCustomGcode(printZ: printZ)
@@ -107,23 +128,31 @@ struct PreviewTabView: View {
                 }
             )
         }
+        .sheet(item: $tickEditor) { target in
+            CustomGcodeTickEditorSheet(
+                mode: .add(height: target.height),
+                slotCount: max(environment.presets.filamentSlots.count, 1),
+                onSave: { kind, extruder, color, extra in
+                    Task {
+                        await addTick(
+                            printZ: target.height, kind: kind, extruder: extruder,
+                            color: color, extra: extra)
+                    }
+                }
+            )
+        }
+        .sheet(isPresented: $templatesPresented) {
+            CustomGcodeTemplatesSheet(store: templates)
+        }
+        .sheet(isPresented: $lineWindowPresented) {
+            GcodeLineWindowSheet(store: store, url: store.loadedURL)
+        }
         .sheet(item: $sharingOBJ) { share in
             ActivityShareSheet(items: [share.url])
                 .presentationDetents([.medium, .large])
         }
         .sheet(isPresented: $summaryPresented) {
             PreviewSummarySheet(store: store)
-        }
-        .alert("Custom G-code", isPresented: $customTextPresented) {
-            TextField("G-code (e.g. M300 S440 P200)", text: $customText)
-            Button("Add") {
-                let text = customText
-                customText = ""
-                Task { await addTick(.custom, extruder: 0, extra: text) }
-            }
-            Button("Cancel", role: .cancel) { customText = "" }
-        } message: {
-            Text("Runs at the top visible layer of the selected plate after re-slicing.")
         }
     }
 
@@ -133,15 +162,9 @@ struct PreviewTabView: View {
         return Double(layer.z)
     }
 
-    private func reloadTicks() async {
-        if let items = await environment.document.customGcodes() {
-            ticks = items
-        }
-    }
-
-    private func addTick(
-        _ kind: EnginePlater.CustomGcodeKind, extruder: Int, extra: String = ""
-    ) async {
+    /// Template insert (desktop "custom template"): a CUSTOM tick carrying
+    /// the snippet's G-code, at the top visible layer's height.
+    private func addTemplateTick(_ template: CustomGcodeTemplatesStore.Template) async {
         guard let height = tickHeight else {
             environment.status.report(
                 .document, failure: .invariant(
@@ -149,9 +172,27 @@ struct PreviewTabView: View {
                     diagnostic: "no layer height to attach the tick to"))
             return
         }
+        await addTick(
+            printZ: height, kind: .custom, extruder: 0, color: "",
+            extra: template.gcode)
+    }
+
+    private func reloadTicks() async {
+        if let items = await environment.document.customGcodes() {
+            ticks = items
+        }
+    }
+
+    private func addTick(
+        printZ: Double,
+        kind: EnginePlater.CustomGcodeKind,
+        extruder: Int,
+        color: String,
+        extra: String
+    ) async {
         await environment.document.addCustomGcode(
-            printZ: height, kind: kind, extruder: extruder,
-            color: kind == .colorChange ? "#FF0000" : "", extra: extra)
+            printZ: printZ, kind: kind, extruder: extruder,
+            color: color, extra: extra)
         await reloadTicks()
     }
 
@@ -285,6 +326,57 @@ struct PreviewTabView: View {
                 bottomPanel
             }
         }
+        // Hardware-keyboard parity for the preview sliders (desktop arrow
+        // keys): hidden zero-size buttons — the same mechanism the Plate
+        // tab uses on its visible controls. Shortcuts live only on the
+        // ready viewer so the idle/failure screens never swallow keys.
+        .background {
+            keyboardShortcuts
+                .frame(width: 0, height: 0)
+                .opacity(0)
+                .accessibilityHidden(true)
+                .allowsHitTesting(false)
+        }
+    }
+
+    /// Up/down step the layer range (Shift = ×5), left/right step the
+    /// in-layer move scrubber, "1" toggles one-layer mode — all through
+    /// the same store setters the on-screen sliders write.
+    @ViewBuilder
+    private var keyboardShortcuts: some View {
+        Button("Layer up", action: { stepLayer(1) })
+            .keyboardShortcut(.upArrow, modifiers: [])
+        Button("Layer up ×5", action: { stepLayer(5) })
+            .keyboardShortcut(.upArrow, modifiers: .shift)
+        Button("Layer down", action: { stepLayer(-1) })
+            .keyboardShortcut(.downArrow, modifiers: [])
+        Button("Layer down ×5", action: { stepLayer(-5) })
+            .keyboardShortcut(.downArrow, modifiers: .shift)
+        Button("Move back", action: { scrubMoves(-1) })
+            .keyboardShortcut(.leftArrow, modifiers: [])
+        Button("Move back ×5", action: { scrubMoves(-5) })
+            .keyboardShortcut(.leftArrow, modifiers: .shift)
+        Button("Move forward", action: { scrubMoves(1) })
+            .keyboardShortcut(.rightArrow, modifiers: [])
+        Button("Move forward ×5", action: { scrubMoves(5) })
+            .keyboardShortcut(.rightArrow, modifiers: .shift)
+        Button("One layer mode", action: { store.oneLayerMode.toggle() })
+            .keyboardShortcut("1", modifiers: [])
+        Button("G-code window", action: { lineWindowPresented.toggle() })
+            .keyboardShortcut("g", modifiers: [])
+    }
+
+    /// Translates the visible layer band (top handle first, span kept);
+    /// in one-layer mode the store collapses it to single-layer walking.
+    private func stepLayer(_ delta: Int) {
+        let last = max(store.layerCount - 1, 0)
+        let span = store.upperLayer - store.lowerLayer
+        let target = min(max(store.upperLayer + delta, 0), last)
+        store.setLayerRange(lower: max(0, target - span), upper: target)
+    }
+
+    private func scrubMoves(_ delta: Int) {
+        store.setTopLayerProgress(store.topLayerProgress + delta)
     }
 
     private func layerLabel(_ index: Int) -> String {
@@ -373,6 +465,13 @@ struct PreviewTabView: View {
                     ChromeToolLabel(symbol: "timer", label: "Summary")
                 }
                 .buttonStyle(.plain)
+                // Desktop "Show G-code Window": the viewed layer's text.
+                Button {
+                    lineWindowPresented = true
+                } label: {
+                    ChromeToolLabel(symbol: "doc.plaintext", label: "G-code")
+                }
+                .buttonStyle(.plain)
                 Divider().frame(height: 28)
                 Button {
                     openPresented = true
@@ -441,26 +540,38 @@ struct PreviewTabView: View {
             .minimumScaleFactor(0.6)
             .frame(minWidth: 150, alignment: .trailing)
             // Desktop layer ticks: custom G-code at the top visible layer.
+            // One editor for every kind (add and edit-in-place), plus the
+            // reusable template snippets.
             Menu {
                 Button {
-                    Task { await addTick(.pausePrint, extruder: 0) }
-                } label: {
-                    Label("Pause print", systemImage: "pause.circle")
-                }
-                let slotCount = max(environment.presets.filamentSlots.count, 1)
-                Menu {
-                    ForEach(1...min(slotCount, 4), id: \.self) { extruder in
-                        Button("Extruder \(extruder)") {
-                            Task { await addTick(.colorChange, extruder: extruder) }
-                        }
+                    if let height = tickHeight {
+                        tickEditor = TickEditorTarget(height: height)
+                    } else {
+                        environment.status.report(
+                            .document, failure: .invariant(
+                                operation: "add custom G-code",
+                                diagnostic: "no layer height to attach the tick to"))
                     }
                 } label: {
-                    Label("Colour change", systemImage: "paintbrush")
+                    Label("Add tick\u{2026}", systemImage: "plus.circle")
+                }
+                if !templates.templates.isEmpty {
+                    Menu {
+                        ForEach(templates.templates) { template in
+                            Button(template.name) {
+                                Task {
+                                    await addTemplateTick(template)
+                                }
+                            }
+                        }
+                    } label: {
+                        Label("From template\u{2026}", systemImage: "doc.text")
+                    }
                 }
                 Button {
-                    customTextPresented = true
+                    templatesPresented = true
                 } label: {
-                    Label("Custom G-code\u{2026}", systemImage: "chevron.left.forwardslash.chevron.right")
+                    Label("Manage templates\u{2026}", systemImage: "list.bullet.rectangle")
                 }
             } label: {
                 ChromeToolLabel(symbol: "plus.circle", label: "Tick")
@@ -836,32 +947,48 @@ private struct PreviewSummarySheet: View {
     }
 }
 
-/// Desktop layer-tick list (custom G-code editor): one row per tick,
-/// swipe to delete (one undo step each).
+/// Desktop layer-tick list (custom G-code editor): one row per tick, tap
+/// to EDIT in place (the same editor sheet "Add tick\u{2026}" uses, nested
+/// over the list), swipe to delete (one undo step each).
 private struct CustomGcodeSheet: View {
     let ticks: [EnginePlater.CustomGcodeItem]
+    let slotCount: Int
+    /// Applies an edit (kind, extruder, color, extra) to `tick`.
+    let onSaveEdit: (
+        _ tick: EnginePlater.CustomGcodeItem,
+        _ kind: EnginePlater.CustomGcodeKind,
+        _ extruder: Int,
+        _ color: String,
+        _ extra: String
+    ) -> Void
     let onDelete: (Double) -> Void
 
     @Environment(\.dismiss) private var dismiss
+    @State private var editing: EnginePlater.CustomGcodeItem?
 
     var body: some View {
         NavigationStack {
             List {
                 ForEach(ticks) { tick in
-                    VStack(alignment: .leading, spacing: 2) {
-                        HStack {
-                            Label(tick.kind.label, systemImage: symbol(tick.kind))
-                            Spacer()
-                            Text(String(format: "%.2f mm", tick.printZ))
-                                .font(.caption.monospacedDigit())
-                                .foregroundStyle(.secondary)
-                        }
-                        if !detail(tick).isEmpty {
-                            Text(detail(tick))
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
+                    Button {
+                        editing = tick
+                    } label: {
+                        VStack(alignment: .leading, spacing: 2) {
+                            HStack {
+                                Label(tick.kind.label, systemImage: symbol(tick.kind))
+                                Spacer()
+                                Text(String(format: "%.2f mm", tick.printZ))
+                                    .font(.caption.monospacedDigit())
+                                    .foregroundStyle(.secondary)
+                            }
+                            if !detail(tick).isEmpty {
+                                Text(detail(tick))
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
                         }
                     }
+                    .buttonStyle(.plain)
                     .swipeActions {
                         Button(role: .destructive) {
                             onDelete(tick.printZ)
@@ -877,6 +1004,15 @@ private struct CustomGcodeSheet: View {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Done") { dismiss() }
                 }
+            }
+            .sheet(item: $editing) { tick in
+                CustomGcodeTickEditorSheet(
+                    mode: .edit(tick),
+                    slotCount: slotCount,
+                    onSave: { kind, extruder, color, extra in
+                        onSaveEdit(tick, kind, extruder, color, extra)
+                    }
+                )
             }
         }
         .presentationDetents([.medium, .large])

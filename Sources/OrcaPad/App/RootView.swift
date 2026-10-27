@@ -20,6 +20,10 @@ struct RootView: View {
     @State private var selectedTab: AppTab = .plate
     @State private var showDebugOverlay = false
     @State private var devicePresses: [Date] = []
+    /// Tip of the Day (app.tips): shown ONCE per launch when enabled.
+    @AppStorage(TipCatalog.Storage.enabledKey) private var tipsEnabled = true
+    @State private var tipsPresented = false
+    @State private var didPresentTipsThisLaunch = false
 
     /// Presses of the Device tab button needed to toggle the debug overlay,
     /// and the window they must fall within.
@@ -76,6 +80,17 @@ struct RootView: View {
         }
         .onOpenURL { url in
             handleOpenURL(url)
+        }
+        // Tip of the Day: one sheet per launch, only while enabled (the
+        // toggle lives in the sheet itself and in the About screen).
+        .onAppear {
+            if tipsEnabled, !didPresentTipsThisLaunch {
+                didPresentTipsThisLaunch = true
+                tipsPresented = true
+            }
+        }
+        .sheet(isPresented: $tipsPresented) {
+            TipsSheet()
         }
         .confirmationDialog(
             "Open project?",
