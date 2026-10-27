@@ -2,6 +2,18 @@
 
 ## PLAN
 
+- [2026-11-XX CODE] 0.17/0.18/0.19 COMPLETE (three release cycles, ABI
+  v40/v41/v42, parity 70% -> 88%; target 85% exceeded). Details in
+  OUTCOMES. Remaining missing: prepare.filament-grouping (multi-nozzle
+  niche), prepare.preset-sync (OrcaCloud account service),
+  app.localization (string extraction). 18 partials carry honest gaps
+  (painting circle-cursor/preview rendering, cut gizmo on-canvas drag,
+  VLH paint UI nuance, Creality/Bonjour discovery, appearance,
+  render-quality FXAA/SSAO, option-dependency full engine, emboss
+  on-surface). Next natural steps: device verification via TestFlight
+  (all three releases tagged), paint-panel fill tools UI (the Bridge
+  paint_fill ABI exists; client PaintPanel lacks the tool buttons).
+
 - [2026-10-26 USER] Roadmap: release 0.10 with Waves 0-2 (claims, UI wins,
   output/export) + ALL THREE flagships (custom G-code at layers, cut tool,
   config/preset-bundle import-export). PAINTING (seam/support/fuzzy/MMU)
@@ -262,6 +274,38 @@
   host key is `host_type`.
 
 ## OUTCOMES
+
+- [2026-11-XX] 0.17 milestone (ABI v40, parity 70% -> 77%): Measure
+  gizmo (engine Measuring over the merged mesh; snapshot triangle
+  indices 1:1), Simplify/Subdivide (QuadricEdgeCollapse + TriangleMeshDeal
+  w/ vendored igl/loop from upstream deps), hide/show (view-only, desktop
+  GLVolume semantics), export-all-STL, per-plate sliced 3MF, tick
+  edit-in-place + client template store, G-code line window (streamed
+  two-pass byte indexing), caret gcode editor, preview keys, tips,
+  handy tolerance test. 51,693 host checks PASS. release-0.17.0.
+- [2026-11-XX] 0.18 milestone (ABI v41, parity 77% -> 82%): VLH editor
+  (profile get/set/adaptive/smooth/adjust; Layers gizmo strip with
+  drag-adjust, local preview, engine max_z bit-compat), per-plate
+  settings (plate DynamicPrintConfig applied at every slice path,
+  PlateData.config 3MF round-trip), auto_drop floating + Drop
+  (Selection::drop parity: direct -min_z translate), create preset
+  wizards (typed option writes - filament_vendor is coStrings in this
+  fork, mismatched option<T>() returns nullptr = corruption; probe
+  first), INI import, bed shape, ramming editor, preferences screen,
+  interval autosave. 51,846 host checks PASS. release-0.18.0.
+- [2026-11-XX] 0.19 milestone (ABI v42, parity 82% -> 88%): brim ears
+  (engine brim_points + auto-generate over engine Polygon
+  douglas_peucker/convex/concave + slice_mesh_ex first layer), assembly
+  view + actions (get_assembly_action transforms), reload-from-disk
+  (iOS plain bookmarks + stable copies; .withSecurityScope is
+  macOS-only), cut connectors (ModelObject::cut_connectors consumed by
+  the existing cut), paint fill (seed/bucket), online profile updates
+  (check-version.orcaslicer.com + zip + bundle import), MKS TCP console
+  start (port 8080, M23/M24), SimplyPrint OAuth (PKCE, orcapad://
+  scheme) + 3DPrinterOS login flows, ColorPrint scheme, model links,
+  navigator cube, global keys. 51,900 host checks PASS.
+  release-0.19.0.
+
 
 - [2026-10-26] 0.15 + 0.16 milestone: parity 70% (85 done, 29 partial).
   Day total: 42% -> 70% across releases 0.8.0-0.16.0 (ABI v31 -> v39).

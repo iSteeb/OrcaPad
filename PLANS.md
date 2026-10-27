@@ -373,3 +373,24 @@ product decisions; appropriate desktop feature parity is still the destination.
   fuzzy-skin painting + MMU segmentation via TriangleSelector facet state
   through the Bridge, a touch brush gizmo, facet rendering, and slicer
   consumption. CAD/parametric editing stays deferred.
+- **0.17 — mesh & measurement** (ABI v40): Measure gizmo (engine
+  Measure::Measuring: point/edge/circle/plane picks, distance/xyz/angle,
+  on-canvas markers), Simplify (its_quadric_edge_collapse) + Subdivide
+  (igl Loop, TriangleMeshDeal in the closure), hide/show, export-all-STL
+  + per-plate sliced 3MF, tick edit-in-place + client templates, G-code
+  line window, caret gcode editor, preview keys, tips, tolerance test.
+  Parity 70% → 77%.
+- **0.18 — adaptive layers & plate control** (ABI v41): VLH editor
+  (layer_height_profile read/replace/adaptive/smooth/adjust + Layers
+  gizmo strip), per-plate settings (plate config overrides at slice +
+  3MF round-trip), variable Z + floating (auto_drop), create
+  filament/printer wizards (engine clone_presets), legacy INI import,
+  bed shape, ramming editor, preferences, interval autosave. 77% → 82%.
+- **0.19 — completeness sweep** (ABI v42): brim ears (engine
+  brim_points, btPainted slicing, auto-generate), assembly view
+  (assemble transforms + explode + align actions), reload from disk,
+  cut connectors, smart/bucket paint fill, online profile updates,
+  MKS TCP start + SimplyPrint OAuth + 3DPrinterOS flows, ColorPrint,
+  model links, 3D navigator cube, global keys. 82% → 88% (85% target
+  met). Remaining ❌: filament grouping (multi-nozzle niche), OrcaCloud
+  preset sync (proprietary account service), localization.
