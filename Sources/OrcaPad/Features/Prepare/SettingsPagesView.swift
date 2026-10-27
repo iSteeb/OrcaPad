@@ -400,6 +400,24 @@ struct SettingsEditorRowView: View {
 
     @ViewBuilder
     private var editor: some View {
+        // Desktop RammingDialog parity (prepare ramming): the ramming
+        // string gets its table editor — single-extruder (scalar) case
+        // only; multi-filament vectors keep the raw serialized editor
+        // (desktop's dialog also edits slot 0 only).
+        if row.key == RammingParametersEditor.optionKey,
+           row.behavesAsScalar,
+           RammingParametersEditor.Parameters.parse(row.value) != nil {
+            RammingParametersEditor(
+                value: row.value,
+                onCommit: onCommit
+            )
+        } else {
+            genericEditor
+        }
+    }
+
+    @ViewBuilder
+    private var genericEditor: some View {
         switch row.editorKind {
         case .perElement:
             PerElementVectorEditor(

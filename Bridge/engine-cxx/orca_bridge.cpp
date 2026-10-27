@@ -145,6 +145,7 @@ void orca_result_dispose(orca_result *result) {
 #include "libslic3r/Measure.hpp"
 #include "libslic3r/QuadricEdgeCollapse.hpp"
 #include "libslic3r/TriangleMeshDeal.hpp"
+#include "libslic3r/Slicing.hpp"
 
 #include "nlohmann/json.hpp"
 
@@ -1323,6 +1324,10 @@ struct OrcapadPlate {
     /// Instances pinned at lock time: assignment keeps them here even when
     /// they move; arrange skips them.
     std::vector<std::pair<orca_object_id, orca_instance_id>> pinned;
+    /// Desktop PartPlate::m_config subset (ABI v41): per-plate settings
+    /// applied as overrides of the global print config when this plate is
+    /// sliced; round-tripped through 3MF PlateData.
+    Slic3r::DynamicPrintConfig config;
 };
 
 struct orca_plater {
@@ -1690,6 +1695,9 @@ static bool orcapad_valid_transform(const orca_instance_transform &transform) {
 /// ModelObject::instance_bounding_box) touches z = 0.
 static void orcapad_rest_on_bed(Slic3r::ModelObject *object,
                                 Slic3r::ModelInstance *instance) {
+    // Desktop ModelInstance::auto_drop: a disabled flag keeps the instance
+    // floating after transforms (no snap-to-bed; under-bed allowed).
+    if (!instance->auto_drop) return;
     object->invalidate_bounding_box();
     const Slic3r::BoundingBoxf3 box = object->instance_bounding_box(*instance);
     if (!box.defined) return;
@@ -3741,6 +3749,530 @@ orca_result orca_plater_custom_gcode_edit(orca_plater *plater,
     });
 }
 
+// --- variable layer height + plate settings + drop (ABI v41) ------------------
+
+/// Full print config for VLH math: the presets session when present, else
+/// the preset-free overlay defaults (matching the slice paths).
+static Slic3r::DynamicPrintConfig orcapad_vlh_config(orca_presets *presets) {
+    return presets ? presets->bundle->full_config()
+                   : Slic3r::DynamicPrintConfig::full_print_config();
+}
+
+/// SlicingParameters exactly like the desktop layers editor
+/// (PrintObject::slicing_parameters over the full config).
+static Slic3r::SlicingParameters orcapad_slicing_parameters(
+    orca_presets *presets, const Slic3r::ModelObject &object) {
+    Slic3r::DynamicPrintConfig config = orcapad_vlh_config(presets);
+    Slic3r::ModelObject *mutable_object = const_cast<Slic3r::ModelObject *>(&object);
+    mutable_object->invalidate_bounding_box();
+    const float max_z = static_cast<float>(object.max_z());
+    return Slic3r::PrintObject::slicing_parameters(config, object, max_z,
+                                                   Slic3r::Vec3d::Zero());
+}
+
+/// The object's layer-height profile as flat (z, height) pairs.
+orca_result orca_plater_object_height_profile(
+    orca_plater *plater, orca_object_id object_id,
+    double **out_pairs, uint32_t *out_count) {
+    constexpr const char *operation = "orca_plater_object_height_profile";
+    if (out_pairs) *out_pairs = nullptr;
+    if (out_count) *out_count = 0;
+    if (!plater)
+        return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation,
+                            "plater handle is null");
+    if (!out_pairs || !out_count)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "output pointer is null");
+    return orcapad_guard(operation, [&]() -> orca_result {
+        Slic3r::ModelObject *object = plater_obj(plater, object_id);
+        if (!object)
+            return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation,
+                                "object was not found");
+        const std::vector<coordf_t> &profile = object->layer_height_profile.get();
+        if (profile.size() > std::numeric_limits<uint32_t>::max() / 2)
+            return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
+                                "layer-height profile is impossibly large");
+        const size_t count = profile.size();
+        double *pairs = static_cast<double *>(
+            count ? std::malloc(count * sizeof(double)) : nullptr);
+        if (count && !pairs)
+            return orcapad_fail(ORCA_STATUS_OUT_OF_MEMORY, operation,
+                                "could not allocate the profile");
+        for (size_t index = 0; index < count; ++index)
+            pairs[index] = static_cast<double>(profile[index]);
+        *out_pairs = pairs;
+        *out_count = static_cast<uint32_t>(count);
+        return orcapad_ok();
+    });
+}
+
+void orca_height_profile_dispose(double *pairs) { std::free(pairs); }
+
+static bool orcapad_valid_height_profile(const double *pairs, uint32_t count,
+                                         double max_z) {
+    if (count < 4 || count % 2 != 0 || count > (1u << 16)) return false;
+    for (uint32_t index = 0; index < count; ++index)
+        if (!std::isfinite(pairs[index])) return false;
+    if (pairs[0] != 0.0) return false;
+    for (uint32_t index = 2; index + 1 < count; index += 2)
+        if (pairs[index] <= pairs[index - 2]) return false;
+    for (uint32_t index = 1; index < count; index += 2)
+        if (pairs[index] <= 0.0) return false;
+    return std::abs(pairs[count - 2] - max_z) < 1e-6;
+}
+
+/// Commits a computed profile vector (engine coordf_t) as one undo step.
+static orca_result orcapad_commit_height_profile(
+    orca_plater *plater, Slic3r::ModelObject *object,
+    std::vector<coordf_t> profile, const char *label,
+    double **out_pairs, uint32_t *out_count, orca_revision *out_revision) {
+    if (profile.size() < 4 || profile.size() % 2 != 0)
+        return orcapad_fail(ORCA_STATUS_ENGINE_FAILURE, label,
+                            "engine produced an invalid layer-height profile");
+    object->layer_height_profile.set(profile);
+    if (out_pairs && out_count) {
+        double *pairs = static_cast<double *>(
+            std::malloc(profile.size() * sizeof(double)));
+        if (!pairs)
+            return orcapad_fail(ORCA_STATUS_OUT_OF_MEMORY, label,
+                                "could not allocate the profile copy");
+        for (size_t index = 0; index < profile.size(); ++index)
+            pairs[index] = static_cast<double>(profile[index]);
+        *out_pairs = pairs;
+        *out_count = static_cast<uint32_t>(profile.size());
+    }
+    OrcapadMutation mutation(*plater, label);
+    orcapad_touch_object(*plater, object->id().id);
+    *out_revision = mutation.commit();
+    return orcapad_ok();
+}
+
+orca_result orca_plater_object_set_height_profile(
+    orca_plater *plater, orca_object_id object_id,
+    const double *pairs, uint32_t count, orca_revision *out_revision) {
+    constexpr const char *operation = "orca_plater_object_set_height_profile";
+    if (out_revision) *out_revision = 0;
+    if (!plater)
+        return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation,
+                            "plater handle is null");
+    if (!out_revision)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "output pointer is null");
+    if (count && !pairs)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "profile array is null but count is positive");
+    return orcapad_guard(operation, [&]() -> orca_result {
+        Slic3r::ModelObject *object = plater_obj(plater, object_id);
+        if (!object)
+            return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation,
+                                "object was not found");
+        object->invalidate_bounding_box();
+        if (count == 0) {
+            // desktop reset: empty profile = uniform slicing
+            object->layer_height_profile.clear();
+            OrcapadMutation mutation(*plater, "Variable layer height");
+            orcapad_touch_object(*plater, object_id);
+            *out_revision = mutation.commit();
+            return orcapad_ok();
+        }
+        const double max_z = object->max_z();
+        if (!orcapad_valid_height_profile(pairs, count, max_z))
+            return orcapad_fail(
+                               ORCA_STATUS_INVALID_ARGUMENT, operation,
+                               "profile needs even count >= 4, z from 0 strictly "
+                               "ascending to the object top, heights > 0");
+        if (!orcapad_revision_available(*plater))
+            return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
+                                "document revision is exhausted");
+        std::vector<coordf_t> profile;
+        profile.reserve(count);
+        for (uint32_t index = 0; index < count; ++index)
+            profile.push_back(static_cast<coordf_t>(pairs[index]));
+        object->layer_height_profile.set(profile);
+        OrcapadMutation mutation(*plater, "Variable layer height");
+        orcapad_touch_object(*plater, object_id);
+        *out_revision = mutation.commit();
+        return orcapad_ok();
+    });
+}
+
+orca_result orca_plater_object_height_profile_adaptive(
+    orca_plater *plater, orca_presets *presets, orca_object_id object_id,
+    double quality_factor, double **out_pairs, uint32_t *out_count,
+    orca_revision *out_revision) {
+    constexpr const char *operation =
+        "orca_plater_object_height_profile_adaptive";
+    if (out_pairs) *out_pairs = nullptr;
+    if (out_count) *out_count = 0;
+    if (out_revision) *out_revision = 0;
+    if (!plater)
+        return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation,
+                            "plater handle is null");
+    if (!out_pairs || !out_count || !out_revision)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "output pointer is null");
+    if (!std::isfinite(quality_factor) || quality_factor < -0.1 ||
+        quality_factor > 1.0)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "quality factor must be within -0.1..1");
+    return orcapad_guard(operation, [&]() -> orca_result {
+        Slic3r::ModelObject *object = plater_obj(plater, object_id);
+        if (!object)
+            return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation,
+                                "object was not found");
+        if (!orcapad_revision_available(*plater))
+            return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
+                                "document revision is exhausted");
+        const Slic3r::SlicingParameters params =
+            orcapad_slicing_parameters(presets, *object);
+        std::vector<coordf_t> profile = Slic3r::layer_height_profile_adaptive(
+            params, *object, static_cast<float>(quality_factor));
+        return orcapad_commit_height_profile(
+            plater, object, std::move(profile), "Variable layer height",
+            out_pairs, out_count, out_revision);
+    });
+}
+
+orca_result orca_plater_object_height_profile_smooth(
+    orca_plater *plater, orca_presets *presets, orca_object_id object_id,
+    uint32_t radius, uint8_t keep_min, double **out_pairs, uint32_t *out_count,
+    orca_revision *out_revision) {
+    constexpr const char *operation =
+        "orca_plater_object_height_profile_smooth";
+    if (out_pairs) *out_pairs = nullptr;
+    if (out_count) *out_count = 0;
+    if (out_revision) *out_revision = 0;
+    if (!plater)
+        return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation,
+                            "plater handle is null");
+    if (!out_pairs || !out_count || !out_revision)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "output pointer is null");
+    if (radius == 0 || radius > 200)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "smoothing radius must be 1..200 layers");
+    return orcapad_guard(operation, [&]() -> orca_result {
+        Slic3r::ModelObject *object = plater_obj(plater, object_id);
+        if (!object)
+            return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation,
+                                "object was not found");
+        const std::vector<coordf_t> current = object->layer_height_profile.get();
+        if (current.size() < 4)
+            return orcapad_fail(ORCA_STATUS_INVALID_MODEL, operation,
+                                "object has no layer-height profile to smooth");
+        if (!orcapad_revision_available(*plater))
+            return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
+                                "document revision is exhausted");
+        const Slic3r::SlicingParameters params =
+            orcapad_slicing_parameters(presets, *object);
+        std::vector<double> doubled(current.begin(), current.end());
+        const Slic3r::HeightProfileSmoothingParams smoothing(
+            radius, keep_min != 0);
+        std::vector<double> smoothed =
+            Slic3r::smooth_height_profile(doubled, params, smoothing);
+        std::vector<coordf_t> profile(smoothed.begin(), smoothed.end());
+        return orcapad_commit_height_profile(
+            plater, object, std::move(profile), "Variable layer height",
+            out_pairs, out_count, out_revision);
+    });
+}
+
+orca_result orca_plater_object_height_profile_adjust(
+    orca_plater *plater, orca_presets *presets, orca_object_id object_id,
+    double z, double thickness_delta, double band_width, int32_t action,
+    orca_revision *out_revision) {
+    constexpr const char *operation =
+        "orca_plater_object_height_profile_adjust";
+    if (out_revision) *out_revision = 0;
+    if (!plater)
+        return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation,
+                            "plater handle is null");
+    if (!out_revision)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "output pointer is null");
+    if (!std::isfinite(z) || !std::isfinite(thickness_delta) ||
+        !std::isfinite(band_width))
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "z, thickness delta and band width must be finite");
+    if (action < 0 || action > 3)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "action must be 0 increase, 1 decrease, "
+                            "2 reduce, 3 smooth");
+    if (thickness_delta <= 0.0 || band_width <= 0.0)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "thickness delta and band width must be positive");
+    return orcapad_guard(operation, [&]() -> orca_result {
+        Slic3r::ModelObject *object = plater_obj(plater, object_id);
+        if (!object)
+            return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation,
+                                "object was not found");
+        std::vector<coordf_t> profile = object->layer_height_profile.get();
+        if (profile.size() < 4)
+            return orcapad_fail(ORCA_STATUS_INVALID_MODEL, operation,
+                                "object has no layer-height profile to adjust");
+        if (!orcapad_revision_available(*plater))
+            return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
+                                "document revision is exhausted");
+        const Slic3r::SlicingParameters params =
+            orcapad_slicing_parameters(presets, *object);
+        Slic3r::adjust_layer_height_profile(
+            *object, params, profile, static_cast<coordf_t>(z),
+            static_cast<coordf_t>(thickness_delta),
+            static_cast<coordf_t>(band_width),
+            static_cast<Slic3r::LayerHeightEditActionType>(action));
+        return orcapad_commit_height_profile(
+            plater, object, std::move(profile), "Variable layer height",
+            nullptr, nullptr, out_revision);
+    });
+}
+
+// --- per-plate settings (desktop PartPlate::m_config, ABI v41) ----------------
+
+/// Writes one plate-settings key into the plate config (or erases it for
+/// the -1 / 0-count "follow the project default" state).
+template <typename OptionT, typename ValueT>
+static void orcapad_plate_key(Slic3r::DynamicPrintConfig &config,
+                              const char *key, bool set, ValueT value) {
+    if (set)
+        config.set_key_value(key, new OptionT(value));
+    else
+        config.erase(key);
+}
+
+static const Slic3r::DynamicPrintConfig &orcapad_plate_config(
+    orca_plater *plater, orca_plate_id plate_id, const OrcapadPlate **out) {
+    static const Slic3r::DynamicPrintConfig empty;
+    for (const OrcapadPlate &plate : plater->plates)
+        if (plate.id == plate_id) {
+            if (out) *out = &plate;
+            return plate.config;
+        }
+    if (out) *out = nullptr;
+    return empty;
+}
+
+static OrcapadPlate *orcapad_plate_mutable(orca_plater *plater,
+                                           orca_plate_id plate_id) {
+    for (OrcapadPlate &plate : plater->plates)
+        if (plate.id == plate_id) return &plate;
+    return nullptr;
+}
+
+orca_result orca_plater_plate_settings(orca_plater *plater,
+                                        orca_plate_id plate_id,
+                                        orca_plate_settings *out) {
+    constexpr const char *operation = "orca_plater_plate_settings";
+    if (out)
+        *out = orca_plate_settings{};
+    for (auto &slot : out->first_layer_sequence) slot = -1;
+    for (auto &slot : out->other_layer_sequence) slot = -1;
+    if (!plater)
+        return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation,
+                            "plater handle is null");
+    if (!out)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "output pointer is null");
+    return orcapad_guard(operation, [&]() -> orca_result {
+        const OrcapadPlate *plate = nullptr;
+        const Slic3r::DynamicPrintConfig &config =
+            orcapad_plate_config(plater, plate_id, &plate);
+        if (!plate)
+            return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation,
+                                "plate was not found");
+        out->bed_type = -1;
+        out->print_sequence = -1;
+        out->spiral_mode = -1;
+        out->first_layer_sequence_count = 0;
+        out->other_layer_sequence_count = 0;
+        if (const auto *bed =
+                config.option<Slic3r::ConfigOptionEnum<Slic3r::BedType>>(
+                    "curr_bed_type"))
+            out->bed_type = static_cast<int32_t>(bed->value);
+        if (const auto *sequence =
+                config.option<
+                    Slic3r::ConfigOptionEnum<Slic3r::PrintSequence>>(
+                    "print_sequence"))
+            out->print_sequence = static_cast<int32_t>(sequence->value);
+        if (const auto *spiral = config.option<Slic3r::ConfigOptionBool>(
+                "spiral_mode"))
+            out->spiral_mode = spiral->value ? 1 : 0;
+        if (const auto *first = config.option<Slic3r::ConfigOptionInts>(
+                "first_layer_print_sequence")) {
+            const size_t count =
+                std::min<size_t>(first->values.size(), 16);
+            for (size_t index = 0; index < count; ++index)
+                out->first_layer_sequence[index] =
+                    static_cast<int32_t>(first->values[index]);
+            out->first_layer_sequence_count = static_cast<int32_t>(count);
+        }
+        if (const auto *other = config.option<Slic3r::ConfigOptionInts>(
+                "other_layers_print_sequence")) {
+            const size_t count =
+                std::min<size_t>(other->values.size(), 16);
+            for (size_t index = 0; index < count; ++index)
+                out->other_layer_sequence[index] =
+                    static_cast<int32_t>(other->values[index]);
+            out->other_layer_sequence_count = static_cast<int32_t>(count);
+        }
+        return orcapad_ok();
+    });
+}
+
+orca_result orca_plater_plate_set_settings(
+    orca_plater *plater, orca_plate_id plate_id,
+    const orca_plate_settings *settings, orca_revision *out_revision) {
+    constexpr const char *operation = "orca_plater_plate_set_settings";
+    if (out_revision) *out_revision = 0;
+    if (!plater)
+        return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation,
+                            "plater handle is null");
+    if (!settings || !out_revision)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "settings or output pointer is null");
+    if (settings->bed_type < -1 || settings->bed_type > 8 ||
+        settings->print_sequence < -1 || settings->print_sequence > 1 ||
+        settings->spiral_mode < -1 || settings->spiral_mode > 1 ||
+        settings->first_layer_sequence_count < 0 ||
+        settings->first_layer_sequence_count > 16 ||
+        settings->other_layer_sequence_count < 0 ||
+        settings->other_layer_sequence_count > 16)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "plate settings value is out of range");
+    for (int32_t index = 0; index < settings->first_layer_sequence_count;
+         ++index)
+        if (settings->first_layer_sequence[index] < 1)
+            return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                                "first-layer sequence extruders are 1-based");
+    for (int32_t index = 0; index < settings->other_layer_sequence_count;
+         ++index)
+        if (settings->other_layer_sequence[index] < 1)
+            return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                                "other-layer sequence extruders are 1-based");
+    return orcapad_guard(operation, [&]() -> orca_result {
+        OrcapadPlate *plate = orcapad_plate_mutable(plater, plate_id);
+        if (!plate)
+            return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation,
+                                "plate was not found");
+        if (!orcapad_revision_available(*plater))
+            return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
+                                "document revision is exhausted");
+        OrcapadMutation mutation(*plater, "Plate settings");
+        orcapad_plate_key<Slic3r::ConfigOptionEnum<Slic3r::BedType>>(
+            plate->config, "curr_bed_type", settings->bed_type >= 0,
+            static_cast<Slic3r::BedType>(settings->bed_type));
+        orcapad_plate_key<Slic3r::ConfigOptionEnum<Slic3r::PrintSequence>>(
+            plate->config, "print_sequence", settings->print_sequence >= 0,
+            static_cast<Slic3r::PrintSequence>(settings->print_sequence));
+        orcapad_plate_key<Slic3r::ConfigOptionBool>(
+            plate->config, "spiral_mode", settings->spiral_mode >= 0,
+            settings->spiral_mode == 1);
+        if (settings->first_layer_sequence_count > 0) {
+            std::vector<int> values(
+                settings->first_layer_sequence,
+                settings->first_layer_sequence +
+                    settings->first_layer_sequence_count);
+            plate->config.set_key_value(
+                "first_layer_print_sequence",
+                new Slic3r::ConfigOptionInts(std::move(values)));
+        } else {
+            plate->config.erase("first_layer_print_sequence");
+        }
+        if (settings->other_layer_sequence_count > 0) {
+            std::vector<int> values(
+                settings->other_layer_sequence,
+                settings->other_layer_sequence +
+                    settings->other_layer_sequence_count);
+            plate->config.set_key_value(
+                "other_layers_print_sequence",
+                new Slic3r::ConfigOptionInts(std::move(values)));
+        } else {
+            plate->config.erase("other_layers_print_sequence");
+        }
+        *out_revision = mutation.commit();
+        return orcapad_ok();
+    });
+}
+
+// --- drop / floating (desktop Drop + Auto Drop, ABI v41) ----------------------
+
+orca_result orca_plater_instance_set_auto_drop(orca_plater *plater,
+                                               orca_object_id object_id,
+                                               orca_instance_id instance_id,
+                                               uint8_t auto_drop,
+                                               orca_revision *out_revision) {
+    constexpr const char *operation = "orca_plater_instance_set_auto_drop";
+    if (out_revision) *out_revision = 0;
+    if (!plater)
+        return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation,
+                            "plater handle is null");
+    if (!out_revision)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "output pointer is null");
+    if (auto_drop > 1)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "auto_drop must be 0 or 1");
+    return orcapad_guard(operation, [&]() -> orca_result {
+        Slic3r::ModelObject *object = plater_obj(plater, object_id);
+        if (!object)
+            return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation,
+                                "object was not found");
+        std::vector<Slic3r::ModelInstance *> targets;
+        for (Slic3r::ModelInstance *instance : object->instances) {
+            if (instance_id == 0 || instance->id().id == instance_id)
+                targets.push_back(instance);
+        }
+        if (targets.empty())
+            return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation,
+                                "instance was not found");
+        if (!orcapad_revision_available(*plater))
+            return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
+                                "document revision is exhausted");
+        OrcapadMutation mutation(*plater, auto_drop ? "Auto drop" : "Keep floating");
+        for (Slic3r::ModelInstance *instance : targets) {
+            instance->auto_drop = auto_drop != 0;
+            if (auto_drop) orcapad_rest_on_bed(object, instance);
+        }
+        *out_revision = mutation.commit();
+        return orcapad_ok();
+    });
+}
+
+orca_result orca_plater_object_drop(orca_plater *plater,
+                                    orca_object_id object_id,
+                                    orca_revision *out_revision) {
+    constexpr const char *operation = "orca_plater_object_drop";
+    if (out_revision) *out_revision = 0;
+    if (!plater)
+        return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation,
+                            "plater handle is null");
+    if (!out_revision)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "output pointer is null");
+    return orcapad_guard(operation, [&]() -> orca_result {
+        Slic3r::ModelObject *object = plater_obj(plater, object_id);
+        if (!object)
+            return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation,
+                                "object was not found");
+        if (object->instances.empty())
+            return orcapad_fail(ORCA_STATUS_INVALID_MODEL, operation,
+                                "object has no instance");
+        if (!orcapad_revision_available(*plater))
+            return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
+                                "document revision is exhausted");
+        OrcapadMutation mutation(*plater, "Drop to bed");
+        // Desktop Selection::drop(): direct translation by -min.z — a
+        // manual drop works on floating instances too (the engine's
+        // ensure_on_bed skips auto_drop == false instances).
+        object->invalidate_bounding_box();
+        const double lift = -object->min_z();
+        if (std::abs(lift) > 1e-9)
+            object->translate_instances(Slic3r::Vec3d(0.0, 0.0, lift));
+        orcapad_touch_object(*plater, object_id);
+        *out_revision = mutation.commit();
+        return orcapad_ok();
+    });
+}
+
 // --- painting (desktop painter gizmos, ABI v36) --------------------------------
 
 /// Paint layer -> the volume's FacetsAnnotation.
@@ -5397,6 +5929,7 @@ orca_result orca_plater_snapshot(orca_plater *plater,
                     model_instance->get_scaling_factor();
                 instance.mirrored = model_instance->is_left_handed() ? 1 : 0;
                 instance.printable = model_instance->printable ? 1 : 0;
+                instance.auto_drop = model_instance->auto_drop ? 1 : 0;
                 const Slic3r::Vec3d offset = model_instance->get_offset();
                 instance.transform.offset_x = offset.x();
                 instance.transform.offset_y = offset.y();
@@ -6389,6 +6922,9 @@ orca_result orca_plater_slice_to_gcode(orca_plater *plater,
         Slic3r::DynamicPrintConfig config =
             Slic3r::DynamicPrintConfig::full_print_config();
         orcapad_config_overlays(config);
+        if (!plater->plates[static_cast<size_t>(plater->current_plate)].config.empty())
+            config.apply(
+                plater->plates[static_cast<size_t>(plater->current_plate)].config);
         const std::vector<OrcapadWarning> repairs = orcapad_finalize_config(config);
         if (progress) progress(1, "applying plater", ctx);
         Slic3r::Model plate_model;
@@ -6436,6 +6972,9 @@ orca_result orca_plater_slice_to_gcode_with_presets(
 
     return orcapad_guard(operation, [&]() -> orca_result {
         Slic3r::DynamicPrintConfig config = presets->bundle->full_config();
+        if (!plater->plates[static_cast<size_t>(plater->current_plate)].config.empty())
+            config.apply(
+                plater->plates[static_cast<size_t>(plater->current_plate)].config);
         const std::vector<OrcapadWarning> repairs = orcapad_finalize_config(config);
         if (progress) progress(1, "applying presets", ctx);
         Slic3r::Model plate_model;
@@ -6534,6 +7073,9 @@ static orca_result orcapad_slice_plate(
         ? presets->bundle->full_config()
         : Slic3r::DynamicPrintConfig::full_print_config();
     if (!presets) orcapad_config_overlays(config);
+    // Desktop BackgroundSlicingProcess parity: plate settings override the
+    // global config for this plate (ABI v41).
+    if (!plate.config.empty()) config.apply(plate.config);
     const std::vector<OrcapadWarning> repairs =
         orcapad_finalize_config(config);
     if (!repairs.empty())
@@ -6847,6 +7389,7 @@ static orca_result orcapad_export_gcode_3mf_core(orca_plater *plater,
             plates.push_back(data);
             data->plate_index = static_cast<int>(plate_index);
             data->locked = plate.locked;
+            data->config = plate.config;
             data->plate_name = plate.name;
             data->gcode_file =
                 base + ".plate" + std::to_string(plate_index) + ".tmp";
@@ -6951,6 +7494,282 @@ orca_result orca_plater_export_gcode_3mf_plate(orca_plater *plater,
                             "plater handle is null");
     return orcapad_export_gcode_3mf_core(plater, presets, plate_index, path,
                                          progress, ctx, job, out_report);
+}
+
+
+// --- preset creation (desktop CreatePresetsDialog, ABI v41) -------------------
+
+/// Selects `base_preset_name` in a collection (nullptr/empty = keep the
+/// current selection). NOT_FOUND when the name is unknown.
+static bool orcapad_select_base(Slic3r::PresetCollection &collection,
+                                const char *base_preset_name,
+                                std::string *failure) {
+    if (!base_preset_name || !base_preset_name[0]) return true;
+    const Slic3r::Preset *found = collection.find_preset(base_preset_name, false, true);
+    if (!found || found->name != base_preset_name) {
+        *failure = "base preset was not found: " + std::string(base_preset_name);
+        return false;
+    }
+    collection.select_preset_by_name(base_preset_name, false);
+    return true;
+}
+
+orca_result orca_presets_create_filament(orca_presets *presets,
+                                         const char *base_preset_name,
+                                         const char *new_name,
+                                         const char *vendor,
+                                         const char *filament_type,
+                                         uint32_t *out_count) {
+    constexpr const char *operation = "orca_presets_create_filament";
+    if (out_count) *out_count = 0;
+    if (!presets)
+        return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation,
+                            "presets handle is null");
+    if (!new_name || !new_name[0] || !out_count)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "new name or output pointer is empty");
+    return orcapad_guard(operation, [&]() -> orca_result {
+        Slic3r::PresetBundle &bundle = *presets->bundle;
+        Slic3r::PresetCollection &filaments = bundle.filaments;
+        const std::string preset_name(new_name);
+        if (const char *invalid = orcapad_invalid_preset_name(filaments, preset_name))
+            return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation, invalid);
+        if (std::string failure; !orcapad_select_base(filaments, base_preset_name, &failure))
+            return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation, failure.c_str());
+        Slic3r::Preset &edited = filaments.get_edited_preset();
+        // filament_vendor / filament_type are per-extruder coStrings in this
+        // fork — write typed options (a mismatched typed option<T>() returns
+        // nullptr and would corrupt memory).
+        if (vendor && vendor[0]) {
+            auto *option = edited.config.option<Slic3r::ConfigOptionStrings>(
+                "filament_vendor", true);
+            if (!option)
+                return orcapad_fail(ORCA_STATUS_INVALID_CONFIGURATION, operation,
+                                    "filament_vendor is not a string list option");
+            if (option->values.empty()) option->values.push_back(vendor);
+            else option->values.front() = vendor;
+        }
+        if (filament_type && filament_type[0]) {
+            auto *option = edited.config.option<Slic3r::ConfigOptionStrings>(
+                "filament_type", true);
+            if (!option)
+                return orcapad_fail(ORCA_STATUS_INVALID_CONFIGURATION, operation,
+                                    "filament_type is not a string list option");
+            if (option->values.empty()) option->values.push_back(filament_type);
+            else option->values.front() = filament_type;
+        }
+        filaments.save_current_preset(preset_name, true, false, nullptr);
+        Slic3r::Preset *saved = filaments.find_preset(preset_name, false, true);
+        if (!saved || saved->name != preset_name || saved->is_system)
+            return orcapad_fail(ORCA_STATUS_ENGINE_FAILURE, operation,
+                                "engine did not create the filament preset");
+        saved->sync_info = "create";
+        saved->save_info();
+        bundle.set_filament_preset(0, preset_name);
+        bundle.update_compatible(Slic3r::PresetSelectCompatibleType::Never);
+        *out_count = 1;
+        return orcapad_ok();
+    });
+}
+
+orca_result orca_presets_create_printer(orca_presets *presets,
+                                         const char *base_preset_name,
+                                         const char *new_name,
+                                         const char *printer_model,
+                                         const char *printer_variant,
+                                         const char *nozzle_diameters_csv,
+                                         uint32_t *out_printer_count,
+                                         uint32_t *out_filament_count,
+                                         uint32_t *out_process_count) {
+    constexpr const char *operation = "orca_presets_create_printer";
+    if (out_printer_count) *out_printer_count = 0;
+    if (out_filament_count) *out_filament_count = 0;
+    if (out_process_count) *out_process_count = 0;
+    if (!presets)
+        return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation,
+                            "presets handle is null");
+    if (!new_name || !new_name[0] || !printer_model || !printer_model[0] ||
+        !nozzle_diameters_csv || !nozzle_diameters_csv[0] || !out_printer_count ||
+        !out_filament_count || !out_process_count)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "name, model, nozzles or output pointer is empty");
+    // parse the nozzle CSV into positive floats
+    std::vector<double> nozzles;
+    {
+        std::string csv(nozzle_diameters_csv);
+        size_t start = 0;
+        while (start <= csv.size()) {
+            const size_t comma = csv.find(',', start);
+            const std::string token =
+                csv.substr(start, comma == std::string::npos
+                                     ? std::string::npos : comma - start);
+            if (!token.empty()) {
+                try {
+                    const double value = std::stod(token);
+                    if (!std::isfinite(value) || value <= 0.0)
+                        throw std::invalid_argument("bad nozzle");
+                    nozzles.push_back(value);
+                } catch (const std::exception &) {
+                    return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                                        "nozzle diameters must be positive numbers");
+                }
+            }
+            if (comma == std::string::npos) break;
+            start = comma + 1;
+        }
+    }
+    if (nozzles.empty() || nozzles.size() > 16)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "one to sixteen nozzle diameters are required");
+    return orcapad_guard(operation, [&]() -> orca_result {
+        Slic3r::PresetBundle &bundle = *presets->bundle;
+        Slic3r::PresetCollection &printers = bundle.printers;
+        const std::string preset_name(new_name);
+        if (const char *invalid = orcapad_invalid_preset_name(printers, preset_name))
+            return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation, invalid);
+        if (std::string failure; !orcapad_select_base(printers, base_preset_name, &failure))
+            return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation, failure.c_str());
+        Slic3r::Preset &edited = printers.get_edited_preset();
+        edited.config.option<Slic3r::ConfigOptionString>("printer_model", true)
+            ->value = printer_model;
+        if (printer_variant && printer_variant[0])
+            edited.config.option<Slic3r::ConfigOptionString>("printer_variant", true)
+                ->value = printer_variant;
+        auto *nozzle_option =
+            edited.config.option<Slic3r::ConfigOptionFloats>("nozzle_diameter", true);
+        nozzle_option->values = nozzles;
+        printers.save_current_preset(preset_name, true, false, nullptr);
+        Slic3r::Preset *saved = printers.find_preset(preset_name, false, true);
+        if (!saved || saved->name != preset_name || saved->is_system)
+            return orcapad_fail(ORCA_STATUS_ENGINE_FAILURE, operation,
+                                "engine did not create the printer preset");
+        saved->sync_info = "create";
+        saved->save_info();
+        *out_printer_count = 1;
+
+        // Desktop clone_presets_for_printer semantics through clone_presets:
+        // the selected process + filament presets are cloned with
+        // compatible_printers carrying the new printer (force overwrite of a
+        // same-named user preset, exactly the wizard's rewrite mode).
+        uint32_t filament_clones = 0;
+        uint32_t process_clones = 0;
+        const auto rewrite_compatible = [&](Slic3r::Preset &clone) {
+            auto *compatible = clone.config.option<Slic3r::ConfigOptionStrings>(
+                "compatible_printers", true);
+            if (std::find(compatible->values.begin(), compatible->values.end(),
+                          preset_name) == compatible->values.end())
+                compatible->values.push_back(preset_name);
+        };
+        std::vector<std::string> failures;
+        {
+            std::vector<const Slic3r::Preset *> templates;
+            templates.push_back(&bundle.prints.get_selected_preset());
+            if (bundle.prints.clone_presets(
+                    templates, failures,
+                    [&](Slic3r::Preset &clone, Slic3r::Preset::Type &) {
+                        rewrite_compatible(clone);
+                    }, true))
+                process_clones = static_cast<uint32_t>(templates.size());
+        }
+        {
+            std::vector<const Slic3r::Preset *> templates;
+            templates.push_back(&bundle.filaments.get_selected_preset());
+            if (bundle.filaments.clone_presets(
+                    templates, failures,
+                    [&](Slic3r::Preset &clone, Slic3r::Preset::Type &) {
+                        rewrite_compatible(clone);
+                    }, true))
+                filament_clones = static_cast<uint32_t>(templates.size());
+        }
+        bundle.update_compatible(Slic3r::PresetSelectCompatibleType::Always);
+        *out_filament_count = filament_clones;
+        *out_process_count = process_clones;
+        return orcapad_ok();
+    });
+}
+
+// --- legacy INI import (desktop "Import Configs", ABI v41) --------------------
+
+orca_result orca_presets_import_ini(orca_presets *presets, const char *path,
+                                    uint32_t *out_count) {
+    constexpr const char *operation = "orca_presets_import_ini";
+    if (out_count) *out_count = 0;
+    if (!presets)
+        return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation,
+                            "presets handle is null");
+    if (!path || !path[0] || !out_count)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "path or output pointer is empty");
+    struct stat probe;
+    if (stat(path, &probe) != 0 || !S_ISREG(probe.st_mode))
+        return orcapad_fail(ORCA_STATUS_IO_FAILURE, operation,
+                            "ini file is not accessible");
+    return orcapad_guard(operation, [&]() -> orca_result {
+        Slic3r::PresetBundle &bundle = *presets->bundle;
+        Slic3r::DynamicPrintConfig loaded;
+        try {
+            loaded.load_from_ini(
+                path, Slic3r::ForwardCompatibilitySubstitutionRule::Disable);
+        } catch (const Slic3r::ConfigurationError &error) {
+            return orcapad_fail(ORCA_STATUS_INVALID_CONFIGURATION, operation,
+                                error.what());
+        }
+        if (loaded.keys().empty())
+            return orcapad_fail(ORCA_STATUS_INVALID_MODEL, operation,
+                                "the INI file carries no configuration keys");
+
+        // Base name from the file: "prusa-ish.ini" -> "prusa-ish"
+        std::string base(path);
+        const size_t slash = base.find_last_of('/');
+        if (slash != std::string::npos) base = base.substr(slash + 1);
+        const size_t dot = base.find_last_of('.');
+        if (dot != std::string::npos) base = base.substr(0, dot);
+        if (base.empty()) base = "Imported";
+
+        // Desktop ImportConfigDialog semantics: apply the INI onto the
+        // edited (selected) presets of each kind, restricted to the keys
+        // that kind actually carries, then save each as a user preset.
+        struct KindPlan {
+            Slic3r::PresetCollection *collection;
+            const char *suffix;
+        };
+        KindPlan plans[] = {
+            {&bundle.printers, "printer"},
+            {&bundle.filaments, "filament"},
+            {&bundle.prints, "process"},
+        };
+        uint32_t created = 0;
+        for (const KindPlan &plan : plans) {
+            Slic3r::PresetCollection &collection = *plan.collection;
+            Slic3r::Preset &edited = collection.get_edited_preset();
+            size_t applied = 0;
+            for (const std::string &key : loaded.keys()) {
+                if (!edited.config.has(key)) continue;
+                edited.config.set_key_value(key, loaded.option(key)->clone());
+                ++applied;
+            }
+            if (applied == 0) continue;
+            const std::string preset_name = base + " " + plan.suffix;
+            if (const char *invalid =
+                    orcapad_invalid_preset_name(collection, preset_name))
+                return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation, invalid);
+            collection.save_current_preset(preset_name, true, false, nullptr);
+            Slic3r::Preset *saved = collection.find_preset(preset_name, false, true);
+            if (!saved || saved->name != preset_name || saved->is_system)
+                return orcapad_fail(ORCA_STATUS_ENGINE_FAILURE, operation,
+                                    "engine did not create the imported preset");
+            saved->sync_info = "create";
+            saved->save_info();
+            ++created;
+        }
+        if (created == 0)
+            return orcapad_fail(ORCA_STATUS_INVALID_MODEL, operation,
+                                "none of the INI keys belong to a preset kind");
+        bundle.set_filament_preset(0, bundle.filaments.get_edited_preset().name);
+        bundle.update_compatible(Slic3r::PresetSelectCompatibleType::Always);
+        *out_count = created;
+        return orcapad_ok();
+    });
 }
 
 // --- physical printers -----------------------------------------------------
@@ -7216,6 +8035,7 @@ orca_result orca_project_open(orca_plater *plater, orca_presets *presets,
                 if (data) {
                     if (!data->plate_name.empty()) plate.name = data->plate_name;
                     plate.locked = data->locked;
+                    plate.config = data->config;
                 }
                 adopted.push_back(std::move(plate));
             }
@@ -7308,6 +8128,7 @@ orca_result orca_project_save(orca_plater *plater, orca_presets *presets,
             plates.push_back(data);
             data->plate_index = static_cast<int>(plate_index);
             data->locked = source.locked;
+            data->config = source.config;
             data->plate_name = source.name;
             for (size_t object = 0; object < plater->model.objects.size(); ++object) {
                 const Slic3r::ModelObject *model_object =

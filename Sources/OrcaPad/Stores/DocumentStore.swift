@@ -752,6 +752,31 @@ final class DocumentStore {
         )
     }
 
+    // MARK: Drop / floating (desktop Drop + Auto Drop, ABI v41)
+
+    /// The selected instance's auto-drop flag (move-panel hint + Z field);
+    /// nil = no selection.
+    var selectedAutoDrop: Bool? {
+        selectedInstance?.autoDrop
+    }
+
+    /// Desktop context "Drop": rest the object on the bed now (even for
+    /// floating objects — it does not re-enable auto drop).
+    func dropObjectToBed(objectID: ObjectID) async {
+        if await applyMutation(.dropObject(objectID: objectID), operation: "drop to bed") != nil {
+            status.report(.document, "dropped to bed")
+        }
+    }
+
+    /// Desktop auto_drop: nil instanceID = every instance of the object.
+    /// Enabling it rests the instances on the bed immediately (Bridge).
+    func setAutoDrop(objectID: ObjectID, instanceID: InstanceID?, autoDrop: Bool) async {
+        _ = await applyMutation(
+            .setAutoDrop(objectID: objectID, instanceID: instanceID, autoDrop: autoDrop),
+            operation: autoDrop ? "auto drop" : "keep floating"
+        )
+    }
+
     func setInstanceCount(objectID: ObjectID, count: Int) async {
         _ = await applyMutation(
             .setInstanceCount(objectID: objectID, count: count),
@@ -1426,6 +1451,365 @@ final class DocumentStore {
         )
     }
 
+    // MARK: Variable layer height (desktop layersediting gizmo, ABI v41)
+
+    /// The selected object's layer-height profile: flat (z, height_mm)
+    /// pairs in object space, z 0..maxZ. Empty = uniform slicing. Loaded
+    /// async when the gizmo activates / selection / revision changes (the
+    /// Plate tab's canvas task drives `loadVLH`).
+    private(set) var vlhProfile: [Double] = []
+    /// Resolved layer-height context exactly as slicing consumes it
+    /// (process `layer_height`, machine min/max): baseline display, local
+    /// preview clamps and the Adaptive/adjust guards.
+    private(set) var vlhLayerHeight: Double = 0.2
+    private(set) var vlhMinLayerHeight: Double = 0.07
+    private(set) var vlhMaxLayerHeight: Double = 0.3
+    /// Horizontal display axis max: desktop 1.12 × max layer height with
+    /// a 0.6 mm readable floor (GLCanvas3D.cpp:508).
+    private(set) var vlhDisplayMax: Double = 0.6
+    /// The object's engine `max_z` (max z over every instance's
+    /// transformed mesh — the profile's z span; computed in engine
+    /// semantics, see `VLHApproximation.engineMaxZ`).
+    private(set) var vlhObjectMaxZ: Double = 0
+    /// Live gesture state: the drag's z/band (accent lines + local
+    /// preview) and the approximate curve shown until the commit replaces
+    /// it with engine truth.
+    private(set) var vlhDragZ: Double?
+    private(set) var vlhPreview: [Double]?
+    /// Panel adjust parameters (desktop: `strength` 0.005 + `band_width`
+    /// 2.0 defaults, GLCanvas3D.hpp:258-260; the mouse wheel scales the
+    /// band on desktop, the panel slider here).
+    var vlhThicknessDelta: Double = 0.005
+    var vlhBandWidth: Double = 2.0
+    /// Engine LayerHeightEditActionType: 0 increase, 1 decrease,
+    /// 2 reduce (toward the process height), 3 smooth.
+    var vlhAction: Int32 = 0
+    /// Objects carrying a non-empty profile (object-list indicator);
+    /// loaded lazily by the objects sheet.
+    private(set) var vlhObjectIDs: Set<ObjectID> = []
+
+    private var vlhKey: (revision: DocumentRevision, objectID: ObjectID)?
+
+    /// Loads the selected object's profile + resolved layer-height context
+    /// (cached per revision + object — the canvas task re-drives it on
+    /// every change; see the Plate tab's `.task(id:)`).
+    func loadVLH(presets: EnginePresets?) async {
+        guard let plater, let selection else {
+            vlhProfile = []
+            vlhPreview = nil
+            vlhDragZ = nil
+            vlhKey = nil
+            return
+        }
+        let key = (revision: scene?.revision ?? DocumentRevision(rawValue: 0),
+                   objectID: selection.objectID)
+        if let vlhKey,
+           vlhKey.revision == key.revision,
+           vlhKey.objectID == key.objectID { return }
+        vlhKey = key
+        vlhDragZ = nil
+        vlhPreview = nil
+        let objectID = selection.objectID
+        // Engine ModelObject::max_z() semantics (Model.cpp:1466 — the
+        // Bridge validates profile tops against it to 1e-6): the max z
+        // over EVERY instance's transformed mesh, computed like
+        // TriangleMesh::transformed_bounding_box — the double instance
+        // matrix applied to the float vertex values (the snapshot's
+        // double matrix keeps this bit-exact; a float matrix would drift
+        // past the tolerance).
+        let snapshotObject = scene?.object(id: objectID)
+        let positions = snapshotObject?.mesh.positions ?? []
+        let matrices = (snapshotObject?.instances ?? []).map(\.matrix)
+        let context: (profile: [Double], layerHeight: Double, minLayer: Double, maxLayer: Double, maxZ: Double)?
+        if let presets {
+            let result = await BackgroundWork.run(operation: "load layer-height profile") {
+                let profile = try plater.heightProfile(objectID: objectID)
+                let config = try presets.resolvedConfig().get()
+                guard let data = config.data(using: .utf8) else {
+                    throw AppFailure.invariant(
+                        operation: "load layer-height profile",
+                        diagnostic: "resolved config is not UTF-8 data")
+                }
+                let values: [String: String]
+                do {
+                    values = try JSONDecoder().decode([String: String].self, from: data)
+                } catch {
+                    throw AppFailure.invariant(
+                        operation: "load layer-height profile",
+                        diagnostic: "resolved config decode failed: \(error.localizedDescription)")
+                }
+                guard let layerHeight = Double(values["layer_height"] ?? ""),
+                      let minLayer = Double(values["min_layer_height"] ?? ""),
+                      let maxLayer = Double(values["max_layer_height"] ?? "") else {
+                    throw AppFailure.invariant(
+                        operation: "load layer-height profile",
+                        diagnostic: "resolved config is missing " +
+                            "layer_height / min_layer_height / max_layer_height")
+                }
+                return (profile, layerHeight, minLayer, maxLayer,
+                        VLHApproximation.engineMaxZ(
+                            positions: positions, matrices: matrices))
+            }
+            switch result {
+            case .success(let loaded):
+                context = loaded
+            case .failure(let failure):
+                status.report(.document, failure: failure)
+                context = nil
+            }
+        } else {
+            status.report(.document, "layers: presets are not loaded — showing the profile only")
+            let result = await BackgroundWork.run(operation: "load layer-height profile") {
+                try plater.heightProfile(objectID: objectID)
+            }
+            switch result {
+            case .success(let profile):
+                context = (profile, vlhLayerHeight, vlhMinLayerHeight, vlhMaxLayerHeight,
+                           VLHApproximation.engineMaxZ(
+                               positions: positions, matrices: matrices))
+            case .failure(let failure):
+                status.report(.document, failure: failure)
+                context = nil
+            }
+        }
+        // A revision may have advanced while the read ran — a stale load
+        // is dropped; the canvas task re-drives with the new key.
+        guard vlhKey?.revision == key.revision,
+              vlhKey?.objectID == key.objectID else { return }
+        if let context {
+            vlhProfile = context.profile
+            vlhLayerHeight = context.layerHeight
+            vlhMinLayerHeight = context.minLayer
+            vlhMaxLayerHeight = context.maxLayer
+            vlhDisplayMax = max(1.12 * context.maxLayer, 0.6)
+            vlhObjectMaxZ = context.maxZ
+        } else {
+            vlhProfile = []
+            vlhObjectMaxZ = VLHApproximation.engineMaxZ(
+                positions: positions, matrices: matrices)
+        }
+    }
+
+    /// Clears the VLH session (gizmo off / selection gone).
+    func clearVLH() {
+        vlhProfile = []
+        vlhPreview = nil
+        vlhDragZ = nil
+        vlhKey = nil
+    }
+
+    /// Live drag feedback: records the gesture z and approximates the
+    /// engine's adjust locally (display only — the commit replaces it with
+    /// engine truth). Follows Slicing.cpp adjust_layer_height_profile: the
+    /// band [z − band/2, z + band/2] is resampled at 0.1 mm and shifted by
+    /// weight·delta with weight = 0.5 + 0.5·cos(2π·Δz/band), clamped to
+    /// the machine min/max. Smooth (3) shows no local change.
+    func setVLHDrag(_ z: Double?) {
+        vlhDragZ = z
+        guard let z, z >= 0, vlhObjectMaxZ > 0 else {
+            vlhPreview = nil
+            return
+        }
+        vlhPreview = VLHApproximation.adjust(
+            profile: vlhProfile,
+            z: min(z, vlhObjectMaxZ),
+            thicknessDelta: vlhThicknessDelta,
+            bandWidth: vlhBandWidth,
+            action: vlhAction,
+            layerHeight: vlhLayerHeight,
+            minLayerHeight: vlhMinLayerHeight,
+            maxLayerHeight: vlhMaxLayerHeight,
+            maxZ: vlhObjectMaxZ)
+    }
+
+    /// Commits ONE adjust mutation at the drag's end z (one undo step). An
+    /// empty engine profile is first materialized as the uniform profile
+    /// (desktop's update_layer_height_profile, which the Bridge leaves to
+    /// the caller) — one extra undo step the first time only.
+    func commitVLHAdjust(presets: EnginePresets, z: Double) async {
+        guard let plater, let selection, !isBusy else {
+            status.report(.document, "layer edit blocked: document is busy or object missing")
+            return
+        }
+        let objectID = selection.objectID
+        let delta = vlhThicknessDelta
+        let band = vlhBandWidth
+        let action = vlhAction
+        let materialize = vlhProfile.count < 4
+        let layerHeight = vlhLayerHeight
+        let maxZ = vlhObjectMaxZ
+        isMutating = true
+        let result = await BackgroundWork.run(operation: "adjust layer height") {
+            if materialize {
+                guard maxZ > 0 else {
+                    throw AppFailure.invariant(
+                        operation: "adjust layer height",
+                        diagnostic: "the object has no height")
+                }
+                _ = try plater.apply(
+                    .setHeightProfile(objectID: objectID, pairs: [0, layerHeight, maxZ, layerHeight]))
+            }
+            let mutation = try plater.adjustHeightProfile(
+                presets: presets, objectID: objectID, z: z,
+                thicknessDelta: delta, bandWidth: band, action: action)
+            let profile = try plater.heightProfile(objectID: objectID)
+            return (mutation: mutation, profile: profile)
+        }
+        isMutating = false
+        switch result {
+        case .success(let outcome):
+            install(outcome.mutation.snapshot)
+            vlhProfile = outcome.profile
+            vlhPreview = nil
+            vlhDragZ = nil
+            vlhKey = (revision: outcome.mutation.snapshot.revision, objectID: objectID)
+        case .failure(let failure):
+            status.report(.document, failure: failure)
+        }
+    }
+
+    /// Desktop "Adaptive" (GLCanvas3D.cpp:660): regenerates the profile
+    /// from the mesh at the given quality (−0.1..1; desktop slider 0..1,
+    /// panel displays percent). One undo step.
+    func vlhAdaptive(presets: EnginePresets, quality: Double) async {
+        guard let plater, let selection, !isBusy else {
+            status.report(.document, "adaptive layers blocked: document is busy or object missing")
+            return
+        }
+        let objectID = selection.objectID
+        isMutating = true
+        let result = await BackgroundWork.run(operation: "adaptive layer height") {
+            let outcome = try plater.adaptiveHeightProfile(
+                presets: presets, objectID: objectID, quality: quality)
+            let snapshot = try plater.snapshot()
+            guard snapshot.revision.rawValue == outcome.revision else {
+                throw AppFailure.invariant(
+                    operation: "adaptive layer height",
+                    diagnostic: "revision mismatch after adaptive profile")
+            }
+            return (snapshot, outcome.pairs)
+        }
+        isMutating = false
+        switch result {
+        case .success(let outcome):
+            install(outcome.0)
+            vlhProfile = outcome.1
+            vlhPreview = nil
+            vlhDragZ = nil
+            vlhKey = (revision: outcome.0.revision, objectID: objectID)
+            status.report(.document, "adaptive layers applied")
+        case .failure(let failure):
+            status.report(.document, failure: failure)
+        }
+    }
+
+    /// Desktop "Smooth": gaussian-blurs the profile over `radius` layers
+    /// (keepMin never raises a height). One undo step.
+    func vlhSmooth(presets: EnginePresets, radius: UInt32, keepMin: Bool) async {
+        guard let plater, let selection, !isBusy else {
+            status.report(.document, "smooth layers blocked: document is busy or object missing")
+            return
+        }
+        let objectID = selection.objectID
+        isMutating = true
+        let result = await BackgroundWork.run(operation: "smooth layer height") {
+            let outcome = try plater.smoothHeightProfile(
+                presets: presets, objectID: objectID,
+                radius: radius, keepMin: keepMin)
+            let snapshot = try plater.snapshot()
+            guard snapshot.revision.rawValue == outcome.revision else {
+                throw AppFailure.invariant(
+                    operation: "smooth layer height",
+                    diagnostic: "revision mismatch after smoothed profile")
+            }
+            return (snapshot, outcome.pairs)
+        }
+        isMutating = false
+        switch result {
+        case .success(let outcome):
+            install(outcome.0)
+            vlhProfile = outcome.1
+            vlhPreview = nil
+            vlhDragZ = nil
+            vlhKey = (revision: outcome.0.revision, objectID: objectID)
+            status.report(.document, "layers smoothed")
+        case .failure(let failure):
+            status.report(.document, failure: failure)
+        }
+    }
+
+    /// Desktop "Reset": clears the profile back to uniform slicing.
+    func vlhReset() async {
+        guard let selection else { return }
+        if await applyMutation(
+            .setHeightProfile(objectID: selection.objectID, pairs: []),
+            operation: "reset layer height"
+        ) != nil {
+            vlhProfile = []
+            vlhPreview = nil
+            vlhDragZ = nil
+            status.report(.document, "layer heights reset")
+        }
+    }
+
+    /// Assembles the renderer overlay payload (object space): the preview
+    /// curve while a drag runs, else the engine profile.
+    func vlhRendererOverlay() -> Renderer.VLHOverlay? {
+        guard let selection else { return nil }
+        return Renderer.VLHOverlay(
+            objectID: selection.objectID,
+            profile: vlhPreview ?? vlhProfile,
+            layerHeight: vlhLayerHeight,
+            minLayerHeight: vlhMinLayerHeight,
+            maxLayerHeight: vlhMaxLayerHeight,
+            displayMax: vlhDisplayMax,
+            dragBand: vlhDragZ.map { (z: $0, band: vlhBandWidth) }
+        )
+    }
+
+    /// Profile stats for the panel: min/max layer height over the curve
+    /// and the layer-count estimate Σ dz/h (nil = uniform, one line).
+    var vlhStats: (minHeight: Double, maxHeight: Double, layerEstimate: Int)? {
+        guard vlhProfile.count >= 4, vlhProfile.count % 2 == 0,
+              vlhObjectMaxZ > 0 else { return nil }
+        var minHeight = Double.greatestFiniteMagnitude
+        var maxHeight = 0.0
+        var layers = 0.0
+        for index in stride(from: 0, to: vlhProfile.count - 2, by: 2) {
+            let z0 = vlhProfile[index], h0 = vlhProfile[index + 1]
+            let z1 = vlhProfile[index + 2], h1 = vlhProfile[index + 3]
+            minHeight = min(minHeight, min(h0, h1))
+            maxHeight = max(maxHeight, max(h0, h1))
+            let span = z1 - z0
+            if span > 0, h0 > 0, h1 > 0 {
+                // Trapezoid of dz/h over the segment.
+                layers += span * (1 / h0 + 1 / h1) / 2
+            }
+        }
+        guard minHeight <= maxHeight, layers > 0 else { return nil }
+        return (minHeight, maxHeight, Int(layers.rounded(.up)))
+    }
+
+    /// Objects carrying a non-empty profile (object-list indicator) — one
+    /// pass for every object, called lazily by the objects sheet.
+    func loadVLHObjectIDs() async {
+        guard let plater, let scene, !isBusy else { return }
+        let ids = scene.objects.map(\.id)
+        let result = await BackgroundWork.run(operation: "scan layer-height profiles") {
+            var found: [ObjectID] = []
+            for id in ids where !(try plater.heightProfile(objectID: id).isEmpty) {
+                found.append(id)
+            }
+            return found
+        }
+        switch result {
+        case .success(let found):
+            vlhObjectIDs = Set(found)
+        case .failure(let failure):
+            status.report(.document, failure: failure)
+        }
+    }
+
     // MARK: Simplify / Subdivide (desktop Simplify gizmo + "Subdivision mesh", ABI v40)
 
     /// The volume simplify/subdivide acts on: the selected part when one is
@@ -1983,6 +2367,38 @@ final class DocumentStore {
         }
     }
 
+    // MARK: Per-plate settings (desktop PlateSettingsDialog, ABI v41)
+
+    /// Reads one plate's print settings (nil fields = project defaults);
+    /// the settings sheet loads itself through this on appear.
+    func plateSettings(plateID: PlateID) async -> EnginePlater.PlateSettings? {
+        guard let plater else { return nil }
+        let result = await BackgroundWork.run(operation: "read plate settings") {
+            try plater.plateSettings(plateID: plateID)
+        }
+        switch result {
+        case .success(let settings):
+            return settings
+        case .failure(let failure):
+            status.report(.document, failure: failure)
+            return nil
+        }
+    }
+
+    /// Saves one plate's settings as ONE undoable mutation (nil fields
+    /// return that setting to the project defaults; slicing consumes the
+    /// overrides automatically — no client slice changes).
+    func applyPlateSettings(
+        plateID: PlateID, settings: EnginePlater.PlateSettings
+    ) async {
+        if await applyMutation(
+            .setPlateSettings(plateID: plateID, settings: settings),
+            operation: "plate settings"
+        ) != nil {
+            status.report(.document, "plate settings saved")
+        }
+    }
+
     // MARK: Move to plate (desktop plate context menu)
 
     /// Desktop "Move to plate": shifts every instance of the listed objects
@@ -2264,10 +2680,144 @@ final class DocumentStore {
                 clearMeasure()
             }
         }
+        // VLH (ABI v41): gesture previews are transient — every
+        // authoritative install clears them (the engine result is the
+        // new curve; the canvas task reloads the profile for the new
+        // revision when the gizmo is active).
+        vlhPreview = nil
+        vlhDragZ = nil
         // Replay a bed sync that arrived while the engine was busy.
         if let pending = pendingBedSync {
             pendingBedSync = nil
             Task { await syncBed(pending) }
         }
+    }
+}
+
+/// Display-only approximation of the engine's
+/// `adjust_layer_height_profile` (Slicing.cpp:518): the band
+/// [z − band/2, z + band/2] is resampled at 0.1 mm and every sample is
+/// shifted by weight·delta with weight = 0.5 + 0.5·cos(2π·Δz/band)
+/// (0 outside the band), clamped to the machine min/max. Reduce pulls
+/// toward the process height like the engine; smooth changes nothing
+/// locally (the engine's gaussian runs only on commit). Engine truth
+/// replaces the approximation on every commit.
+enum VLHApproximation {
+    /// Engine `ModelObject::max_z()` (Model.cpp:1466): the max z over
+    /// EVERY instance's transformed mesh — the Bridge validates profile
+    /// tops against it to 1e-6. Computed like
+    /// `TriangleMesh::transformed_bounding_box` (TriangleMesh.cpp:440):
+    /// the DOUBLE instance matrix applied to the float vertex values —
+    /// the snapshot's double matrix keeps this within the tolerance (a
+    /// float matrix would drift ~1e-5 mm past it).
+    static func engineMaxZ(
+        positions: [SIMD3<Float>], matrices: [simd_double4x4]
+    ) -> Double {
+        var maxZ = 0.0
+        for matrix in matrices {
+            for p in positions {
+                let transformed = matrix * SIMD4<Double>(
+                    Double(p.x), Double(p.y), Double(p.z), 1)
+                if transformed.z > maxZ { maxZ = transformed.z }
+            }
+        }
+        return maxZ
+    }
+
+    static func adjust(
+        profile: [Double],
+        z: Double,
+        thicknessDelta: Double,
+        bandWidth: Double,
+        action: Int32,
+        layerHeight: Double,
+        minLayerHeight: Double,
+        maxLayerHeight: Double,
+        maxZ: Double
+    ) -> [Double]? {
+        guard action >= 0, action <= 2, thicknessDelta > 0, bandWidth > 0,
+              maxZ > 0 else { return nil }
+        // The base curve: the engine profile, or the uniform line.
+        var pairs: [(z: Double, h: Double)] = []
+        if profile.count >= 4, profile.count % 2 == 0 {
+            for index in stride(from: 0, to: profile.count - 1, by: 2) {
+                pairs.append((z: profile[index], h: profile[index + 1]))
+            }
+        } else {
+            pairs = [(z: 0, h: layerHeight), (z: maxZ, h: layerHeight)]
+        }
+        guard pairs.count >= 2 else { return nil }
+        func height(at sampleZ: Double) -> Double {
+            var previous = pairs[0]
+            for pair in pairs.dropFirst() {
+                if sampleZ <= pair.z {
+                    let span = pair.z - previous.z
+                    if span <= 0 { return pair.h }
+                    let fraction = (sampleZ - previous.z) / span
+                    return previous.h + (pair.h - previous.h) * fraction
+                }
+                previous = pair
+            }
+            return pairs[pairs.count - 1].h
+        }
+        let low = max(0, z - bandWidth * 0.5)
+        let high = min(maxZ, z + bandWidth * 0.5)
+        guard low < high else { return nil }
+        // Resampled band with the engine's weight falloff.
+        var band: [(z: Double, h: Double)] = []
+        var sample = low
+        let step = 0.1
+        while sample < high {
+            var h = height(at: sample)
+            let weight = abs(sample - z) < bandWidth * 0.5
+                ? 0.5 + 0.5 * cos(2 * Double.pi * (sample - z) / bandWidth)
+                : 0
+            switch action {
+            case 0:  // increase
+                h += weight * thicknessDelta
+            case 1:  // decrease
+                h -= weight * thicknessDelta
+            default:  // reduce — pull toward the process height
+                let delta = h - layerHeight
+                let pull = weight * thicknessDelta
+                h += abs(delta) > pull ? (delta > 0 ? -pull : pull) : -delta
+            }
+            band.append((z: sample, h: min(max(h, minLayerHeight), maxLayerHeight)))
+            sample += step
+        }
+        if band.isEmpty { return nil }
+        band.append((z: high, h: {
+            var h = height(at: high)
+            let weight = abs(high - z) < bandWidth * 0.5
+                ? 0.5 + 0.5 * cos(2 * Double.pi * (high - z) / bandWidth)
+                : 0
+            if action == 0 {
+                h += weight * thicknessDelta
+            } else if action == 1 {
+                h -= weight * thicknessDelta
+            } else {
+                let delta = h - layerHeight
+                let pull = weight * thicknessDelta
+                h += abs(delta) > pull ? (delta > 0 ? -pull : pull) : -delta
+            }
+            return min(max(h, minLayerHeight), maxLayerHeight)
+        }()))
+        // Splice: keep the pairs below the band, the resampled band, then
+        // the pairs above it.
+        var result: [Double] = []
+        for pair in pairs where pair.z < low {
+            result.append(pair.z)
+            result.append(pair.h)
+        }
+        for pair in band {
+            result.append(pair.z)
+            result.append(pair.h)
+        }
+        for pair in pairs where pair.z > high {
+            result.append(pair.z)
+            result.append(pair.h)
+        }
+        guard result.count >= 4, result.count % 2 == 0 else { return nil }
+        return result
     }
 }

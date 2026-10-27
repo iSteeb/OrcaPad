@@ -50,6 +50,8 @@ struct PlateTabView: View {
     @State private var parameterTablePresented = false
     @State private var plateRenameTarget: PlateID?
     @State private var plateRenameText = ""
+    /// Per-plate settings sheet (desktop PlateSettingsDialog, ABI v41).
+    @State private var plateSettingsTarget: ScenePlate?
     @State private var flushPresented = false
     /// Board §wave-b/5: object shells + COG overlay (View menu, session
     /// state like the desktop View menu — not persisted).
@@ -104,6 +106,9 @@ struct PlateTabView: View {
             onRename: { plate in
                 plateRenameText = plate.name
                 plateRenameTarget = plate.id
+            },
+            onSettings: { plate in
+                plateSettingsTarget = plate
             },
             onToggleLock: { plate in
                 Task { await document.lockPlate(plate.id, locked: !plate.locked) }
@@ -160,6 +165,52 @@ struct PlateTabView: View {
             )
             .padding(.bottom, 8)
         }
+        if gizmoMode == .vlh, document.selection != nil {
+            VLHPanel(
+                stats: document.vlhStats,
+                layerHeight: document.vlhLayerHeight,
+                minLayerHeight: document.vlhMinLayerHeight,
+                maxLayerHeight: document.vlhMaxLayerHeight,
+                isBusy: document.isBusy,
+                thicknessDelta: document.vlhThicknessDelta,
+                bandWidth: document.vlhBandWidth,
+                action: document.vlhAction,
+                onChangeDelta: { document.vlhThicknessDelta = $0 },
+                onChangeBand: { document.vlhBandWidth = $0 },
+                onChangeAction: { document.vlhAction = $0 },
+                onAdaptive: { quality in
+                    guard let engine = environment.presets.engineForSlicing else {
+                        environment.status.report(
+                            .document,
+                            failure: .invariant(
+                                operation: "adaptive layer height",
+                                diagnostic: "presets are not loaded"
+                            )
+                        )
+                        return
+                    }
+                    Task { await document.vlhAdaptive(presets: engine, quality: quality) }
+                },
+                onSmooth: { radius, keepMin in
+                    guard let engine = environment.presets.engineForSlicing else {
+                        environment.status.report(
+                            .document,
+                            failure: .invariant(
+                                operation: "smooth layer height",
+                                diagnostic: "presets are not loaded"
+                            )
+                        )
+                        return
+                    }
+                    Task {
+                        await document.vlhSmooth(
+                            presets: engine, radius: radius, keepMin: keepMin)
+                    }
+                },
+                onReset: { Task { await document.vlhReset() } }
+            )
+            .padding(.bottom, 8)
+        }
         if let selection = document.selection,
            let object = document.scene?.object(id: selection.objectID),
            let transform = document.selectedDisplayTransform {
@@ -191,6 +242,13 @@ struct PlateTabView: View {
                 bedCenter: SIMD2(Double(bed.center.x), Double(bed.center.y)),
                 rotationAxis: $rotationAxis,
                 isBusy: document.isBusy,
+                autoDrop: document.selectedAutoDrop,
+                onSetAutoDrop: { autoDrop in
+                    Task {
+                        await document.setAutoDrop(
+                            objectID: object.id, instanceID: nil, autoDrop: autoDrop)
+                    }
+                },
                 extruder: object.extruder,
                 filamentSlots: environment.presets.filamentSlots,
                 onSetExtruder: { extruder in
@@ -275,6 +333,16 @@ struct PlateTabView: View {
                     if gizmoMode == .paint {
                         await document.reloadPaint()
                     }
+                    // VLH gizmo (desktop layersediting): load the selected
+                    // object's profile + layer-height context on activation
+                    // and after every revision change (each adjust advances
+                    // it; the cache key re-drives this task).
+                    if gizmoMode == .vlh {
+                        await document.loadVLH(
+                            presets: environment.presets.engineForSlicing)
+                    } else {
+                        document.clearVLH()
+                    }
                 }
 
             // 3D object labels (View menu): SwiftUI chips exactly over the
@@ -286,6 +354,11 @@ struct PlateTabView: View {
             // Measure distance chip at the projected measurement midpoint
             // (renderer-published; never intercepts canvas gestures).
             MeasureLabelOverlay()
+                .ignoresSafeArea()
+
+            // VLH axis labels: z ticks + layer-height axis + the live drag
+            // chip (renderer-published; never intercepts canvas gestures).
+            VLHLabelOverlay()
                 .ignoresSafeArea()
 
             VStack {
@@ -396,6 +469,21 @@ struct PlateTabView: View {
                 }
             }
         }
+        .sheet(item: $plateSettingsTarget) { plate in
+            PlateSettingsSheet(
+                plate: plate,
+                bedType: environment.presets.bedType,
+                filamentCount: environment.presets.filamentSlots.count,
+                isBusy: document.isBusy,
+                load: { await document.plateSettings(plateID: plate.id) },
+                onApply: { settings in
+                    Task {
+                        await document.applyPlateSettings(
+                            plateID: plate.id, settings: settings)
+                    }
+                }
+            )
+        }
         .sheet(isPresented: $simplifyPresented) {
             SimplifySheet(
                 objectName: selectedObjectName,
@@ -468,7 +556,9 @@ struct PlateTabView: View {
                     showFPS: showFPS,
                     hiddenObjectIDs: document.hiddenObjectIDs,
                     measureOverlay: gizmoMode == .measure
-                        ? document.measureOverlay(labelText: measureLabelText) : nil
+                        ? document.measureOverlay(labelText: measureLabelText) : nil,
+                    vlhOverlay: gizmoMode == .vlh
+                        ? document.vlhRendererOverlay() : nil
                 ),
                 manipulation: CanvasManipulation(
                     onSelect: { document.select(objectID: $0, instanceID: $1) },
@@ -517,6 +607,22 @@ struct PlateTabView: View {
                 },
                 onMeasureTap: { face in
                     Task { await document.handleMeasureTap(face) }
+                },
+                onVLHDrag: { z in
+                    document.setVLHDrag(z)
+                },
+                onVLHEnd: { z in
+                    guard let engine = environment.presets.engineForSlicing else {
+                        environment.status.report(
+                            .document,
+                            failure: .invariant(
+                                operation: "adjust layer height",
+                                diagnostic: "presets are not loaded"
+                            )
+                        )
+                        return
+                    }
+                    Task { await document.commitVLHAdjust(presets: engine, z: z) }
                 }
                 )
             )
@@ -1194,6 +1300,12 @@ struct PlateTabView: View {
                             Task { await document.deleteObjects(objectIDs) }
                         }
                     }
+                    // Variable-height indicator (desktop updates the layer
+                    // icon per object): one lazy scan per revision while the
+                    // sheet is open.
+                    .task(id: document.scene?.revision) {
+                        await document.loadVLHObjectIDs()
+                    }
                 }
             }
             .navigationTitle("Objects")
@@ -1343,6 +1455,12 @@ extension PlateTabView {
                         .font(.caption2)
                         .foregroundStyle(Color.accentColor)
                         .accessibilityLabel("\(object.overrideCount) setting overrides")
+                }
+                if document.vlhObjectIDs.contains(object.id) {
+                    Image(systemName: "square.3.layers.3d.top.down.forward")
+                        .font(.caption2)
+                        .foregroundStyle(Color.accentColor)
+                        .accessibilityLabel("Variable layer height profile")
                 }
                 if object.nonPartVolumes.isEmpty == false {
                     Circle()
@@ -1526,6 +1644,28 @@ extension PlateTabView {
                 Label("Set as an individual object", systemImage: "square.and.arrow.up.on.square")
             }
             .disabled(object.instances.count < 2)
+            // Desktop Drop / Auto Drop (ABI v41): rest on the bed now, or
+            // toggle whether the engine re-rests the object on every
+            // transform (label follows the FIRST instance's auto_drop).
+            Button {
+                Task { await document.dropObjectToBed(objectID: object.id) }
+            } label: {
+                Label("Drop to bed", systemImage: "arrow.down.to.line")
+            }
+            .disabled(document.isBusy)
+            let autoDrop = object.instances.first?.autoDrop ?? true
+            Button {
+                Task {
+                    await document.setAutoDrop(
+                        objectID: object.id, instanceID: nil, autoDrop: !autoDrop)
+                }
+            } label: {
+                Label(
+                    autoDrop ? "Keep floating" : "Auto drop",
+                    systemImage: autoDrop ? "arrow.up.circle" : "arrow.down.circle"
+                )
+            }
+            .disabled(document.isBusy)
             Button {
                 guard let engine = environment.presets.engineForSlicing,
                       let instanceID = object.instances.first?.id else { return }
@@ -2390,6 +2530,8 @@ private struct PlateBar: View {
     let onSelect: (PlateID) -> Void
     let onAdd: () -> Void
     let onRename: (ScenePlate) -> Void
+    /// Desktop plate settings dialog (ABI v41): per-plate overrides.
+    let onSettings: (ScenePlate) -> Void
     let onToggleLock: (ScenePlate) -> Void
     let onDuplicate: (ScenePlate) -> Void
     let onMoveFront: (ScenePlate) -> Void
@@ -2453,6 +2595,11 @@ private struct PlateBar: View {
         .buttonStyle(.plain)
         .disabled(isBusy)
         .contextMenu {
+            Button {
+                onSettings(plate)
+            } label: {
+                Label("Plate settings…", systemImage: "slider.horizontal.3")
+            }
             Button {
                 onRename(plate)
             } label: {
@@ -2535,6 +2682,11 @@ private struct ManipulationPanel: View {
     let bedCenter: SIMD2<Double>
     @Binding var rotationAxis: EngineAxis
     let isBusy: Bool
+    /// Auto-drop of the selected instance (desktop auto_drop, ABI v41):
+    /// nil hides the floating hint; false enables the Z field (the Bridge
+    /// skips re-resting floating instances on transform commits).
+    var autoDrop: Bool? = nil
+    var onSetAutoDrop: ((Bool) -> Void)? = nil
     /// Object-level extruder (0 = default) + filament slots; the header
     /// shows the Set-extruder menu when more than one filament is loaded
     /// (desktop ObjectList extruder assignment).
@@ -2601,6 +2753,13 @@ private struct ManipulationPanel: View {
                 )
                 .font(.caption)
                 .foregroundStyle(.secondary)
+            case .vlh:
+                Label(
+                    "Drag the strip beside the object to shape its layer heights.",
+                    systemImage: "square.3.layers.3d.top.down.forward"
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
             case .select:
                 Label(
                     "Drag on the plate to select by rectangle. Long-press an object to add it to the selection.",
@@ -2663,7 +2822,6 @@ private struct ManipulationPanel: View {
         }
     }
 
-    // Move: X / Y on the bed plane + center (Z is engine-managed: rests on bed).
     /// Compact extruder chip: icon + tool number (the long label wrapped
     /// vertically when squeezed — bounded text stays one line).
     @ViewBuilder
@@ -2701,6 +2859,10 @@ private struct ManipulationPanel: View {
         .disabled(isBusy)
     }
 
+    // Move: X / Y on the bed plane + center. Z is engine-managed while
+    // auto drop rests the instance on the bed; a FLOATING instance
+    // (auto drop off, ABI v41) gets a Z field — the Bridge keeps floating
+    // offsets instead of re-resting them.
     private var movePanel: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .bottom, spacing: 14) {
@@ -2709,6 +2871,29 @@ private struct ManipulationPanel: View {
                 }
                 NumericField(label: "Y position", unit: "mm", value: transform.offsetY, digits: 2) { value in
                     var updated = transform; updated.offsetY = value; actions.setTransform(updated, "Move")
+                }
+                if autoDrop == false {
+                    NumericField(label: "Z position", unit: "mm", value: transform.offsetZ, digits: 2) { value in
+                        var updated = transform; updated.offsetZ = value; actions.setTransform(updated, "Move")
+                    }
+                }
+            }
+            if let autoDrop, let onSetAutoDrop {
+                HStack(spacing: 8) {
+                    Label(
+                        autoDrop ? "Rests on bed (auto drop)" : "Floating",
+                        systemImage: autoDrop ? "arrow.down.circle" : "arrow.up.circle"
+                    )
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    Spacer()
+                    Button {
+                        onSetAutoDrop(!autoDrop)
+                    } label: {
+                        Text(autoDrop ? "Keep floating" : "Auto drop")
+                            .font(.caption)
+                    }
+                    .buttonStyle(.bordered)
                 }
             }
             Button {
@@ -3177,6 +3362,10 @@ private struct ToolsPanel<Content: View>: View {
                 .foregroundStyle(.secondary)
         case .measure:
             Text("tap two features to measure")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+        case .vlh:
+            Text("drag the strip to shape layers")
                 .font(.callout)
                 .foregroundStyle(.secondary)
         case .select:

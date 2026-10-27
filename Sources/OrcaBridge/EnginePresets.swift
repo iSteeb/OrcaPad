@@ -513,6 +513,86 @@ public final class EnginePresets: @unchecked Sendable {
         return .success(())
     }
 
+    /// Desktop "Create Filament Preset" (ABI v41): clones the selected (or
+    /// named) filament with vendor/type overrides as a user preset.
+    public func createFilament(
+        base: String?, name: String, vendor: String?, filamentType: String?
+    ) -> Result<Void, BridgeError> {
+        let operation = "EnginePresets.createFilament"
+        lock.lock(); defer { lock.unlock() }
+        guard let handle else { return .failure(invalidHandle(operation)) }
+        var count: UInt32 = 0
+        if let error = bridgeFailure(operation: operation, call: {
+            name.withCString { namePointer in
+                (base ?? "").withCString { basePointer in
+                    (vendor ?? "").withCString { vendorPointer in
+                        (filamentType ?? "").withCString { typePointer in
+                            orca_presets_create_filament(
+                                handle,
+                                base == nil || base!.isEmpty ? nil : basePointer,
+                                namePointer, vendorPointer, typePointer, &count)
+                        }
+                    }
+                }
+            }
+        }) {
+            return .failure(error)
+        }
+        return .success(())
+    }
+
+    /// Desktop "Create Printer Preset" (ABI v41): rewrites model / variant /
+    /// nozzles on a clone and saves it detached; the selected process and
+    /// filament presets are cloned with compatible_printers carrying the new
+    /// printer (desktop clone_presets semantics).
+    public func createPrinter(
+        base: String?, name: String, model: String, variant: String,
+        nozzleDiameters: [Double]
+    ) -> Result<(filaments: UInt32, processes: UInt32), BridgeError> {
+        let operation = "EnginePresets.createPrinter"
+        lock.lock(); defer { lock.unlock() }
+        guard let handle else { return .failure(invalidHandle(operation)) }
+        let csv = nozzleDiameters.map { String(format: "%g", $0) }.joined(separator: ",")
+        var printers: UInt32 = 0
+        var filaments: UInt32 = 0
+        var processes: UInt32 = 0
+        if let error = bridgeFailure(operation: operation, call: {
+            name.withCString { namePointer in
+                model.withCString { modelPointer in
+                    (variant).withCString { variantPointer in
+                        csv.withCString { csvPointer in
+                            (base ?? "").withCString { basePointer in
+                                orca_presets_create_printer(
+                                    handle,
+                                    base == nil || base!.isEmpty ? nil : basePointer,
+                                    namePointer, modelPointer, variantPointer,
+                                    csvPointer, &printers, &filaments, &processes)
+                            }
+                        }
+                    }
+                }
+            }
+        }) {
+            return .failure(error)
+        }
+        return .success((filaments, processes))
+    }
+
+    /// Desktop "Import Configs" (legacy INI, ABI v41): loads the INI into
+    /// user presets per matching kind and selects them.
+    public func importIni(path: String) -> Result<UInt32, BridgeError> {
+        let operation = "EnginePresets.importIni"
+        lock.lock(); defer { lock.unlock() }
+        guard let handle else { return .failure(invalidHandle(operation)) }
+        var count: UInt32 = 0
+        if let error = bridgeFailure(operation: operation, call: {
+            path.withCString { orca_presets_import_ini(handle, $0, &count) }
+        }) {
+            return .failure(error)
+        }
+        return .success(count)
+    }
+
     /// Desktop PhysicalPrinterDialog: one connected printer.
     public struct PhysicalPrinterRecord: Sendable, Equatable {
         public let name: String

@@ -276,7 +276,7 @@ static void test_md5_shim() {
 
 static void test_abi_version() {
     CHECK_EQ(orca_bridge_abi_version(), ORCA_BRIDGE_ABI_VERSION);
-    CHECK_EQ(ORCA_BRIDGE_ABI_VERSION, 40);
+    CHECK_EQ(ORCA_BRIDGE_ABI_VERSION, 41);
 }
 
 struct ProgressRecord {
@@ -4015,6 +4015,254 @@ static void test_measure_and_mesh_ops(const std::string &dir) {
     orca_plater_free(plater);
 }
 
+
+// --- ABI v41: variable layer height, plate settings, drop/floating, creates ---
+
+static void test_vlh_plates_floating(const std::string &dir,
+                                     const std::string &data_dir) {
+    orca_plater *plater = nullptr;
+    GUARD(g0, orca_plater_new(&plater));
+    expect_ok(g0, "plater_new");
+    orca_revision revision = 0;
+    const std::string cube = write_cube_stl(dir, "vlh_cube.stl");
+    orca_object_id object_id = 0;
+    GUARD(g1, import_one(plater, cube.c_str(), 100.0, 100.0, &object_id, &revision));
+    expect_ok(g1, "import cube");
+
+    // --- VLH: read empty, adaptive fills, smooth/adjust mutate, set validates
+    double *pairs = nullptr;
+    uint32_t pair_count = 0;
+    GUARD(v0, orca_plater_object_height_profile(plater, object_id, &pairs, &pair_count));
+    expect_ok(v0, "read empty profile");
+    CHECK_EQ(pair_count, 0u);
+    orca_height_profile_dispose(pairs);
+    orca_presets *presets = nullptr;
+    GUARD(v0b, orca_presets_new(data_dir.c_str(), &presets));
+    expect_ok(v0b, "presets_new for vlh");
+    GUARD(v1, orca_plater_object_height_profile_adaptive(
+                  plater, presets, object_id, 0.5, &pairs, &pair_count, &revision));
+    expect_ok(v1, "adaptive profile");
+    CHECK(pair_count >= 4);
+    CHECK_EQ(pair_count % 2, 0u);
+    CHECK_NEAR(pairs[0], 0.0, 1e-9);
+    for (uint32_t index = 2; index + 1 < pair_count; index += 2)
+        CHECK(pairs[index] >= pairs[index - 2]);
+    const uint32_t adaptive_count = pair_count;
+    double *adaptive_copy = static_cast<double *>(std::malloc(adaptive_count * sizeof(double)));
+    CHECK(adaptive_copy != nullptr);
+    if (adaptive_copy) std::memcpy(adaptive_copy, pairs, adaptive_count * sizeof(double));
+    orca_height_profile_dispose(pairs);
+    // smooth keeps the profile valid (and the undo stack one step deeper)
+    GUARD(v2, orca_plater_object_height_profile_smooth(
+                  plater, presets, object_id, 3, 1, &pairs, &pair_count, &revision));
+    expect_ok(v2, "smooth profile");
+    CHECK_EQ(pair_count % 2, 0u);
+    CHECK(pair_count >= 4);
+    orca_height_profile_dispose(pairs);
+    GUARD(v3, orca_plater_object_height_profile_adjust(
+                  plater, presets, object_id, 10.0, 0.05, 6.0, 0, &revision));
+    expect_ok(v3, "adjust increase");
+    // invalid manual profiles are typed rejections
+    double bogus[2] = {0.0, 0.2};
+    GUARD(v4, orca_plater_object_set_height_profile(plater, object_id, bogus, 2, &revision));
+    expect_code(v4, ORCA_STATUS_INVALID_ARGUMENT, "profile too short");
+    double wrong_top[4] = {0.0, 0.2, 9.0, 0.2};
+    GUARD(v5, orca_plater_object_set_height_profile(plater, object_id, wrong_top, 4, &revision));
+    expect_code(v5, ORCA_STATUS_INVALID_ARGUMENT, "profile wrong top");
+    // a valid hand-built profile round-trips
+    double valid[6] = {0.0, 0.2, 10.0, 0.2, 20.0, 0.3};
+    GUARD(v6, orca_plater_object_set_height_profile(plater, object_id, valid, 6, &revision));
+    expect_ok(v6, "set profile");
+    GUARD(v7, orca_plater_object_height_profile(plater, object_id, &pairs, &pair_count));
+    expect_ok(v7, "read back profile");
+    CHECK_EQ(pair_count, 6u);
+    CHECK_NEAR(pairs[5], 0.3, 1e-9);
+    orca_height_profile_dispose(pairs);
+    // reset = empty profile
+    GUARD(v8, orca_plater_object_set_height_profile(plater, object_id, nullptr, 0, &revision));
+    expect_ok(v8, "reset profile");
+    GUARD(v9, orca_plater_object_height_profile(plater, object_id, &pairs, &pair_count));
+    expect_ok(v9, "read after reset");
+    CHECK_EQ(pair_count, 0u);
+    orca_height_profile_dispose(pairs);
+    if (adaptive_copy) std::free(adaptive_copy);
+
+    // --- per-plate settings: defaults unset, write/read, reset, undo
+    orca_scene_snapshot snap;
+    memset(&snap, 0, sizeof snap);
+    GUARD(p0, orca_plater_snapshot(plater, &snap));
+    expect_ok(p0, "snapshot for plate id");
+    const orca_plate_id plate_id = snap.plates[0].id;
+    orca_scene_snapshot_dispose(&snap);
+    orca_plate_settings settings;
+    GUARD(p1, orca_plater_plate_settings(plater, plate_id, &settings));
+    expect_ok(p1, "read plate settings");
+    CHECK_EQ(settings.bed_type, -1);
+    CHECK_EQ(settings.print_sequence, -1);
+    CHECK_EQ(settings.spiral_mode, -1);
+    CHECK_EQ(settings.first_layer_sequence_count, 0);
+    GUARD(p2, orca_plater_plate_set_settings(plater, 999999, &settings, &revision));
+    expect_code(p2, ORCA_STATUS_NOT_FOUND, "settings missing plate");
+    orca_plate_settings custom{};
+    custom.bed_type = 3;      // btPEI
+    custom.print_sequence = 1; // by object
+    custom.spiral_mode = 1;
+    custom.first_layer_sequence[0] = 2;
+    custom.first_layer_sequence[1] = 1;
+    custom.first_layer_sequence_count = 2;
+    GUARD(p3, orca_plater_plate_set_settings(plater, plate_id, &custom, &revision));
+    expect_ok(p3, "write plate settings");
+    GUARD(p4, orca_plater_plate_settings(plater, plate_id, &settings));
+    expect_ok(p4, "read written settings");
+    CHECK_EQ(settings.bed_type, 3);
+    CHECK_EQ(settings.print_sequence, 1);
+    CHECK_EQ(settings.spiral_mode, 1);
+    CHECK_EQ(settings.first_layer_sequence_count, 2);
+    CHECK_EQ(settings.first_layer_sequence[0], 2);
+    CHECK_EQ(settings.first_layer_sequence[1], 1);
+    custom.bed_type = 99;
+    GUARD(p5b, orca_plater_plate_set_settings(plater, plate_id, &custom, &revision));
+    expect_code(p5b, ORCA_STATUS_INVALID_ARGUMENT, "bed type 99 rejected");
+    custom.bed_type = -1;
+    // undo restores the unset state
+    GUARD(p6, orca_plater_undo(plater, &revision));
+    expect_ok(p6, "undo plate settings");
+    GUARD(p7, orca_plater_plate_settings(plater, plate_id, &settings));
+    expect_ok(p7, "read after undo");
+    CHECK_EQ(settings.bed_type, -1);
+    CHECK_EQ(settings.print_sequence, -1);
+    // 3MF roundtrip keeps the settings (save -> reopen -> read)
+    orca_plate_settings again{};
+    again.spiral_mode = 1;
+    GUARD(p8, orca_plater_plate_set_settings(plater, plate_id, &again, &revision));
+    expect_ok(p8, "spiral on plate");
+    orca_presets_select(presets, "Bambu Lab X1 Carbon 0.4 nozzle",
+                        "Bambu PLA Basic @BBL X1C", "0.20mm Standard @BBL X1C");
+    const std::string project = dir + "/vlh_project.3mf";
+    GUARD(p9, orca_project_save(plater, presets, project.c_str(), 0, nullptr));
+    expect_ok(p9, "save project with plate settings");
+    orca_project_info info;
+    GUARD(p10, orca_project_open(plater, presets, project.c_str(), &info));
+    expect_ok(p10, "reopen project");
+    revision = info.revision;
+    memset(&snap, 0, sizeof snap);
+    GUARD(p11, orca_plater_snapshot(plater, &snap));
+    expect_ok(p11, "snapshot reopened");
+    const orca_plate_id reopened_id = snap.plates[0].id;
+    orca_scene_snapshot_dispose(&snap);
+    GUARD(p12, orca_plater_plate_settings(plater, reopened_id, &settings));
+    expect_ok(p12, "read reopened settings");
+    CHECK_EQ(settings.spiral_mode, 1);
+
+    // --- floating / drop: auto_drop off keeps z, on snaps to bed
+    memset(&snap, 0, sizeof snap);
+    GUARD(f0, orca_plater_snapshot(plater, &snap));
+    expect_ok(f0, "snapshot floating");
+    const orca_object_id float_object = snap.objects[0].id;
+    const orca_instance_id float_instance = snap.objects[0].instances[0].id;
+    orca_instance_transform floating = snap.objects[0].instances[0].transform;
+    CHECK_EQ(snap.objects[0].instances[0].auto_drop, 1u);
+    orca_scene_snapshot_dispose(&snap);
+    GUARD(f1, orca_plater_instance_set_auto_drop(plater, float_object,
+                                                 float_instance, 0, &revision));
+    expect_ok(f1, "keep floating");
+    floating.offset_z = 5.0; // the rested cube sits at z ~10; lift it off
+    GUARD(f2, orca_plater_instance_set(plater, float_object, float_instance,
+                                       &floating, "Float", &revision));
+    expect_ok(f2, "move floating");
+    memset(&snap, 0, sizeof snap);
+    GUARD(f3, orca_plater_snapshot(plater, &snap));
+    expect_ok(f3, "snapshot after float move");
+    CHECK_EQ(snap.objects[0].instances[0].auto_drop, 0u);
+    CHECK_NEAR(snap.objects[0].instances[0].transform.offset_z, 5.0, 1e-6);
+    orca_scene_snapshot_dispose(&snap);
+    GUARD(f4, orca_plater_instance_set_auto_drop(plater, float_object,
+                                                 float_instance, 1, &revision));
+    expect_ok(f4, "auto drop on");
+    memset(&snap, 0, sizeof snap);
+    GUARD(f5, orca_plater_snapshot(plater, &snap));
+    expect_ok(f5, "snapshot after auto drop");
+    CHECK_NEAR(snap.objects[0].instances[0].transform.offset_z, 10.0, 1e-4);
+    orca_scene_snapshot_dispose(&snap);
+    // manual drop on a floating object rests it in one step
+    GUARD(f6, orca_plater_instance_set_auto_drop(plater, float_object,
+                                                 float_instance, 0, &revision));
+    expect_ok(f6, "float again");
+    GUARD(f7, orca_plater_instance_set(plater, float_object, float_instance,
+                                       &floating, "Float 2", &revision));
+    expect_ok(f7, "lift again");
+    GUARD(f8, orca_plater_object_drop(plater, float_object, &revision));
+    expect_ok(f8, "drop to bed");
+    memset(&snap, 0, sizeof snap);
+    GUARD(f9, orca_plater_snapshot(plater, &snap));
+    expect_ok(f9, "snapshot after drop");
+    CHECK_NEAR(snap.objects[0].instances[0].transform.offset_z, 10.0, 1e-4);
+    orca_scene_snapshot_dispose(&snap);
+
+    // --- preset creation: filament + printer + INI import
+    uint32_t filament_made = 0;
+    GUARD(c0, orca_presets_create_filament(presets, "Bambu PLA Basic @BBL X1C",
+                                           "OrcaPad Test Filament",
+                                           "OrcaPad", "PLA", &filament_made));
+    CHECK_EQ(filament_made, 1u);
+    expect_ok(c0, "create filament");
+    GUARD(c0b, orca_presets_create_filament(presets, "No Such Filament",
+                                            "Bad", "", "", &filament_made));
+    expect_code(c0b, ORCA_STATUS_NOT_FOUND, "create filament missing base");
+    uint32_t made = 0;
+    GUARD(c1, orca_presets_create_filament(presets, nullptr,
+                                           "OrcaPad Test Filament 2",
+                                           "OrcaPad", "PETG", &made));
+    expect_ok(c1, "create filament from selected");
+    CHECK_EQ(made, 1u);
+    GUARD(c2, orca_presets_delete_user(presets, 1, "OrcaPad Test Filament"));
+    expect_ok(c2, "delete created filament");
+    GUARD(c3, orca_presets_delete_user(presets, 1, "OrcaPad Test Filament 2"));
+    expect_ok(c3, "delete created filament 2");
+    uint32_t printers_made = 0, filaments_made = 0, processes_made = 0;
+    GUARD(c4, orca_presets_create_printer(
+                  presets, "Bambu Lab X1 Carbon 0.4 nozzle",
+                  "OrcaPad Test Printer", "OrcaPadModel", "0.6", "0.6",
+                  &printers_made, &filaments_made, &processes_made));
+    expect_ok(c4, "create printer");
+    CHECK_EQ(printers_made, 1u);
+    GUARD(c5, orca_presets_create_printer(
+                  presets, nullptr, "OrcaPad Test Printer 2", "M", "0.4",
+                  "0.4,0.6", &printers_made, &filaments_made, &processes_made));
+    expect_ok(c5, "create printer from selected dual nozzle");
+    CHECK_EQ(printers_made, 1u);
+    GUARD(c6, orca_presets_create_printer(
+                  presets, nullptr, "Bad Printer", "M", "0.4", "zero",
+                  &printers_made, &filaments_made, &processes_made));
+    expect_code(c6, ORCA_STATUS_INVALID_ARGUMENT, "bad nozzle csv");
+    GUARD(c7, orca_presets_delete_user(presets, 0, "OrcaPad Test Printer"));
+    expect_ok(c7, "delete created printer");
+    GUARD(c8, orca_presets_delete_user(presets, 0, "OrcaPad Test Printer 2"));
+    expect_ok(c8, "delete created printer 2");
+
+    // INI import: process keys land in a user preset
+    const std::string ini = dir + "/legacy.ini";
+    FILE *ini_file = fopen(ini.c_str(), "wb");
+    CHECK(ini_file != nullptr);
+    if (ini_file) {
+        fprintf(ini_file, "; generated for the ABI v41 contract test\n");
+        fprintf(ini_file, "layer_height = 0.25\n");
+        fprintf(ini_file, "top_shell_layers = 5\n");
+        fclose(ini_file);
+    }
+    uint32_t imported = 0;
+    GUARD(i0, orca_presets_import_ini(presets, ini.c_str(), &imported));
+    expect_ok(i0, "import ini");
+    CHECK_EQ(imported, 1u); // only the process kind matches these keys
+    GUARD(i1, orca_presets_delete_user(presets, 2, "legacy process"));
+    expect_ok(i1, "delete imported process preset");
+    GUARD(i2, orca_presets_import_ini(presets, (dir + "/missing.ini").c_str(), &imported));
+    expect_code(i2, ORCA_STATUS_IO_FAILURE, "ini missing file");
+
+    orca_presets_free(presets);
+    orca_plater_free(plater);
+}
+
 static void test_project_roundtrip(const std::string &dir, const std::string &data_dir) {
     orca_presets *presets = nullptr;
     GUARD(gp, orca_presets_new(data_dir.c_str(), &presets));
@@ -4854,6 +5102,7 @@ int main() {
     test_slice_cancel(dir);
     test_exports(dir, data_dir);
     test_measure_and_mesh_ops(dir);
+    test_vlh_plates_floating(dir, data_dir);
     test_cut(dir);
     test_config_io(dir, data_dir);
     test_painting(dir);

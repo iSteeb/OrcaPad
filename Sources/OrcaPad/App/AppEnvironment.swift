@@ -3,6 +3,7 @@
 
 import Foundation
 import Observation
+import os
 
 /// Process-lifetime owner for client stores and their Bridge sessions.
 /// Presentation views borrow these references; they never own engine handles.
@@ -35,11 +36,19 @@ final class AppEnvironment {
 
     // MARK: Session autosave (desktop auto-backup subset)
 
+    private let autosaveLogger = Logger(
+        subsystem: "ie.duz.OrcaPad",
+        category: "autosave"
+    )
+    /// Document revision captured at the last session autosave (either
+    /// path). The interval timer compares against it to decide "dirty".
+    private var lastAutosaveRevision: UInt64?
+
     /// Writes a lightweight 3MF snapshot of the current session when the
-    /// app leaves the foreground, and clears it when the plate is empty —
-    /// an app kill or iOS eviction then never loses work. Restored once on
-    /// the next launch (`bootstrap`). Best effort: a backgrounding process
-    /// gets only a short grace window.
+    /// app leaves the foreground OR the interval timer fires, and clears
+    /// it when the plate is empty — an app kill or iOS eviction then never
+    /// loses work. Restored once on the next launch (`bootstrap`). Best
+    /// effort: a backgrounding process gets only a short grace window.
     func autosaveSession() async {
         guard let engine = presets.engineForSlicing, presets.isReady,
               document.isReady, !document.isBusy,
@@ -57,11 +66,35 @@ final class AppEnvironment {
                         error, operation: "clear session autosave"))
                 }
             }
+            lastAutosaveRevision = scene.revision.rawValue
             return
         }
         await presets.withExclusiveSession {
             await document.saveAutosave(to: url, presets: engine)
         }
+        // The revision is marked saved AFTER the write: a failed save
+        // surfaces loudly through the status banner, and the next document
+        // change re-dirties it (the same retry cadence as desktop's
+        // auto-backup).
+        lastAutosaveRevision = scene.revision.rawValue
+        autosaveLogger.notice(
+            "session autosaved at revision \(scene.revision.rawValue, privacy: .public)"
+        )
+    }
+
+    /// Interval-timer tick (Preferences ▸ Files ▸ autosave
+    /// interval, files.auto-backup): saves when the document is dirty
+    /// (revision advanced since the last autosave) and idle. RootView
+    /// drives the cadence and pauses it while the app is not active
+    /// (ScenePhase re-keys the timer task).
+    func autosaveIfDirty() async {
+        guard document.isReady, presets.isReady, !document.isBusy else { return }
+        guard let scene = document.scene else { return }
+        guard scene.revision.rawValue != lastAutosaveRevision else { return }
+        autosaveLogger.notice(
+            "autosave interval reached at revision \(scene.revision.rawValue, privacy: .public)"
+        )
+        await autosaveSession()
     }
 
     private func restoreAutosaveIfNeeded() async {

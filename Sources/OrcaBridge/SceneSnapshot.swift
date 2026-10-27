@@ -216,18 +216,21 @@ public struct SceneInstance: Identifiable, Sendable {
     public let mirrored: Bool
     /// False when excluded from slicing (desktop printable toggle).
     public let printable: Bool
+    /// False = keep this instance floating (desktop ModelInstance::auto_drop).
+    public let autoDrop: Bool
     /// Index into the snapshot's plates (-1 = on no plate, not sliced).
     public let plate: Int
 
     public init(
         id: InstanceID, transform: InstanceTransform, matrix: simd_double4x4,
-        mirrored: Bool, printable: Bool, plate: Int = 0
+        mirrored: Bool, printable: Bool, autoDrop: Bool = true, plate: Int = 0
     ) {
         self.id = id
         self.transform = transform
         self.matrix = matrix
         self.mirrored = mirrored
         self.printable = printable
+        self.autoDrop = autoDrop
         self.plate = plate
     }
 }

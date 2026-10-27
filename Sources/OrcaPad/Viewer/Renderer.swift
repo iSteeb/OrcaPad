@@ -25,6 +25,11 @@ enum GizmoMode: String, CaseIterable, Sendable {
     /// Desktop Measure gizmo (ABI v40): tap two surface features, read
     /// the distance / per-axis delta / angle between them.
     case measure
+    /// Desktop variable layer height editor (toolbar "layersediting",
+    /// ABI v41): a profile strip beside the selected object; vertical
+    /// drags adjust the layer-height curve, the panel runs Adaptive /
+    /// Smooth / Reset.
+    case vlh
 
     /// Menu label + symbol for the Tools menu and the collapsible panel.
     var menuLabel: String {
@@ -36,6 +41,7 @@ enum GizmoMode: String, CaseIterable, Sendable {
         case .select: return "Select"
         case .paint: return "Paint"
         case .measure: return "Measure"
+        case .vlh: return "Layers"
         }
     }
 
@@ -48,6 +54,7 @@ enum GizmoMode: String, CaseIterable, Sendable {
         case .layFlat: return "square.bottomhalf.filled"
         case .select: return "rectangle.dashed"
         case .measure: return "ruler"
+        case .vlh: return "square.3.layers.3d.top.down.forward"
         }
     }
 }
@@ -226,6 +233,86 @@ final class Renderer: NSObject, MTKViewDelegate {
 
     func setMeasureOverlay(_ overlay: MeasureOverlay?) {
         measureOverlay = overlay
+    }
+
+    // MARK: VLH overlay (desktop layersediting bar, ABI v41)
+
+    /// Variable-layer-height profile overlay published by the Plate tab:
+    /// the object's flat (z, height) pairs (engine truth, or the store's
+    /// local drag preview while a gesture runs) plus the resolved
+    /// layer-height context for the display axis. All geometry derives
+    /// from the object's packed bbox through the SELECTED instance matrix
+    /// (the measure-overlay pattern; the profile is per OBJECT, drawn on
+    /// the selected instance only like the desktop gizmo).
+    struct VLHOverlay {
+        let objectID: ObjectID
+        /// Flat (z, height_mm) pairs, object space, z 0..maxZ. Empty = the
+        /// object slices with the uniform process layer height.
+        var profile: [Double]
+        /// Resolved process `layer_height` (baseline + uniform display).
+        var layerHeight: Double
+        /// Resolved machine min/max layer heights (preview clamps).
+        var minLayerHeight: Double
+        var maxLayerHeight: Double
+        /// Horizontal axis maximum: desktop scales the bar to
+        /// 1.12 × max layer height (GLCanvas3D.cpp:508); OrcaPad keeps a
+        /// 0.6 mm readable floor so thin profiles stay legible.
+        var displayMax: Double
+        /// Live drag band (adjust z, band width) — accent lines + label
+        /// while the gesture runs (desktop z_cursor/z_cursor_band_width).
+        var dragBand: (z: Double, band: Double)? = nil
+    }
+
+    private var vlhOverlay: VLHOverlay?
+    /// Derived GPU buffers + a dirty flag: set by `setVLHOverlay` AND
+    /// `applyScene` (instance matrices/bboxes move the strip without
+    /// changing the overlay payload). Profiles densify to thousands of
+    /// points, far over the 4 KB `setVertexBytes` limit — the pass draws
+    /// from real buffers (the overhang-overlay pattern).
+    private var vlhDirty = true
+    private var vlhLineBuffer: MTLBuffer?
+    private var vlhLineCount = 0
+    private var vlhFillBuffer: MTLBuffer?
+    private var vlhFillCount = 0
+
+    func setVLHOverlay(_ overlay: VLHOverlay?) {
+        vlhOverlay = overlay
+        vlhDirty = true
+    }
+
+    /// Rebuilds the VLH draw buffers from the current overlay + scene
+    /// (called from the draw pass when dirty).
+    private func rebuildVLHBuffers() {
+        vlhDirty = false
+        vlhLineBuffer = nil
+        vlhLineCount = 0
+        vlhFillBuffer = nil
+        vlhFillCount = 0
+        guard let overlay = vlhOverlay, let geometry = vlhGeometry(overlay) else { return }
+        if !geometry.lines.isEmpty {
+            guard let buffer = device.makeBuffer(
+                bytes: geometry.lines,
+                length: MemoryLayout<VertexPC>.stride * geometry.lines.count,
+                options: .storageModeShared
+            ) else {
+                fail("could not allocate the VLH line buffer")
+                return
+            }
+            vlhLineBuffer = buffer
+            vlhLineCount = geometry.lines.count
+        }
+        if !geometry.fill.isEmpty {
+            guard let buffer = device.makeBuffer(
+                bytes: geometry.fill,
+                length: MemoryLayout<VertexPC>.stride * geometry.fill.count,
+                options: .storageModeShared
+            ) else {
+                fail("could not allocate the VLH fill buffer")
+                return
+            }
+            vlhFillBuffer = buffer
+            vlhFillCount = geometry.fill.count
+        }
     }
 
     // MARK: Viewer options (Plate View menu, desktop canvas "hamburger"
@@ -1102,6 +1189,9 @@ final class Renderer: NSObject, MTKViewDelegate {
         // Overhang overlay follows the scene (new meshes, transforms and
         // plate assignment all move facets between slope classes).
         rebuildOverhang()
+        // VLH strip follows instance transforms/bboxes (the overlay payload
+        // alone does not capture them).
+        vlhDirty = true
         logger.notice(
             "scene revision \(scene.revision.rawValue): \(rebuilt.count) object(s)"
         )
@@ -1688,10 +1778,11 @@ final class Renderer: NSObject, MTKViewDelegate {
         var vertices: [VertexPC] = []
         let accent = SIMD4<Float>(0.16, 0.80, 0.95, 1)
         switch gizmoMode {
-        case .layFlat, .select, .paint, .measure:
+        case .layFlat, .select, .paint, .measure, .vlh:
             // no on-canvas gizmo: lay flat taps a facet; select draws the
             // marquee rectangle; paint taps facets with the sphere brush;
-            // measure taps features (its overlay is state, not a gizmo)
+            // measure taps features (its overlay is state, not a gizmo);
+            // VLH owns its own strip overlay (see the VLH draw pass)
             break
         case .move:
             // Engine +X → viewer +X (red); engine +Y → viewer -Z (green),
@@ -2101,6 +2192,43 @@ final class Renderer: NSObject, MTKViewDelegate {
             encoder.popDebugGroup()
         }
 
+        // VLH strip (desktop layersediting bar, ABI v41): the layer-height
+        // profile beside the selected object — filled area from height 0,
+        // the curve polyline, z-tick gridlines, the process layer-height
+        // baseline and the live drag band; depth-tested like the measure
+        // overlay so the object occludes its own strip. Profiles densify
+        // to thousands of points (past the setVertexBytes limit), so the
+        // pass draws from buffers rebuilt on overlay/scene changes.
+        if gizmoMode == .vlh {
+            if vlhDirty { rebuildVLHBuffers() }
+            if vlhFillCount > 0, let fillBuffer = vlhFillBuffer {
+                encoder.pushDebugGroup("vlh-fill")
+                encoder.setRenderPipelineState(pcBlendPipeline)
+                encoder.setDepthStencilState(translucentDepthState)
+                var vlhUniforms = LineUniforms(mvp: viewProj)
+                encoder.setVertexBytes(
+                    &vlhUniforms,
+                    length: MemoryLayout<LineUniforms>.stride, index: 1)
+                encoder.setVertexBuffer(fillBuffer, offset: 0, index: 0)
+                encoder.drawPrimitives(
+                    type: .triangle, vertexStart: 0, vertexCount: vlhFillCount)
+                encoder.popDebugGroup()
+            }
+            if vlhLineCount >= 2, let lineBuffer = vlhLineBuffer {
+                encoder.pushDebugGroup("vlh-lines")
+                encoder.setRenderPipelineState(linePipeline)
+                encoder.setDepthStencilState(overlayDepthState)
+                var vlhUniforms = LineUniforms(mvp: viewProj)
+                encoder.setVertexBytes(
+                    &vlhUniforms,
+                    length: MemoryLayout<LineUniforms>.stride, index: 1)
+                encoder.setVertexBuffer(lineBuffer, offset: 0, index: 0)
+                encoder.drawPrimitives(
+                    type: .line, vertexStart: 0, vertexCount: vlhLineCount)
+                encoder.popDebugGroup()
+            }
+        }
+
         // Gizmo overlay: always on top so it stays readable inside meshes.
         if let gizmo = selectedGizmo() {
             var vertices = gizmoVertices(gizmo)
@@ -2168,6 +2296,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         // 3D object labels follow the settled camera of THIS frame.
         publishLabels(in: view)
         publishMeasureLabel(in: view)
+        publishVLHLabels(in: view)
 
         trackFPS()
     }
@@ -2327,6 +2456,217 @@ final class Renderer: NSObject, MTKViewDelegate {
         MeasureLabelCenter.shared.update(MeasureLabel(text: text, point: point))
     }
 
+    // MARK: VLH overlay geometry (object space → selected instance)
+
+    /// Desktop bar palette: the profile curve reads blue
+    /// (GLCanvas3D.cpp:542 ColorRGBA::BLUE), the baseline black; OrcaPad
+    /// uses the accent-blue curve family + amber baseline so both stay
+    /// visible against meshes and the dimmed grid.
+    private static let vlhCurveColor = SIMD4<Float>(0.36, 0.66, 1.00, 1)
+    private static let vlhFillColor = SIMD4<Float>(0.36, 0.66, 1.00, 0.20)
+    private static let vlhGridColor = SIMD4<Float>(0.42, 0.46, 0.55, 0.60)
+    private static let vlhBaselineColor = SIMD4<Float>(1.00, 0.82, 0.25, 0.9)
+    private static let vlhBandColor = SIMD4<Float>(1.00, 0.60, 0.30, 1)
+
+    /// The strip's packed-local frame beside the selected instance: the
+    /// height-0 edge (right) hugs the object's −X side, heights grow −X;
+    /// vertical extent is the object's own z span (profile z 0 = bottom).
+    private struct VLHStrip {
+        let model: simd_float4x4
+        let bottom: Float      // packed y of the object bottom (profile z 0)
+        let top: Float         // packed y of the object top (profile maxZ)
+        let right: Float       // packed x of the height-0 edge
+        let left: Float        // packed x of the displayMax edge
+        let zCenter: Float     // packed z the strip plane sits at
+    }
+
+    private func vlhStrip(for overlay: VLHOverlay) -> VLHStrip? {
+        guard let obj = objects.first(where: { $0.objectID == overlay.objectID }),
+              !hiddenObjectIDs.contains(overlay.objectID),
+              let inst = obj.instances.first(where: { $0.instanceID == primaryInstanceID })
+                  ?? obj.instances.first
+        else { return nil }
+        let extent = simd_distance(obj.bboxMin, obj.bboxMax)
+        // Readable at the object's own scale (desktop fixes 70 px; a world
+        // strip must scale with the object to stay finger-sized on screen).
+        let width = max(4, min(extent * 0.16, 28))
+        let gap = max(width * 0.12, 1.5)
+        return VLHStrip(
+            model: inst.model,
+            bottom: obj.bboxMin.y,
+            top: obj.bboxMax.y,
+            right: obj.bboxMin.x - gap,
+            left: obj.bboxMin.x - gap - width,
+            zCenter: (obj.bboxMin.z + obj.bboxMax.z) * 0.5
+        )
+    }
+
+    /// Derives the VLH overlay vertices in viewer world space: the curve
+    /// (empty profile = the uniform process height), the filled area from
+    /// height 0, z-tick gridlines, the baseline and the drag band. Nil when
+    /// the object/instance is gone (or hidden) — nothing draws.
+    private func vlhGeometry(
+        _ overlay: VLHOverlay
+    ) -> (lines: [VertexPC], fill: [VertexPC])? {
+        guard let strip = vlhStrip(for: overlay) else { return nil }
+        let maxZ = Double(strip.top - strip.bottom)
+        guard maxZ > 0 else { return nil }
+        let width = strip.right - strip.left
+        let displayMax = max(overlay.displayMax, 1e-6)
+        func world(_ x: Float, _ z: Double) -> SIMD3<Float> {
+            let w = strip.model * SIMD4(x, strip.bottom + Float(z), strip.zCenter, 1)
+            return SIMD3(w.x, w.y, w.z)
+        }
+        func curveX(_ height: Double) -> Float {
+            strip.right - Float(min(max(height, 0), displayMax) / displayMax) * width
+        }
+
+        // Curve points (z, h): the engine pairs, or the uniform line when
+        // the object has no profile yet.
+        var points: [(z: Double, h: Double)] = []
+        if overlay.profile.count >= 4, overlay.profile.count % 2 == 0 {
+            for index in stride(from: 0, to: overlay.profile.count - 1, by: 2) {
+                points.append((z: overlay.profile[index], h: overlay.profile[index + 1]))
+            }
+        } else {
+            points = [(z: 0, h: overlay.layerHeight), (z: maxZ, h: overlay.layerHeight)]
+        }
+        guard points.count >= 2 else { return nil }
+
+        var lines: [VertexPC] = []
+        var fill: [VertexPC] = []
+
+        // Strip frame: vertical edges + z ticks (desktop draws the color
+        // bar background; OrcaPad frames the strip with its gridlines).
+        for edge in [strip.left, strip.right] {
+            lines.append(VertexPC(position: world(edge, 0), color: Renderer.vlhGridColor))
+            lines.append(VertexPC(position: world(edge, maxZ), color: Renderer.vlhGridColor))
+        }
+        // Horizontal gridlines at "nice" z ticks (3..8 across the span).
+        let step = [1.0, 2, 5, 10, 20, 25, 50, 100]
+            .first { maxZ / $0 <= 8 } ?? maxZ
+        var tick = step
+        while tick < maxZ - step * 0.01 {
+            lines.append(VertexPC(position: world(strip.left, tick), color: Renderer.vlhGridColor))
+            lines.append(VertexPC(position: world(strip.right, tick), color: Renderer.vlhGridColor))
+            tick += step
+        }
+
+        // Process layer-height baseline (desktop draws it black across the
+        // bar; the amber vertical marks the uniform default height).
+        let baselineX = curveX(overlay.layerHeight)
+        lines.append(VertexPC(position: world(baselineX, 0), color: Renderer.vlhBaselineColor))
+        lines.append(VertexPC(position: world(baselineX, maxZ), color: Renderer.vlhBaselineColor))
+
+        // Filled area between height 0 (the right edge) and the curve,
+        // then the curve polyline itself.
+        for index in 0..<(points.count - 1) {
+            let a = points[index]
+            let b = points[index + 1]
+            let ax = curveX(a.h), bx = curveX(b.h)
+            let aTop = world(ax, a.z), aBase = world(strip.right, a.z)
+            let bTop = world(bx, b.z), bBase = world(strip.right, b.z)
+            fill.append(VertexPC(position: aTop, color: Renderer.vlhFillColor))
+            fill.append(VertexPC(position: aBase, color: Renderer.vlhFillColor))
+            fill.append(VertexPC(position: bTop, color: Renderer.vlhFillColor))
+            fill.append(VertexPC(position: aBase, color: Renderer.vlhFillColor))
+            fill.append(VertexPC(position: bBase, color: Renderer.vlhFillColor))
+            fill.append(VertexPC(position: bTop, color: Renderer.vlhFillColor))
+            lines.append(VertexPC(position: aTop, color: Renderer.vlhCurveColor))
+            lines.append(VertexPC(position: bTop, color: Renderer.vlhCurveColor))
+        }
+
+        // Live drag band (desktop z_cursor/z_cursor_band_width): two accent
+        // lines at z ± band/2 spanning the strip (slightly overshooting).
+        if let band = overlay.dragBand, band.band > 0 {
+            for z in [band.z - band.band * 0.5, band.z + band.band * 0.5] {
+                guard z >= 0, z <= maxZ else { continue }
+                lines.append(VertexPC(
+                    position: world(strip.left - width * 0.1, z),
+                    color: Renderer.vlhBandColor))
+                lines.append(VertexPC(
+                    position: world(strip.right + width * 0.1, z),
+                    color: Renderer.vlhBandColor))
+            }
+        }
+        return (lines, fill)
+    }
+
+    /// Ray-hits the VLH strip: the profile z under the screen point (nil =
+    /// off the strip). The strip's plane is intersected generously — the
+    /// desktop bar spans the whole canvas height — but only within ~1.4×
+    /// the strip's horizontal extent so drags on the object keep their
+    /// normal meaning. z clamps into the object's span.
+    func vlhStripHit(at point: CGPoint, in view: MTKView) -> Double? {
+        guard gizmoMode == .vlh, let overlay = vlhOverlay,
+              let strip = vlhStrip(for: overlay) else { return nil }
+        let ray = screenRay(at: point, in: view)
+        let columns = strip.model.columns
+        let normal = simd_normalize(SIMD3(columns.2.x, columns.2.y, columns.2.z))
+        let plane4 = strip.model * SIMD4<Float>(strip.right, strip.bottom, strip.zCenter, 1)
+        let planePoint = SIMD3(plane4.x, plane4.y, plane4.z)
+        let denominator = simd_dot(ray.dir, normal)
+        guard abs(denominator) > 1e-6 else { return nil }
+        let t = simd_dot(planePoint - ray.origin, normal) / denominator
+        guard t > 0 else { return nil }
+        let hit = ray.origin + ray.dir * t
+        let local4 = strip.model.inverse * SIMD4(hit.x, hit.y, hit.z, 1)
+        let local = SIMD3(local4.x, local4.y, local4.z)
+        let width = strip.right - strip.left
+        guard local.x >= strip.left - width * 0.4,
+              local.x <= strip.right + width * 0.4 else { return nil }
+        let maxZ = Double(strip.top - strip.bottom)
+        return min(max(Double(local.y - strip.bottom), 0), maxZ)
+    }
+
+    /// Publishes the VLH axis labels to the SwiftUI overlay (z ticks on the
+    /// strip's left edge, layer-height axis at the bottom, and the live
+    /// drag chip with the profile height under the finger — the desktop
+    /// tooltip, GLCanvas3D.cpp:406).
+    private func publishVLHLabels(in view: MTKView) {
+        guard gizmoMode == .vlh, let overlay = vlhOverlay,
+              let strip = vlhStrip(for: overlay) else {
+            VLHLabelCenter.shared.update([])
+            return
+        }
+        let maxZ = Double(strip.top - strip.bottom)
+        guard maxZ > 0 else {
+            VLHLabelCenter.shared.update([])
+            return
+        }
+        var labels: [VLHLabel] = []
+        func world(_ x: Float, _ z: Double) -> SIMD3<Float> {
+            let w = strip.model * SIMD4(x, strip.bottom + Float(z), strip.zCenter, 1)
+            return SIMD3(w.x, w.y, w.z)
+        }
+        func label(_ id: String, _ text: String, _ x: Float, _ z: Double, accent: Bool = false) {
+            guard let point = projectToScreen(world(x, z), in: view) else { return }
+            labels.append(VLHLabel(id: id, text: text, point: point, accent: accent))
+        }
+        let width = strip.right - strip.left
+        let step = [1.0, 2, 5, 10, 20, 25, 50, 100]
+            .first { maxZ / $0 <= 8 } ?? maxZ
+        var tick = step
+        while tick < maxZ - step * 0.01 {
+            label("z\(tick)", String(format: "%.0f", tick), strip.left, tick)
+            tick += step
+        }
+        // Layer-height axis (horizontal): 0 at the object side, the display
+        // maximum on the outer edge, both under the strip's bottom.
+        label("axis0", "0", strip.right, 0)
+        label("axisMax", String(format: "%.2f", overlay.displayMax), strip.left, 0)
+        // Live drag: the interpolated profile height at the finger's z.
+        if let band = overlay.dragBand {
+            let height = VLHLabelCenter.interpolateHeight(
+                overlay.profile, z: band.z, maxZ: maxZ,
+                uniform: overlay.layerHeight)
+            label(
+                "drag", String(format: "z %.1f · %.3f mm", band.z, height),
+                strip.right + width * 0.15, band.z, accent: true)
+        }
+        VLHLabelCenter.shared.update(labels)
+    }
+
     // MARK: Status publishing
 
     private func trackFPS() {
@@ -2402,5 +2742,58 @@ final class MeasureLabelCenter {
     func update(_ label: MeasureLabel?) {
         guard label != self.label else { return }
         self.label = label
+    }
+}
+
+// MARK: - VLH label channel (renderer → SwiftUI overlay)
+
+/// One published VLH axis label: z ticks, the layer-height axis edges and
+/// the live drag chip, each anchored at a projected strip point in view
+/// POINTS (the overlay sits exactly over the canvas — ObjectLabel pattern).
+struct VLHLabel: Identifiable, Equatable, Sendable {
+    let id: String
+    let text: String
+    let point: CGPoint
+    /// Drag chip rendering (accent capsule like the measure chip).
+    let accent: Bool
+}
+
+/// Renderer → SwiftUI channel for the VLH axis labels. The renderer
+/// publishes from its draw pass (main actor); `update` drops identical
+/// frames so an idle camera does not churn SwiftUI at 60 fps.
+@MainActor
+@Observable
+final class VLHLabelCenter {
+    static let shared = VLHLabelCenter()
+
+    private(set) var labels: [VLHLabel] = []
+
+    private init() {}
+
+    /// Publishes one frame's label set (empty = VLH off / no selection).
+    func update(_ labels: [VLHLabel]) {
+        guard labels != self.labels else { return }
+        self.labels = labels
+    }
+
+    /// Piecewise-linear profile height at z (desktop tooltip lookup,
+    /// GLCanvas3D.cpp:406-427): the last pair bracketing z, lerped; the
+    /// uniform height when the object carries no profile.
+    static func interpolateHeight(
+        _ profile: [Double], z: Double, maxZ: Double, uniform: Double
+    ) -> Double {
+        guard profile.count >= 4, profile.count % 2 == 0 else { return uniform }
+        var previous = (z: profile[0], h: profile[1])
+        for index in stride(from: 2, to: profile.count, by: 2) {
+            let current = (z: profile[index], h: profile[index + 1])
+            if z <= current.z {
+                let span = current.z - previous.z
+                if span <= 0 { return current.h }
+                let fraction = (z - previous.z) / span
+                return previous.h + (current.h - previous.h) * fraction
+            }
+            previous = current
+        }
+        return profile[profile.count - 1]
     }
 }

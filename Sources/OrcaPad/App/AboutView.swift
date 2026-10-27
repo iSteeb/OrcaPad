@@ -13,6 +13,9 @@ struct AboutView: View {
     /// menu is off-limits to this file's ownership, and About is the app's
     /// natural "help" surface.
     @State private var tipsPresented = false
+    /// App preferences (0.18 flagship) — About is the app's other entry
+    /// point besides the Prepare pill's gear.
+    @State private var preferencesPresented = false
 
     /// Read-only license material bundled under Resources/Licenses.
     private struct LicenseResources {
@@ -123,6 +126,9 @@ struct AboutView: View {
             .sheet(isPresented: $tipsPresented) {
                 TipsSheet()
             }
+            .sheet(isPresented: $preferencesPresented) {
+                PreferencesScreen()
+            }
         }
         .preferredColorScheme(.dark)
     }
@@ -183,6 +189,11 @@ struct AboutView: View {
             }
 
             Section {
+                Button {
+                    preferencesPresented = true
+                } label: {
+                    Label("Preferences", systemImage: "gearshape")
+                }
                 Button {
                     tipsPresented = true
                 } label: {

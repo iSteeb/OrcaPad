@@ -55,6 +55,10 @@ struct SceneSync {
     /// Measure-gizmo overlay (desktop GLGizmoMeasure, ABI v40): object-space
     /// features + measurement line + label text; nil = no session.
     var measureOverlay: Renderer.MeasureOverlay? = nil
+    /// VLH overlay (desktop layersediting bar, ABI v41): the selected
+    /// object's profile pairs + layer-height context + live drag band;
+    /// nil = no selection / not in VLH mode.
+    var vlhOverlay: Renderer.VLHOverlay? = nil
 }
 
 /// Manipulation callbacks from the canvas gestures (engine-space units).
@@ -93,6 +97,11 @@ struct CanvasManipulation {
     /// OBJECT-space hit point of the tap — DocumentStore builds/picks the
     /// measure session. LAST member like onPaint.
     var onMeasureTap: ((Renderer.FacePick) -> Void)? = nil
+    /// VLH mode (ABI v41): live drag/tap z on the profile strip (began +
+    /// every move — the store previews locally). LAST members like onPaint.
+    var onVLHDrag: ((Double) -> Void)? = nil
+    /// VLH drag end at the final z: the store commits ONE adjust mutation.
+    var onVLHEnd: ((Double) -> Void)? = nil
 }
 
 /// SwiftUI wrapper around MTKView + gesture recognizers.
@@ -158,6 +167,8 @@ struct MetalCanvas: UIViewRepresentable {
         coordinator.renderer?.setHiddenObjectIDs(scene.hiddenObjectIDs)
         coordinator.renderer?.setMeasureOverlay(
             scene.gizmoMode == .measure ? scene.measureOverlay : nil)
+        coordinator.renderer?.setVLHOverlay(
+            scene.gizmoMode == .vlh ? scene.vlhOverlay : nil)
         let needsSceneApply =
             scene.snapshot.documentID != coordinator.lastDocumentID ||
             scene.snapshot.revision != coordinator.lastDocumentRevision ||
@@ -236,6 +247,10 @@ struct MetalCanvas: UIViewRepresentable {
             case layFlatPlane
             /// Rectangle selection: one-finger drag draws the marquee.
             case marquee(start: CGPoint)
+            /// VLH strip drag: the last profile z under the finger — the
+            /// finger may lift off the strip; the commit uses the last z
+            /// the store previewed (desktop keeps the last cursor z too).
+            case vlh(lastZ: Double)
         }
         private var dragState: DragState?
 
@@ -305,6 +320,16 @@ struct MetalCanvas: UIViewRepresentable {
                     manipulation?.onMeasureTap?(face)
                 }
                 return
+            }
+            if renderer.gizmoMode == .vlh {
+                // VLH: a tap on the profile strip is a degenerate drag —
+                // one adjust at that z (desktop applies per click); taps
+                // elsewhere keep their normal selection meaning.
+                if let z = renderer.vlhStripHit(at: location, in: view) {
+                    manipulation?.onVLHDrag?(z)
+                    manipulation?.onVLHEnd?(z)
+                    return
+                }
             }
             if renderer.gizmoMode == .layFlat {
                 // Desktop Flatten gizmo: the hull plane under the touch wins
@@ -416,6 +441,15 @@ struct MetalCanvas: UIViewRepresentable {
                     } else {
                         manipulation?.onHighlightFlattenPlane(nil)
                     }
+                case .vlh(let lastZ):
+                    // Follow the finger; a lift off the strip keeps the last
+                    // previewed z (dragState stays .vlh with the old value).
+                    if let z = renderer.vlhStripHit(at: location, in: view) {
+                        manipulation?.onVLHDrag?(z)
+                        dragState = .vlh(lastZ: z)
+                    } else {
+                        dragState = .vlh(lastZ: lastZ)
+                    }
                 case .orbit, .none:
                     let translation = gesture.translation(in: gesture.view)
                     renderer.camera.orbit(dx: Float(translation.x), dy: Float(translation.y))
@@ -428,6 +462,10 @@ struct MetalCanvas: UIViewRepresentable {
                         manipulation?.onLayFlat(plane.engineNormal)
                     }
                     manipulation?.onHighlightFlattenPlane(nil)
+                case .vlh(let lastZ):
+                    // One drag = one undoable adjust mutation (the store
+                    // committed the preview locally all along).
+                    manipulation?.onVLHEnd?(lastZ)
                 case .move, .rotate, .scale:
                     manipulation?.onEnd()
                 case .marquee(let start):
@@ -470,6 +508,16 @@ struct MetalCanvas: UIViewRepresentable {
                 // control.
                 return .orbit
             }
+            // VLH: drags on the strip adjust the profile at the finger's z
+            // (one mutation on END); drags elsewhere orbit — the desktop
+            // reserves the whole left button for profile editing only.
+            if mode == .vlh {
+                if let z = renderer.vlhStripHit(at: location, in: view) {
+                    manipulation?.onVLHDrag?(z)
+                    return .vlh(lastZ: z)
+                }
+                return .orbit
+            }
             // Rectangle selection: a drag STARTING ON an instance draws the
             // marquee (drag it outward to enclose a group); dragging empty
             // space orbits — camera control stays available in every mode,
@@ -501,6 +549,8 @@ struct MetalCanvas: UIViewRepresentable {
             case .paint:
                 return .orbit  // handled above; kept for exhaustiveness
             case .measure:
+                return .orbit  // handled above; kept for exhaustiveness
+            case .vlh:
                 return .orbit  // handled above; kept for exhaustiveness
             case .layFlat:
                 // Touch-hover: dragging across the object highlights the

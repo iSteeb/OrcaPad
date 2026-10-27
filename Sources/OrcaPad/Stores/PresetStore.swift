@@ -803,6 +803,125 @@ final class PresetStore {
         }
     }
 
+    // MARK: Preset creation (desktop Create Printer/Filament Preset, ABI v41)
+
+    /// Desktop "Create Filament Preset": clones `base` (nil = the selected
+    /// filament) with vendor/type overrides and saves it as a user preset
+    /// (the engine activates it), then refreshes the lists and selects it.
+    /// Returns whether the new preset is selected.
+    @discardableResult
+    func createFilament(
+        base: String?,
+        name: String,
+        vendor: String,
+        filamentType: String
+    ) async -> Bool {
+        guard let engine, isReady, !isSelecting else {
+            status.report(.presets, "create filament blocked: presets are busy")
+            return false
+        }
+        guard !isEngineBusy else {
+            status.report(.presets, "presets: locked while slicing — available again when the slice finishes")
+            return false
+        }
+        isSelecting = true
+        let result = await BackgroundWork.run(operation: "create filament preset") {
+            try engine.createFilament(
+                base: base,
+                name: name,
+                vendor: vendor.isEmpty ? nil : vendor,
+                filamentType: filamentType.isEmpty ? nil : filamentType
+            ).get()
+        }
+        isSelecting = false
+        switch result {
+        case .success:
+            guard await refreshFromEngine() else { return false }
+            status.report(.presets, "filament preset created: \(name)")
+            return await select(kind: .filament, name: name)
+        case .failure(let failure):
+            status.report(.presets, failure: failure)
+            return false
+        }
+    }
+
+    /// Desktop "Create Printer Preset": clones `base` (nil = the selected
+    /// machine) with model/variant/nozzle overrides; the engine also clones
+    /// the selected process and filament presets with `compatible_printers`
+    /// carrying the new printer (the counts are reported). The new presets
+    /// are user presets and the machine is selected. Returns whether the
+    /// new printer is selected.
+    @discardableResult
+    func createPrinter(
+        base: String?,
+        name: String,
+        model: String,
+        variant: String,
+        nozzleDiameters: [Double]
+    ) async -> Bool {
+        guard let engine, isReady, !isSelecting else {
+            status.report(.presets, "create printer blocked: presets are busy")
+            return false
+        }
+        guard !isEngineBusy else {
+            status.report(.presets, "presets: locked while slicing — available again when the slice finishes")
+            return false
+        }
+        isSelecting = true
+        let result = await BackgroundWork.run(operation: "create printer preset") {
+            try engine.createPrinter(
+                base: base,
+                name: name,
+                model: model,
+                variant: variant,
+                nozzleDiameters: nozzleDiameters
+            ).get()
+        }
+        isSelecting = false
+        switch result {
+        case .success(let counts):
+            guard await refreshFromEngine() else { return false }
+            status.report(
+                .presets,
+                "printer preset created: \(name) \u{00b7} cloned " +
+                    "\(counts.filaments) filament and \(counts.processes) process preset(s)"
+            )
+            return await select(kind: .machine, name: name)
+        case .failure(let failure):
+            status.report(.presets, failure: failure)
+            return false
+        }
+    }
+
+    // MARK: Bed geometry refresh (machine change subset)
+
+    /// Re-reads the engine's print volume — the same bed-geometry refresh a
+    /// preset-picker machine change performs (RootView observes `printVolume`
+    /// and re-syncs the plate grid). The engine volume follows the SELECTED
+    /// machine preset: an edited-but-unsaved bed shape reaches slicing
+    /// immediately (full_config merges edited presets) but the plate grid
+    /// only after "Save as preset…" (saving activates the user preset) or a
+    /// machine re-selection.
+    func refreshMachineGeometry() async {
+        guard let engine, isReady, !isSelecting else {
+            status.report(.presets, "bed geometry refresh blocked: presets are busy")
+            return
+        }
+        guard !isEngineBusy else {
+            status.report(.presets, "presets: locked while slicing — available again when the slice finishes")
+            return
+        }
+        let result = await BackgroundWork.run(operation: "reload bed geometry") {
+            try engine.printVolume().get()
+        }
+        switch result {
+        case .success(let volume):
+            printVolume = volume
+        case .failure(let failure):
+            status.report(.presets, failure: failure)
+        }
+    }
+
     // MARK: Plate type (desktop sidebar "Plate type")
 
     func setBedType(_ value: Int32) async {
@@ -931,6 +1050,36 @@ final class PresetStore {
         let result = await BackgroundWork.run(operation: "import bundle") { () -> String in
             let count = try engine.importBundle(from: vendorJSON.path).get()
             return "\(count) bundle preset(s) imported — save presets to keep them"
+        }
+        switch result {
+        case .success(let note):
+            if await refreshFromEngine() {
+                status.report(.presets, note)
+            }
+        case .failure(let failure):
+            status.report(.presets, failure: failure)
+        }
+    }
+
+    /// Desktop "Import Configs" (legacy INI): applies the INI onto the
+    /// edited presets per kind and saves each as a user preset (selected).
+    /// The picked file is copied into the sandbox first (the engine needs a
+    /// plain readable path; the picker URL is security-scoped).
+    func importLegacyIni(at url: URL) async {
+        guard let engine, isReady, !isSelecting else {
+            status.report(.presets, "import blocked: presets are busy")
+            return
+        }
+        guard !isEngineBusy else {
+            status.report(.presets, "presets: locked while slicing — available again when the slice finishes")
+            return
+        }
+        isSelecting = true
+        defer { isSelecting = false }
+        let result = await BackgroundWork.run(operation: "import ini") { () -> String in
+            let sandboxURL = try EnginePaths.copyImportIntoSandbox(url, kind: "ini")
+            let count = try engine.importIni(path: sandboxURL.path).get()
+            return "imported \(count) preset(s) from \(url.lastPathComponent)"
         }
         switch result {
         case .success(let note):

@@ -24,6 +24,9 @@ struct RootView: View {
     @AppStorage(TipCatalog.Storage.enabledKey) private var tipsEnabled = true
     @State private var tipsPresented = false
     @State private var didPresentTipsThisLaunch = false
+    /// Preferences ▸ Files ▸ autosave interval (minutes,
+    /// 0 = off) — drives the interval timer task below.
+    @AppStorage("autosave.intervalMinutes") private var autosaveInterval = 5
 
     /// Presses of the Device tab button needed to toggle the debug overlay,
     /// and the window they must fall within.
@@ -78,6 +81,23 @@ struct RootView: View {
                 Task { await environment.autosaveSession() }
             }
         }
+        // Interval autosave (files.auto-backup): a repeating timer while
+        // the app is ACTIVE. The task id re-keys on the interval AND the
+        // active flag, so changing the preference or leaving the foreground
+        // cancels/pauses it (background = no timer); AppEnvironment decides
+        // dirty (revision since last autosave) and idle at each tick.
+        .task(id: autosaveTickKey) {
+            guard scenePhase == .active, autosaveInterval > 0 else { return }
+            while !Task.isCancelled {
+                do {
+                    try await Task.sleep(for: .seconds(60 * autosaveInterval))
+                } catch {
+                    break  // cancelled: interval or active state changed
+                }
+                guard !Task.isCancelled else { break }
+                await environment.autosaveIfDirty()
+            }
+        }
         .onOpenURL { url in
             handleOpenURL(url)
         }
@@ -109,6 +129,11 @@ struct RootView: View {
         } message: {
             Text("Opening a project replaces the objects on the plate and loads the project's printer, filament and process settings. Unsaved changes are lost.")
         }
+    }
+
+    /// The interval timer's identity: active state + interval minutes.
+    private var autosaveTickKey: String {
+        "\(scenePhase == .active)-\(autosaveInterval)"
     }
 
     // MARK: Open-in from Files / Mail (document types)

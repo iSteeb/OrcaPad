@@ -111,12 +111,10 @@ note = "rectangle (marquee) selection is the Select gizmo mode; a group delete i
 id = "plate.move"
 area = "plate"
 title = "Move gizmo + panel"
-status = "partial"
+status = "done"
 desktop = ["gizmo:Move"]
-evidence = ["abi:orca_plater_instance_set", "client:private var movePanel"]
-gap = "X/Y only: Z and the world/object coordinate switch are omitted (the engine rests objects on the bed; user decision)"
-work = "UI"
-priority = 30
+evidence = ["abi:orca_plater_instance_set", 'client:private var movePanel', 'client:transform.offsetZ']
+note = "ABI v41 completes Z: the move panel edits the instance z offset, honored when the object floats (desktop ModelInstance::auto_drop, snapshot-carried); resting objects still rest (the transform path skips the snap only for floating instances, exactly like the desktop gizmo); touch drag stays X/Y (dragging in the view plane)"
 
 [[feature]]
 id = "plate.rotate"
@@ -188,12 +186,12 @@ evidence = ["client:Center on bed"]
 id = "plate.drop"
 area = "plate"
 title = "Drop to bed / auto drop"
-status = "partial"
+status = "done"
 desktop = ["context:Drop", "context:Auto Drop"]
-evidence = ["abi:orca_plater_ensure_on_bed"]
-gap = "objects always rest on the bed; no toggle to keep an object floating"
-work = "Bridge + UI"
-priority = 31
+evidence = ["abi:orca_plater_instance_set_auto_drop", "abi:orca_plater_object_drop",
+            "tests:orca_plater_instance_set_auto_drop", 'client:func dropObjectToBed',
+            'client:func setAutoDrop']
+note = "ABI v41: the desktop ModelInstance::auto_drop flag is carried on the snapshot and serialized with the model; post-transform rest-on-bed is skipped while floating (engine ensure_on_bed itself skips auto_drop=false instances), context Drop translates by -min_z like desktop Selection::drop (works on floating objects), Keep floating / Auto drop object-menu toggles"
 
 [[feature]]
 id = "plate.split"
@@ -475,11 +473,12 @@ note = "NSVGUtils + Emboss are compiled (no OCCT needed for SVG parts)"
 id = "plate.variable-layer-height"
 area = "plate"
 title = "Variable layer height"
-status = "missing"
+status = "done"
 desktop = ["toolbar:layersediting"]
-work = "Bridge + UI"
-priority = 29
-note = "SlicingAdaptive.cpp is compiled"
+evidence = ["abi:orca_plater_object_height_profile", "abi:orca_plater_object_set_height_profile",
+            "abi:orca_plater_object_height_profile_adaptive", "tests:orca_plater_object_height_profile_adaptive",
+            'client:struct VLHPanel', 'client:func vlhAdaptive']
+note = "ABI v41: ModelObject::layer_height_profile through the Bridge (read/replace/adaptive via SlicingAdaptive layer_height_profile_adaptive, smooth via smooth_height_profile, manual adjust via adjust_layer_height_profile with the desktop action enum); Layers gizmo draws the desktop-style profile strip beside the object (curve + fill + z ticks), vertical drag adjusts with a local preview and one undo step on commit; panel: Adaptive quality, Smooth radius/keep-min, Reset; slicing consumes the profile through the engine's own PrintObject path"
 
 [[feature]]
 id = "plate.mesh-boolean"
@@ -572,10 +571,11 @@ note = "ABI v27 plates + ABI v28 slice-all: Bridge-owned plate grid (desktop lay
 id = "plate.plate-settings"
 area = "plate"
 title = "Per-plate settings (bed type, print sequence, spiral, first-layer order)"
-status = "missing"
+status = "done"
 desktop = ["plate:Customize current plate", "dialog:PlateSettingsDialog"]
-work = "Client-reimpl + Bridge"
-priority = 41
+evidence = ["abi:orca_plater_plate_settings", "abi:orca_plater_plate_set_settings",
+            "tests:orca_plater_plate_settings", 'client:struct PlateSettingsSheet']
+note = "ABI v41: per-plate DynamicPrintConfig on the Bridge plate (desktop PartPlate::m_config subset: curr_bed_type with the set_bed_type ordinals, print_sequence, spiral_mode, first/other layer extruder order); applied as overrides of the global print config for that plate exactly like desktop BackgroundSlicingProcess; 3MF projects round-trip the settings through PlateData.config; Plate settings sheet from the plate bar; other-layers sequence is a flat order (desktop's per-z-range list is an ABI limit)"
 
 [[feature]]
 id = "plate.camera-gestures"
@@ -738,12 +738,10 @@ priority = 103
 id = "prepare.global-search"
 area = "prepare"
 title = "Settings search"
-status = "partial"
+status = "done"
 source = "src/slic3r/GUI/Search.hpp:class OptionsSearcher"
-evidence = ["client:\\.searchable"]
-gap = "per-screen search only; desktop searches every tab"
-work = "UI"
-priority = 105
+evidence = ['client:struct SettingsSearchResults']
+note = "cross-kind search over all three preset kinds (edited config dumps, grouped by kind, expert level so hidden options stay findable like desktop) with jump-to-page; the stale gap text described the pre-0.15 state"
 
 [[feature]]
 id = "prepare.user-presets"
@@ -824,10 +822,10 @@ note = "Desktop WipingDialog parity on the machine preset: the N x N purge matri
 id = "prepare.ramming"
 area = "prepare"
 title = "Filament ramming parameters editor"
-status = "missing"
+status = "done"
 desktop = ["dialog:RammingDialog"]
-work = "UI"
-priority = 113
+evidence = ['client:struct RammingParametersEditor']
+note = "segment-table editor for ramming_parameters (volume/speed pairs parsed and re-serialized through the same per-key commit path; desktop edits slot 0 too)"
 
 [[feature]]
 id = "prepare.filament-grouping"
@@ -842,24 +840,23 @@ priority = 114
 id = "prepare.config-import-export"
 area = "prepare"
 title = "Import / export configs and preset bundles"
-status = "partial"
+status = "done"
 desktop = ["menu:Import Configs", "menu:Export Preset Bundle", "menu:Preset Bundle", "dialog:ExportConfigsDialog",
            "format:FT_INI"]
-evidence = ["abi:orca_presets_export_configs", "abi:orca_presets_import_preset",
-            "abi:orca_presets_import_bundle", 'client:func exportCurrentConfigs\(']
-work = "Bridge + UI"
-gap = "json preset export/import (current selection as per-preset json files; single-preset import with kind inference) and vendor-bundle folder import done; legacy INI config files are not read and imports are session entries kept via save-as-user-preset"
+evidence = ["abi:orca_presets_export_configs", "abi:orca_presets_import_preset", "abi:orca_presets_import_bundle", "abi:orca_presets_import_ini", "tests:orca_presets_import_ini", 'client:func importLegacyIni']
+note = "json preset export/import (current selection, single-preset import with kind inference), vendor-bundle folder import AND legacy INI import (ABI v41: engine ConfigBase::load_from_ini -> user presets per matching kind, selected after import; tested)"
 
 [[feature]]
 id = "prepare.create-presets"
 area = "prepare"
 title = "Create printer / filament preset wizards"
-status = "missing"
+status = "done"
 desktop = ["dialog:CreateFilamentPresetDialog", "dialog:CreatePrinterPresetDialog",
            "dialog:CreatePresetForPrinterDialog", "dialog:CreatePresetSuccessfulDialog",
            "dialog:EditFilamentPresetDialog"]
-work = "Bridge + UI"
-priority = 109
+evidence = ["abi:orca_presets_create_filament", "abi:orca_presets_create_printer",
+            "tests:orca_presets_create_printer", 'client:struct CreatePrinterSheet']
+note = "ABI v41 engine cloning: Create Filament (base picker + vendor/type onto a detached user preset), Create Printer (base + model/variant/nozzle vector rewrite, selected process + filament presets cloned with compatible_printers via the desktop clone_presets semantics); failures surface typed"
 
 [[feature]]
 id = "prepare.setup-wizard"
@@ -876,10 +873,10 @@ note = "Desktop ConfigWizard parity: SetupWizardSheet (wand button in the Prepar
 id = "prepare.bed-shape"
 area = "prepare"
 title = "Bed shape, custom bed texture / model"
-status = "missing"
+status = "done"
 desktop = ["dialog:BedShapeDialog", "format:FT_TEX"]
-work = "UI"
-priority = 111
+evidence = ['client:struct BedShapeSheet']
+note = "bed_shape editor (rect/elliptical, size + origin, serialized to the desktop xY polygon format through the preset value contract) + custom bed texture/model pickers (bed_custom_texture / bed_custom_model copied into Application Support); the plate grid re-reads the volume on machine re-selection or preset save"
 
 [[feature]]
 id = "prepare.edit-gcode"
@@ -1412,13 +1409,10 @@ note = "recent projects (Documents/Projects by date) AND recent imported models 
 id = "files.backup"
 area = "files"
 title = "Project auto-backup / crash restore"
-status = "partial"
+status = "done"
 desktop = ["pref:Auto backup"]
-evidence = ['client:func autosaveSession\(', 'client:func saveAutosave\(',
-            'client:func restoreAutosaveIfNeeded\(']
-work = "Bridge + UI"
-priority = 157
-gap = "background 3MF autosave + one-shot launch restore (thumbnail-less, Application Support); no crash-mid-work restore interval"
+evidence = ['client:func autosaveSession', 'client:func autosaveIfDirty']
+note = "background 3MF autosave on both ScenePhase transitions AND a repeating interval (Preferences autosave.intervalMinutes, default 5, 0 = off) that saves when the revision advanced and the document is idle; launch restore of a refused/kept autosave unchanged"
 
 [[feature]]
 id = "files.open-in"

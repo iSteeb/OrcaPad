@@ -126,6 +126,38 @@ public final class EnginePlater: @unchecked Sendable {
         /// Desktop slider-tick EDIT (ABI v40): replaces the item at printZ.
         case editCustomGcode(printZ: Double, kind: CustomGcodeKind,
                              extruder: Int, color: String, extra: String)
+        /// Desktop Drop/Auto Drop (ABI v41): instanceID nil = all instances.
+        case setAutoDrop(objectID: ObjectID, instanceID: InstanceID?, autoDrop: Bool)
+        /// Desktop context "Drop": rest the object on the bed now.
+        case dropObject(objectID: ObjectID)
+        /// Desktop per-plate settings (ABI v41): REPLACES the plate's
+        /// settings (nil fields = follow the project defaults).
+        case setPlateSettings(plateID: PlateID, settings: PlateSettings)
+        /// Desktop variable layer height (ABI v41): REPLACES the object's
+        /// profile (empty = reset to uniform).
+        case setHeightProfile(objectID: ObjectID, pairs: [Double])
+    }
+
+    /// One plate's print settings (desktop PlateSettingsDialog, ABI v41).
+    /// nil = follow the project defaults.
+    public struct PlateSettings: Sendable, Equatable {
+        public var bedType: Int?
+        public var printSequence: Int?   // 0 by layer, 1 by object
+        public var spiralMode: Bool?
+        public var firstLayerSequence: [Int]?
+        public var otherLayerSequence: [Int]?
+
+        public init(
+            bedType: Int? = nil, printSequence: Int? = nil,
+            spiralMode: Bool? = nil, firstLayerSequence: [Int]? = nil,
+            otherLayerSequence: [Int]? = nil
+        ) {
+            self.bedType = bedType
+            self.printSequence = printSequence
+            self.spiralMode = spiralMode
+            self.firstLayerSequence = firstLayerSequence
+            self.otherLayerSequence = otherLayerSequence
+        }
     }
 
     /// One layer-height range (desktop height-range modifiers).
@@ -1124,6 +1156,63 @@ public final class EnginePlater: @unchecked Sendable {
                     }
                 }
 
+            case .setAutoDrop(let objectID, let instanceID, let autoDrop):
+                try BridgeResult.consume(
+                    orca_plater_instance_set_auto_drop(
+                        handle, objectID.rawValue,
+                        instanceID?.rawValue ?? 0, autoDrop ? 1 : 0,
+                        &mutationRevision),
+                    operation: "set auto drop"
+                )
+
+            case .dropObject(let objectID):
+                try BridgeResult.consume(
+                    orca_plater_object_drop(
+                        handle, objectID.rawValue, &mutationRevision),
+                    operation: "drop to bed"
+                )
+
+            case .setPlateSettings(let plateID, let settings):
+                var raw = orca_plate_settings()
+                raw.bed_type = Int32(settings.bedType ?? -1)
+                raw.print_sequence = Int32(settings.printSequence ?? -1)
+                raw.spiral_mode = Int32(settings.spiralMode.map { $0 ? 1 : 0 } ?? -1)
+                if let first = settings.firstLayerSequence, !first.isEmpty {
+                    withUnsafeMutableBytes(of: &raw.first_layer_sequence) { buffer in
+                        let slots = buffer.baseAddress!.assumingMemoryBound(to: Int32.self)
+                        for (index, value) in first.prefix(16).enumerated() {
+                            slots[index] = Int32(value)
+                        }
+                    }
+                    raw.first_layer_sequence_count = Int32(min(first.count, 16))
+                }
+                if let other = settings.otherLayerSequence, !other.isEmpty {
+                    withUnsafeMutableBytes(of: &raw.other_layer_sequence) { buffer in
+                        let slots = buffer.baseAddress!.assumingMemoryBound(to: Int32.self)
+                        for (index, value) in other.prefix(16).enumerated() {
+                            slots[index] = Int32(value)
+                        }
+                    }
+                    raw.other_layer_sequence_count = Int32(min(other.count, 16))
+                }
+                try BridgeResult.consume(
+                    orca_plater_plate_set_settings(
+                        handle, plateID.rawValue, &raw, &mutationRevision),
+                    operation: "set plate settings"
+                )
+
+            case .setHeightProfile(let objectID, let pairs):
+                var values = pairs
+                try BridgeResult.consume(
+                    values.withUnsafeMutableBufferPointer { buffer in
+                        orca_plater_object_set_height_profile(
+                            handle, objectID.rawValue,
+                            buffer.baseAddress, UInt32(pairs.count),
+                            &mutationRevision)
+                    },
+                    operation: "set layer-height profile"
+                )
+
             case .paintReset(let objectID, let volumeID, let layer):
                 try BridgeResult.consume(
                     orca_plater_volume_paint_reset(
@@ -1656,6 +1745,117 @@ public final class EnginePlater: @unchecked Sendable {
         }
     }
 
+    // MARK: VLH + plate settings + drop (ABI v41)
+
+    /// The object's layer-height profile: flat (z, height) pairs.
+    public func heightProfile(objectID: ObjectID) throws -> [Double] {
+        try lock.withLock {
+            var raw: UnsafeMutablePointer<Double>?
+            var count: UInt32 = 0
+            try BridgeResult.consume(
+                orca_plater_object_height_profile(
+                    handle, objectID.rawValue, &raw, &count),
+                operation: "read layer-height profile"
+            )
+            guard let raw else { return [] }
+            defer { orca_height_profile_dispose(raw) }
+            return Array(UnsafeBufferPointer(start: raw, count: Int(count)))
+        }
+    }
+
+    /// Desktop "Adaptive": regenerates the profile from the mesh at the
+    /// given quality (-0.1..1). One undo step; returns the new profile.
+    public func adaptiveHeightProfile(
+        presets: EnginePresets, objectID: ObjectID, quality: Double
+    ) throws -> (pairs: [Double], revision: UInt64) {
+        try Self.withLockedHandles(plater: self, presets: presets) { platerHandle, presetHandle in
+            var raw: UnsafeMutablePointer<Double>?
+            var count: UInt32 = 0
+            var revision: UInt64 = 0
+            try BridgeResult.consume(
+                orca_plater_object_height_profile_adaptive(
+                    platerHandle, presetHandle, objectID.rawValue, quality,
+                    &raw, &count, &revision),
+                operation: "adaptive layer-height profile"
+            )
+            guard let raw else { return ([], revision) }
+            defer { orca_height_profile_dispose(raw) }
+            return (Array(UnsafeBufferPointer(start: raw, count: Int(count))), revision)
+        }
+    }
+
+    /// Desktop "Smooth": smooths the profile over `radius` layers.
+    public func smoothHeightProfile(
+        presets: EnginePresets, objectID: ObjectID, radius: UInt32, keepMin: Bool
+    ) throws -> (pairs: [Double], revision: UInt64) {
+        try Self.withLockedHandles(plater: self, presets: presets) { platerHandle, presetHandle in
+            var raw: UnsafeMutablePointer<Double>?
+            var count: UInt32 = 0
+            var revision: UInt64 = 0
+            try BridgeResult.consume(
+                orca_plater_object_height_profile_smooth(
+                    platerHandle, presetHandle, objectID.rawValue, radius,
+                    keepMin ? 1 : 0, &raw, &count, &revision),
+                operation: "smooth layer-height profile"
+            )
+            guard let raw else { return ([], revision) }
+            defer { orca_height_profile_dispose(raw) }
+            return (Array(UnsafeBufferPointer(start: raw, count: Int(count))), revision)
+        }
+    }
+
+    /// Desktop manual VLH editing at z (action: 0 increase, 1 decrease,
+    /// 2 reduce, 3 smooth). One undo step.
+    public func adjustHeightProfile(
+        presets: EnginePresets, objectID: ObjectID, z: Double,
+        thicknessDelta: Double, bandWidth: Double, action: Int32
+    ) throws -> MutationResult {
+        try Self.withLockedHandles(plater: self, presets: presets) { platerHandle, presetHandle in
+            var revision: UInt64 = 0
+            try BridgeResult.consume(
+                orca_plater_object_height_profile_adjust(
+                    platerHandle, presetHandle, objectID.rawValue, z,
+                    thicknessDelta, bandWidth, action, &revision),
+                operation: "adjust layer-height profile"
+            )
+            let scene = try snapshotLocked()
+            guard scene.revision.rawValue == revision else {
+                throw BridgeError.local(
+                    .internalInvariant, operation: "adjust layer-height profile",
+                    diagnostic: "revision mismatch after adjust"
+                )
+            }
+            return MutationResult(snapshot: scene)
+        }
+    }
+
+    /// The plate's print settings (nil fields follow the project defaults).
+    public func plateSettings(plateID: PlateID) throws -> PlateSettings {
+        try lock.withLock {
+            var raw = orca_plate_settings()
+            try BridgeResult.consume(
+                orca_plater_plate_settings(handle, plateID.rawValue, &raw),
+                operation: "read plate settings"
+            )
+            let firstCount = Int(raw.first_layer_sequence_count)
+            let otherCount = Int(raw.other_layer_sequence_count)
+            return PlateSettings(
+                bedType: raw.bed_type >= 0 ? Int(raw.bed_type) : nil,
+                printSequence: raw.print_sequence >= 0 ? Int(raw.print_sequence) : nil,
+                spiralMode: raw.spiral_mode >= 0 ? raw.spiral_mode == 1 : nil,
+                firstLayerSequence: firstCount > 0
+                    ? withUnsafeBytes(of: raw.first_layer_sequence) { buffer in
+                        let slots = buffer.baseAddress!.assumingMemoryBound(to: Int32.self)
+                        return (0..<min(firstCount, 16)).map { Int(slots[$0]) }
+                    } : nil,
+                otherLayerSequence: otherCount > 0
+                    ? withUnsafeBytes(of: raw.other_layer_sequence) { buffer in
+                        let slots = buffer.baseAddress!.assumingMemoryBound(to: Int32.self)
+                        return (0..<min(otherCount, 16)).map { Int(slots[$0]) }
+                    } : nil)
+        }
+    }
+
     /// Builds the measure context over the object's merged mesh (CPU-heavy:
     /// plane segmentation). Engine mutex serialized; not a mutation.
     public func measureContext(objectID: ObjectID) throws -> MeasureContext {
@@ -1887,6 +2087,7 @@ public final class EnginePlater: @unchecked Sendable {
                             matrix: matrix,
                             mirrored: rawInstance.mirrored != 0,
                             printable: rawInstance.printable != 0,
+                            autoDrop: rawInstance.auto_drop != 0,
                             plate: Int(rawInstance.plate)
                         ))
                     }

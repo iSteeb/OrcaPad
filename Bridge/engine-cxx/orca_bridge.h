@@ -7,7 +7,7 @@ extern "C" {
 #endif
 
 /// Version of the C ABI contract in this header. Callers verify it at runtime.
-#define ORCA_BRIDGE_ABI_VERSION ((uint32_t)40)
+#define ORCA_BRIDGE_ABI_VERSION ((uint32_t)41)
 
 typedef int32_t orca_status_code;
 #define ORCA_STATUS_OK                     ((orca_status_code)0)
@@ -74,7 +74,11 @@ typedef struct {
     uint8_t mirrored;
     /// 0 when excluded from slicing (desktop printable toggle).
     uint8_t printable;
-    uint8_t reserved[2];
+    /// 0 = keep this instance floating (desktop ModelInstance::auto_drop:
+    /// post-transform rest-on-bed is skipped; under-bed instances are
+    /// clamped above the bed instead). Serialized with the model.
+    uint8_t auto_drop;
+    uint8_t reserved[1];
     /// The engine's instance matrix (ModelInstance::get_matrix()),
     /// column-major. Clients render and preview from this matrix and never
     /// re-derive it from the Euler angles.
@@ -533,6 +537,94 @@ orca_result orca_plater_custom_gcode_edit(orca_plater *plater,
                                            const char *color, const char *extra,
                                            orca_revision *out_revision);
 
+typedef struct orca_presets orca_presets;
+
+// --- variable layer height (desktop layersediting toolbar, ABI v41) ----------
+
+/// The object's layer-height profile: flat (z, height) pairs, z ascending,
+/// height > 0 (ModelObject::layer_height_profile). Read-only; caller owns
+/// the array (orca_height_profile_dispose).
+orca_result orca_plater_object_height_profile(
+    orca_plater *plater, orca_object_id object_id,
+    double **out_pairs, uint32_t *out_count);
+void orca_height_profile_dispose(double *pairs);
+
+/// REPLACES the profile (one undo step "Variable layer height").
+/// Validation: even count >= 4, finite, z strictly ascending from 0, last z
+/// == the object's max z (within 1e-6), heights > 0.
+orca_result orca_plater_object_set_height_profile(
+    orca_plater *plater, orca_object_id object_id,
+    const double *pairs, uint32_t count, orca_revision *out_revision);
+
+/// Desktop "Adaptive" (SlicingAdaptive): regenerates the profile from the
+/// mesh at `quality_factor` (desktop slider -0.1..1). Needs the presets
+/// session for the real layer-height config. One undo step; returns the
+/// new profile (caller owns it).
+orca_result orca_plater_object_height_profile_adaptive(
+    orca_plater *plater, orca_presets *presets, orca_object_id object_id,
+    double quality_factor, double **out_pairs, uint32_t *out_count,
+    orca_revision *out_revision);
+
+/// Desktop "Smooth": smooth_height_profile over `radius` layers
+/// (keep_min = keep local minima). One undo step.
+orca_result orca_plater_object_height_profile_smooth(
+    orca_plater *plater, orca_presets *presets, orca_object_id object_id,
+    uint32_t radius, uint8_t keep_min, double **out_pairs, uint32_t *out_count,
+    orca_revision *out_revision);
+
+/// Desktop manual profile editing: adjust_layer_height_profile at z with
+/// `thickness_delta` over `band_width` mm. action: 0 increase, 1 decrease,
+/// 2 reduce, 3 smooth (desktop LayerHeightEditActionType). One undo step.
+orca_result orca_plater_object_height_profile_adjust(
+    orca_plater *plater, orca_presets *presets, orca_object_id object_id,
+    double z, double thickness_delta, double band_width, int32_t action,
+    orca_revision *out_revision);
+
+// --- per-plate settings (desktop PlateSettingsDialog, ABI v41) -----------------
+
+/// One plate's print settings (desktop PartPlate::m_config subset the
+/// PlateSettingsDialog edits). -1 / 0-count = follow the project defaults.
+typedef struct {
+    int32_t bed_type;                    // -1 default; else BedType ordinal
+    int32_t print_sequence;              // -1 default; 0 by layer, 1 by object
+    int32_t spiral_mode;                 // -1 default; 0 off, 1 on
+    int32_t first_layer_sequence[16];    // 1-based extruder order
+    int32_t first_layer_sequence_count;  // 0 = unset
+    int32_t other_layer_sequence[16];
+    int32_t other_layer_sequence_count;
+} orca_plate_settings;
+
+/// Reads the plate's settings (struct zeroed first; unset fields = -1/0).
+orca_result orca_plater_plate_settings(orca_plater *plater,
+                                        orca_plate_id plate_id,
+                                        orca_plate_settings *out);
+
+/// Writes the plate's settings (one undo step "Plate settings").
+/// Slicing applies them as overrides of the global print config for this
+/// plate (desktop BackgroundSlicingProcess parity); 3MF projects round-trip
+/// them through the engine's PlateData config. bed_type uses the same
+/// ordinals as orca_presets_set_bed_type.
+orca_result orca_plater_plate_set_settings(
+    orca_plater *plater, orca_plate_id plate_id,
+    const orca_plate_settings *settings, orca_revision *out_revision);
+
+// --- drop / floating (desktop Drop + Auto Drop, ABI v41) -----------------------
+
+/// Sets the desktop ModelInstance::auto_drop flag for one instance
+/// (instance_id 0 = every instance of the object). Enabling (1) drops the
+/// instance to the bed immediately; disabling (0) leaves it floating
+/// (post-transform rest-on-bed is skipped while disabled). One undo step.
+orca_result orca_plater_instance_set_auto_drop(orca_plater *plater,
+                                               orca_object_id object_id,
+                                               orca_instance_id instance_id,
+                                               uint8_t auto_drop,
+                                               orca_revision *out_revision);
+
+/// Desktop context "Drop": rests the object on the bed now (one undo
+/// step), regardless of the auto-drop flag.
+orca_result orca_plater_object_drop(orca_plater *plater, orca_object_id object_id,
+                                    orca_revision *out_revision);
+
 // --- painting (desktop painter gizmos, ABI v36) ------------------------------
 
 /// Paint layers: each is a ModelVolume FacetsAnnotation consumed by slicing
@@ -932,6 +1024,43 @@ orca_result orca_presets_import_preset(orca_presets *presets, const char *path,
 /// Returns the number of presets loaded.
 orca_result orca_presets_import_bundle(orca_presets *presets, const char *path,
                                        uint32_t *out_count);
+
+// --- preset creation (desktop CreatePresetsDialog, ABI v41) -------------------
+
+/// Desktop "Create Filament Preset": clones the SELECTED filament (or
+/// `base_preset_name` when non-null) with `vendor` / `filament_type`
+/// overrides and saves it as a user preset named `new_name`. The previous
+/// selection is restored. Returns the number of created presets (1).
+orca_result orca_presets_create_filament(orca_presets *presets,
+                                         const char *base_preset_name,
+                                         const char *new_name,
+                                         const char *vendor,
+                                         const char *filament_type,
+                                         uint32_t *out_count);
+
+/// Desktop "Create Printer Preset" (based on the selected / named base):
+/// rewrites printer_model / printer_variant / nozzle_diameter and saves a
+/// detached user printer preset `new_name`; every selected-compatible
+/// process preset is cloned with the new nozzle (desktop
+/// clone_presets_for_printer semantics through clone_presets) and filament
+/// presets get compatible_printers rewritten. Returns created counts
+/// (printer, filament, process).
+orca_result orca_presets_create_printer(orca_presets *presets,
+                                         const char *base_preset_name,
+                                         const char *new_name,
+                                         const char *printer_model,
+                                         const char *printer_variant,
+                                         const char *nozzle_diameters_csv,
+                                         uint32_t *out_printer_count,
+                                         uint32_t *out_filament_count,
+                                         uint32_t *out_process_count);
+
+/// Desktop "Import Configs" (legacy INI): loads the INI file into a full
+/// config and saves THREE user presets named `<ini base> printer/filament/
+/// process` carrying the keys of each kind, then selects all three.
+/// Returns the number of created presets (3) or a typed failure.
+orca_result orca_presets_import_ini(orca_presets *presets, const char *path,
+                                    uint32_t *out_count);
 
 /// Serialized key→value dump of either the edited (`edited` != 0) or the
 /// selected system (`edited` == 0) preset config of `kind`; the client diffs

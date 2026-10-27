@@ -13,6 +13,8 @@ struct PresetActionsMenu: View {
     @Environment(AppEnvironment.self) private var environment
     @State private var savePresented = false
     @State private var deleteConfirmation = false
+    /// Create Preset wizards (prepare create-wizards, ABI v41).
+    @State private var createPresented = false
 
     private var presets: PresetStore { environment.presets }
 
@@ -48,12 +50,33 @@ struct PresetActionsMenu: View {
                     Label("Delete preset", systemImage: "trash")
                 }
             }
+            // Desktop Create Preset wizards (prepare create-wizards).
+            if kind == .machine || kind == .filament {
+                Divider()
+                Button {
+                    createPresented = true
+                } label: {
+                    Label(
+                        kind == .machine
+                            ? "Create printer preset\u{2026}"
+                            : "Create filament preset\u{2026}",
+                        systemImage: "plus.square.on.square"
+                    )
+                }
+            }
         } label: {
             Label("Preset", systemImage: "ellipsis.circle")
         }
         .disabled(presets.isSelecting)
         .sheet(isPresented: $savePresented) {
             PresetSaveSheet(kind: kind, currentName: currentName, origin: presets.origin(of: kind))
+        }
+        .sheet(isPresented: $createPresented) {
+            switch kind {
+            case .machine: CreatePrinterSheet(presets: presets)
+            case .filament: CreateFilamentSheet(presets: presets)
+            case .process: EmptyView()
+            }
         }
         .confirmationDialog(
             "Delete \"\(currentName)\"?",

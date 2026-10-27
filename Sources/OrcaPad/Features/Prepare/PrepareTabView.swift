@@ -3,6 +3,7 @@
 
 import OrcaBridge
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// Prepare tab (desktop parity): printer and filament presets with their
 /// settings screens, the process preset with its desktop pages inline
@@ -17,14 +18,28 @@ struct PrepareTabView: View {
     @AppStorage("presets.filterCompatible") private var filterCompatible = true
     @State private var setupPresented = false
     /// Per-kind mode memory (user spec: simple for printer, advanced for
-    /// process, remembered across switches). Persisted per kind.
-    @State private var kindModes: [PresetKind: SettingsModeFilter] =
-        Dictionary(uniqueKeysWithValues: PresetKind.allCases.map { kind in
-            (kind, UserDefaults.standard.string(forKey: "prepare.mode.\(kind)")
-                .flatMap(SettingsModeFilter.init(rawValue:)) ?? .simple)
-        })
+    /// process, remembered across switches). Persisted per kind through
+    /// @AppStorage — the Preferences screen binds the SAME keys, so a
+    /// change there re-levels the open pages live.
+    @AppStorage("prepare.mode.machine") private var machineMode =
+        SettingsModeFilter.simple.rawValue
+    @AppStorage("prepare.mode.filament") private var filamentMode =
+        SettingsModeFilter.simple.rawValue
+    @AppStorage("prepare.mode.process") private var processMode =
+        SettingsModeFilter.simple.rawValue
+
+    private func mode(for kind: PresetKind) -> SettingsModeFilter {
+        let raw: String
+        switch kind {
+        case .machine: raw = machineMode
+        case .filament: raw = filamentMode
+        case .process: raw = processMode
+        }
+        return SettingsModeFilter(rawValue: raw) ?? .simple
+    }
+
     private var modeFilter: SettingsModeFilter {
-        get { kindModes[activeKind] ?? .simple }
+        mode(for: activeKind)
     }
     @State private var search = ""
     @State private var showAllProcesses = false
@@ -33,6 +48,12 @@ struct PrepareTabView: View {
     @State private var pendingSelection: PendingSelection?
     @State private var importPresetPresented = false
     @State private var importBundlePresented = false
+    /// Legacy desktop config INI import (prepare config import).
+    @State private var importIniPresented = false
+    /// Bed shape editor (prepare bed-shape), from the printer page.
+    @State private var bedShapePresented = false
+    /// App preferences (0.18 flagship), from the pill's gear.
+    @State private var preferencesPresented = false
     /// Board cycle-0.16: compare-presets sheet for the ACTIVE kind.
     @State private var comparePresented = false
     /// Board §wave-b/2: auto re-slice on document changes (persisted —
@@ -229,6 +250,12 @@ struct PrepareTabView: View {
         .sheet(isPresented: $comparePresented) {
             ComparePresetsSheet(presets: presets, kind: activeKind)
         }
+        .sheet(isPresented: $preferencesPresented) {
+            PreferencesScreen()
+        }
+        .sheet(isPresented: $bedShapePresented) {
+            BedShapeSheet(presets: presets)
+        }
         .fileImporter(
             isPresented: $importPresetPresented,
             allowedContentTypes: [.json],
@@ -247,7 +274,22 @@ struct PrepareTabView: View {
                 }
             }
         )
+        .fileImporter(
+            isPresented: $importIniPresented,
+            allowedContentTypes: Self.iniTypes,
+            onCompletion: { result in
+                if case .success(let url) = result {
+                    Task { await presets.importLegacyIni(at: url) }
+                }
+            }
+        )
     }
+
+    /// Legacy desktop config INIs (prepare config import): no dedicated
+    /// system UTType exists — map the .ini extension; the plain-text
+    /// fallback keeps the picker usable.
+    private static let iniTypes: [UTType] =
+        [UTType(filenameExtension: "ini", conformingTo: .data) ?? .plainText]
 
     /// The Prepare chrome: ONE wide, horizontally SCROLLABLE pill.
     /// [Mode] | [Printer][Filament][Process] | active kind's page chips
@@ -317,6 +359,11 @@ struct PrepareTabView: View {
                     } label: {
                         Label("Import config bundle\u{2026}", systemImage: "shippingbox")
                     }
+                    Button {
+                        importIniPresented = true
+                    } label: {
+                        Label("Import INI\u{2026}", systemImage: "doc.badge.arrow.down")
+                    }
                     Divider()
                     // Board cycle-0.16: desktop DiffPresetDialog parity —
                     // compare two presets of the active kind side by side.
@@ -338,6 +385,15 @@ struct PrepareTabView: View {
                     }
                 } label: {
                     ChromeToolLabel(symbol: "arrow.left.arrow.right.square", label: "Configs")
+                }
+                .buttonStyle(.plain)
+                Divider().frame(height: 28)
+                // App preferences (0.18 flagship): every scattered toggle
+                // plus the new Files settings in one place.
+                Button {
+                    preferencesPresented = true
+                } label: {
+                    ChromeToolLabel(symbol: "gearshape", label: "Prefs")
                 }
                 .buttonStyle(.plain)
                 Divider().frame(height: 28)
@@ -416,8 +472,11 @@ struct PrepareTabView: View {
     }
 
     private func setMode(_ filter: SettingsModeFilter, for kind: PresetKind) {
-        kindModes[kind] = filter
-        UserDefaults.standard.set(filter.rawValue, forKey: "prepare.mode.\(kind)")
+        switch kind {
+        case .machine: machineMode = filter.rawValue
+        case .filament: filamentMode = filter.rawValue
+        case .process: processMode = filter.rawValue
+        }
         if kind == activeKind { activePage = nil }
     }
 
@@ -426,7 +485,7 @@ struct PrepareTabView: View {
     /// mode level, the level is elevated to Expert (desktop search unhides
     /// options too) so the destination row is actually visible.
     private func jumpToSetting(kind: PresetKind, key: String, page: String) {
-        let filter = kindModes[kind] ?? .simple
+        let filter = mode(for: kind)
         if case .success(let index) = ConfigSchema.index,
            let option = index[key],
            !ConfigSchema.isVisible(mode: option.mode ?? 0, filter: filter) {
@@ -542,6 +601,7 @@ struct PrepareTabView: View {
                     settingsSections(.machine)
                 case .filament:
                     presetPickerSection(.filament)
+                    filamentActionsSection
                     settingsSections(.filament)
                 case .process:
                     presetPickerSection(.process)
@@ -638,6 +698,42 @@ struct PrepareTabView: View {
                         .foregroundStyle(.secondary)
                         .monospacedDigit()
                 }
+            }
+            Button {
+                bedShapePresented = true
+            } label: {
+                Label("Bed shape\u{2026}", systemImage: "rectangle.dashed")
+            }
+            HStack {
+                Text("Printer preset")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                PresetActionsMenu(kind: .machine)
+                    .font(.caption)
+            }
+        }
+    }
+
+    /// Filament page actions (prepare create-wizards entry): the same
+    /// preset menu the process page has — save/delete/reset plus the
+    /// create-filament wizard.
+    private var filamentActionsSection: some View {
+        Section("Filament") {
+            HStack {
+                Text("Filament preset")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                PresetActionsMenu(kind: .filament)
+                    .font(.caption)
+            }
+            let modified = presets.modifiedKeys(in: .filament).count
+            if modified > 0 {
+                Button("Reset \(modified) modified filament settings") {
+                    Task { await presets.resetKind(.filament) }
+                }
+                .font(.caption)
             }
         }
     }
@@ -751,7 +847,7 @@ struct PrepareTabView: View {
     private func settingsSections(_ kind: PresetKind) -> some View {
         SettingsPagesSections(
             kind: kind,
-            filter: kindModes[kind] ?? .simple,
+            filter: mode(for: kind),
             // Search routes through the cross-kind results list above; the
             // page itself always renders unfiltered here.
             search: "",
