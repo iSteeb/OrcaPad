@@ -1,9 +1,15 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (c) 2026 OrcaPad contributors
 
+import AuthenticationServices
+import CryptoKit
 import Foundation
+import Network
 import OrcaBridge
 import Observation
+import Security
+import UIKit
+import os
 
 /// Upload of sliced G-code to a printer host (desktop PrintHostDialog /
 /// "Send" parity). The desktop implements the HTTP against each host with
@@ -20,6 +26,10 @@ final class PrintHostService {
         case http(status: Int, host: String)
         case rejected(String)
         case transport(String)
+        /// Raw TCP console failure (MKS M23/M24 start): the file IS uploaded,
+        /// only the start command failed (same semantics as a failed Duet
+        /// start request).
+        case console(String)
 
         var errorDescription: String? {
             switch self {
@@ -33,6 +43,8 @@ final class PrintHostService {
                 return message
             case .transport(let message):
                 return "Upload failed: \(message)"
+            case .console(let message):
+                return "Upload succeeded but the start command failed: \(message)"
             }
         }
     }
@@ -163,17 +175,28 @@ final class PrintHostService {
         /// the web app only (quickprint?file_id=, 3DPrinterOS.cpp:501).
         case printerOSUpload(base: URL)
 
-        /// Validates the body; returns the completion note when the host
-        /// needs one (nil = nothing to report).
-        func check(_ body: Data, startPrint: Bool) throws -> String? {
+        /// What a validated body reports back to the upload flow.
+        struct Outcome: Sendable {
+            /// Status-line note when the host needs one (nil = nothing).
+            let note: String?
+            /// A URL the DESKTOP opens in the system browser
+            /// (wxLaunchDefaultBrowser); OrcaPad opens it through
+            /// UIApplication (nil = none).
+            let launchURL: URL?
+        }
+
+        /// Validates the body; returns what the host still needs from the
+        /// user (nil note and nil URL = nothing to report).
+        func check(_ body: Data, startPrint: Bool) throws -> Outcome {
             switch self {
             case .flashforgeLocalAPI:
                 try Self.checkFlashforge(body)
-                return nil
+                return Outcome(note: nil, launchURL: nil)
             case .simplyPrintTempUpload(let filename):
-                return try Self.noteSimplyPrint(body, filename: filename)
+                return try Self.outcomeSimplyPrint(
+                    body, filename: filename, startPrint: startPrint)
             case .printerOSUpload(let base):
-                return try Self.notePrinterOS(body, base: base, startPrint: startPrint)
+                return try Self.outcomePrinterOS(body, base: base, startPrint: startPrint)
             }
         }
 
@@ -205,23 +228,28 @@ final class PrintHostService {
             }
         }
 
-        private static func noteSimplyPrint(_ body: Data, filename: String) throws -> String {
+        private static func outcomeSimplyPrint(
+            _ body: Data, filename: String, startPrint: Bool
+        ) throws -> Outcome {
             let dictionary = try object(body)
             guard let uuid = dictionary["uuid"] as? String else {
                 throw UploadError.rejected("SimplyPrint did not return the temp-file id.")
             }
             // do_temp_upload opens this panel link in a browser; the temp
             // file is unreachable without it, so the note carries it.
-            let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-._~"))
-            let encodedName = filename.addingPercentEncoding(withAllowedCharacters: allowed)
-                ?? filename
-            return "SimplyPrint: open https://simplyprint.io/panel?import=tmp:\(uuid)"
-                + "&filename=\(encodedName) to import the file and start the print."
+            var panel = URLComponents(string: "https://simplyprint.io/panel")!
+            panel.queryItems = [
+                URLQueryItem(name: "import", value: "tmp:\(uuid)"),
+                URLQueryItem(name: "filename", value: filename),
+            ]
+            return Outcome(
+                note: "SimplyPrint: temp file uploaded — import it in the panel to print.",
+                launchURL: startPrint ? panel.url : nil)
         }
 
-        private static func notePrinterOS(
+        private static func outcomePrinterOS(
             _ body: Data, base: URL, startPrint: Bool
-        ) throws -> String {
+        ) throws -> Outcome {
             let dictionary = try object(body)
             // on_complete (460-478): `result` + `message.file_id` on
             // success; `message` as plain text on failure.
@@ -240,9 +268,13 @@ final class PrintHostService {
             var quickPrint = base
             quickPrint.append(path: "quickprint")
             quickPrint.append(queryItems: [URLQueryItem(name: "file_id", value: fileID)])
-            return startPrint
-                ? "3DPrinterOS: open \(quickPrint.absoluteString) to start the print."
-                : "3DPrinterOS: file uploaded as \(fileID)."
+            // 3DPrinterOS.cpp:501: the desktop has no REST start — the
+            // quickprint page IS the start action, opened in the browser.
+            return Outcome(
+                note: startPrint
+                    ? "3DPrinterOS: opening the quick-print page for file \(fileID)."
+                    : "3DPrinterOS: file uploaded as \(fileID).",
+                launchURL: startPrint ? quickPrint : nil)
         }
     }
 
@@ -368,7 +400,7 @@ final class PrintHostService {
         do {
             // Reading a multi-megabyte G-code file must not block the main
             // actor; the request builder is pure and nonisolated.
-            let plan = try await Task.detached(priority: .userInitiated) {
+            var plan = try await Task.detached(priority: .userInitiated) {
                 try Self.request(for: printer, file: gcode, startPrint: startPrint)
             }.value
             if Task.isCancelled { return .cancelled }
@@ -393,17 +425,46 @@ final class PrintHostService {
                     throw UploadError.http(status: http.statusCode, host: printer.hostType)
                 }
             }
-            let (data, response) = try await session.data(for: plan.request)
+            var (data, response) = try await session.data(for: plan.request)
+            // SimplyPrint do_api_call (SimplyPrint.cpp:206-241): an HTTP
+            // 401 means the stored access token expired — refresh once
+            // with the saved refresh token, rebuild the request with the
+            // new Bearer and retry; a second 401 fails loudly.
+            if printer.hostType == "simplyprint",
+               let http = response as? HTTPURLResponse, http.statusCode == 401 {
+                let token = try await refreshSimplyPrintAccessToken()
+                onSimplyPrintTokenRefreshed?(token)
+                let refreshed = EnginePresets.PhysicalPrinterRecord(
+                    name: printer.name,
+                    hostType: printer.hostType,
+                    url: printer.url,
+                    webUI: printer.webUI,
+                    apiKey: token,
+                    presetNames: printer.presetNames
+                )
+                plan = try await Task.detached(priority: .userInitiated) {
+                    try Self.request(for: refreshed, file: gcode, startPrint: startPrint)
+                }.value
+                (data, response) = try await session.data(for: plan.request)
+            }
             if let http = response as? HTTPURLResponse,
                !(200..<300).contains(http.statusCode) {
                 throw UploadError.http(status: http.statusCode, host: printer.hostType)
             }
             // Some hosts answer inside an HTTP-200 body (the desktop parses
-            // these in the host .cpp on_complete): validate loudly and pick
-            // up the web-only follow-up link.
+            // these in the host .cpp on_complete): validate loudly, pick up
+            // the web-only follow-up link, and OPEN it like the desktop's
+            // wxLaunchDefaultBrowser does.
             var completionNote: String?
             if let bodyCheck = plan.bodyCheck {
-                completionNote = try bodyCheck.check(data, startPrint: startPrint)
+                let outcome = try bodyCheck.check(data, startPrint: startPrint)
+                completionNote = outcome.note
+                if let launch = outcome.launchURL {
+                    guard await UIApplication.shared.open(launch) else {
+                        throw UploadError.rejected(
+                            "\(printer.name): could not open \(launch.absoluteString)")
+                    }
+                }
             }
             if printer.hostType == "prusalink", startPrint {
                 // PrusaLink start (OctoPrint.cpp select command):
@@ -418,6 +479,18 @@ final class PrintHostService {
                 if let http = selectResponse as? HTTPURLResponse,
                    !(200..<300).contains(http.statusCode) {
                     throw UploadError.http(status: http.statusCode, host: printer.hostType)
+                }
+            }
+            // MKS start-print (MKS.cpp start_print): the M23/M24 console
+            // protocol over raw TCP — see mksStartPrint for the endpoint
+            // details. Runs after the HTTP upload, like the desktop.
+            if printer.hostType == "mks", startPrint {
+                do {
+                    try await Self.mksStartPrint(
+                        printerURL: printer.url, file: gcode.lastPathComponent)
+                } catch {
+                    throw UploadError.console(
+                        "MKS M23/M24 console — \(error.localizedDescription)")
                 }
             }
             for start in plan.startRequests {
@@ -978,5 +1051,628 @@ final class PrintHostService {
         request.httpMethod = "GET"
         request.timeoutInterval = 30
         return request
+    }
+
+    // MARK: MKS start-print (raw TCP console, MKS.cpp start_print)
+
+    /// MKS console start (MKS.cpp:122-137): connect to the print host on
+    /// the HARDCODED console port 8080 (MKS.cpp:37 `m_console_port("8080")`
+    /// — not the HTTP port, and not a setting), wait out the firmware's
+    /// post-upload dead time (1.5 s, MKS.cpp:124-128), then send
+    /// "M23 <file>\n" and "M24\n" — each command acknowledged by an "ok"
+    /// line (desktop Utils::TCPConsole done-string, newline framing,
+    /// 5 s connect / 10 s read timeouts). Typed failures: connect,
+    /// timeout, closed, non-ok.
+    nonisolated private static func mksStartPrint(
+        printerURL: String, file: String
+    ) async throws {
+        guard let url = URL(string: printerURL), let host = url.host(), !host.isEmpty else {
+            throw UploadError.badURL(printerURL)
+        }
+        let console = try TCPConsole(host: host, port: 8080)
+        defer { console.close() }
+        try await console.connect(timeout: 5)
+        // "For some reason printer firmware does not want to respond on
+        // gcode commands immediately after file upload" (MKS.cpp comment).
+        try await Task.sleep(for: .seconds(1.5))
+        for command in ["M23 \(file)", "M24"] {
+            try await console.run(command: command, readTimeout: 10)
+        }
+    }
+
+    // MARK: Browser account linking (desktop OAuthDialog / 3DPrinterOS login)
+
+    /// What a completed "Link account" flow produced: the API key the
+    /// printer record stores (SimplyPrint OAuth access token / 3DPrinterOS
+    /// session) plus a short account label for the status line.
+    struct LinkedAccount: Sendable, Equatable {
+        let apiKey: String
+        let account: String
+    }
+
+    /// Typed failures of the browser account-linking flows (typed like
+    /// UploadError: callers branch on the case, never message text).
+    enum AccountLinkError: LocalizedError, Sendable {
+        case cancelled
+        case badURL(String)
+        case malformedCallback(String)
+        case stateMismatch
+        case missingCode(String)
+        case tokenExchange(String)
+        case http(status: Int, host: String)
+        case rejected(String)
+        case transport(String)
+
+        var errorDescription: String? {
+            switch self {
+            case .cancelled:
+                return "Sign-in was cancelled."
+            case .badURL(let url):
+                return "Invalid account-linking URL: \(url)"
+            case .malformedCallback(let detail):
+                return "The sign-in callback was unusable — \(detail)"
+            case .stateMismatch:
+                return "The sign-in answer carried a wrong state (possible interference); try again."
+            case .missingCode(let detail):
+                return "The sign-in did not return an authorization code — \(detail)"
+            case .tokenExchange(let detail):
+                return "Exchanging the sign-in for a token failed — \(detail)"
+            case .http(let status, let host):
+                return "\(host) rejected the request (HTTP \(status))."
+            case .rejected(let message):
+                return message
+            case .transport(let message):
+                return "Account linking failed: \(message)"
+            }
+        }
+    }
+
+    private let linkLogger = Logger(subsystem: "ie.duz.OrcaPad", category: "printhost")
+
+    /// Fired when an expired SimplyPrint token was refreshed mid-upload;
+    /// AppEnvironment persists the new token onto the engine's printer
+    /// records (desktop save_oauth_credential parity).
+    var onSimplyPrintTokenRefreshed: ((String) -> Void)?
+
+    /// Stored refresh token (one SimplyPrint account per app, like the
+    /// desktop's single simplyprint_oauth.json).
+    nonisolated private static let simplyPrintRefreshKey = "simplyprint.refreshToken"
+
+    /// SimplyPrint "Link account" (desktop SimplyPrint::get_oauth_params +
+    /// GUI::OAuthJob): OAuth2 authorization-code with PKCE S256, the same
+    /// client id and scopes the desktop ships ("simplyprintorcaslicer",
+    /// "user.read files.temp_upload"), the token exchanged against
+    /// api.simplyprint.io/oauth2/Token. The desktop receives the code on a
+    /// localhost callback server; iOS replaces it with an
+    /// ASWebAuthenticationSession callback on the app's `orcapad` scheme
+    /// (registered in App-Info.plist CFBundleURLTypes).
+    func linkSimplyPrintAccount() async throws -> LinkedAccount {
+        let verifier = Self.randomHex(bytes: 32)
+        let state = Self.randomHex(bytes: 32)
+        let challenge = Self.pkceChallenge(verifier)
+        let callback = "orcapad://simplyprint/callback"
+        var components = URLComponents(
+            string: "https://simplyprint.io/panel/oauth2/authorize"
+        )!
+        components.queryItems = [
+            URLQueryItem(name: "client_id", value: "simplyprintorcaslicer"),
+            URLQueryItem(name: "redirect_uri", value: callback),
+            URLQueryItem(name: "scope", value: "user.read files.temp_upload"),
+            URLQueryItem(name: "response_type", value: "code"),
+            URLQueryItem(name: "state", value: state),
+            URLQueryItem(name: "code_challenge", value: challenge),
+            URLQueryItem(name: "code_challenge_method", value: "S256"),
+        ]
+        guard let authorizeURL = components.url else {
+            throw AccountLinkError.badURL(components.description)
+        }
+        let answered = try await webSession(url: authorizeURL, callbackScheme: "orcapad")
+        guard let answer = URLComponents(url: answered, resolvingAgainstBaseURL: false)?
+            .queryItems
+        else {
+            throw AccountLinkError.malformedCallback(answered.absoluteString)
+        }
+        func parameter(_ name: String) -> String? {
+            answer.first { $0.name == name }?.value
+        }
+        // OAuthJob::process: state must match, and a missing code is a
+        // user denial or a server error — both typed.
+        guard parameter("state") == state else { throw AccountLinkError.stateMismatch }
+        guard let code = parameter("code"), !code.isEmpty else {
+            let reason = parameter("error_code") ?? parameter("error") ?? "no code returned"
+            throw AccountLinkError.missingCode(reason)
+        }
+        let token = try await simplyPrintToken(
+            grant: [
+                ("client_id", "simplyprintorcaslicer"),
+                ("redirect_uri", callback),
+                ("grant_type", "authorization_code"),
+                ("code", code),
+                ("code_verifier", verifier),
+                ("scope", "user.read files.temp_upload"),
+            ]
+        )
+        linkLogger.notice("SimplyPrint account linked")
+        return LinkedAccount(apiKey: token.access, account: "SimplyPrint")
+    }
+
+    /// One OAuth2 token request against api.simplyprint.io/oauth2/Token
+    /// (form-encoded, desktop OAuthJob http.form_add shape). Persists a
+    /// returned refresh token for the upload-time refresh path.
+    private func simplyPrintToken(
+        grant: [(String, String)]
+    ) async throws -> (access: String, refresh: String?) {
+        guard let url = URL(string: "https://api.simplyprint.io/oauth2/Token") else {
+            throw AccountLinkError.badURL("https://api.simplyprint.io/oauth2/Token")
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue(
+            "application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-._~"))
+        request.httpBody = grant.map { pair in
+            "\(pair.0)=\(pair.1.addingPercentEncoding(withAllowedCharacters: allowed) ?? pair.1)"
+        }.joined(separator: "&").data(using: .utf8)
+        request.timeoutInterval = 15
+        let (data, response) = try await URLSession.shared.data(for: request)
+        if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
+            throw AccountLinkError.http(status: http.statusCode, host: "api.simplyprint.io")
+        }
+        // parse_token_response: the body must be a JSON object with an
+        // access_token; anything else carries error_description when the
+        // server bothered to say why.
+        let object: [String: Any]
+        do {
+            guard let parsed = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+            else {
+                throw AccountLinkError.tokenExchange(
+                    String(decoding: data.prefix(160), as: UTF8.self))
+            }
+            object = parsed
+        } catch let error as AccountLinkError {
+            throw error
+        } catch {
+            throw AccountLinkError.tokenExchange(error.localizedDescription)
+        }
+        guard let access = object["access_token"] as? String, !access.isEmpty
+        else {
+            let detail = (object["error_description"] as? String)
+                ?? String(decoding: data.prefix(160), as: UTF8.self)
+            throw AccountLinkError.tokenExchange(detail)
+        }
+        let refresh = object["refresh_token"] as? String
+        if let refresh, !refresh.isEmpty {
+            UserDefaults.standard.set(refresh, forKey: Self.simplyPrintRefreshKey)
+        }
+        return (access, refresh)
+    }
+
+    /// Refreshes an expired SimplyPrint access token (desktop do_api_call
+    /// 401 path: grant_type=refresh_token). A missing/failed refresh is a
+    /// typed error — the caller fails the upload loudly instead of
+    /// silently sending a stale token forever.
+    func refreshSimplyPrintAccessToken() async throws -> String {
+        guard let refresh = UserDefaults.standard.string(forKey: Self.simplyPrintRefreshKey),
+              !refresh.isEmpty
+        else {
+            throw AccountLinkError.tokenExchange(
+                "no stored refresh token — link the account again")
+        }
+        let token = try await simplyPrintToken(grant: [
+            ("grant_type", "refresh_token"),
+            ("client_id", "simplyprintorcaslicer"),
+            ("refresh_token", refresh),
+        ])
+        linkLogger.notice("SimplyPrint access token refreshed")
+        return token.access
+    }
+
+    /// 3DPrinterOS "Link account" (desktop C3DPrinterOS::login,
+    /// 3DPrinterOS.cpp:320-350): ask the cloud for a one-time login token
+    /// (apiglobal/generate_login_token, app_type=plugin), sign in through
+    /// that token in the browser (noauth/apiglobal_login_with_token/<t>),
+    /// then exchange the token for a session (apiglobal/login_with_token,
+    /// result/message.session/message.email). The desktop polls the
+    /// exchange while its dialog is open (TokenAuthDialog, 10 × 500 ms);
+    /// OrcaPad opens the browser through ASWebAuthenticationSession and
+    /// polls after it returns (or was dismissed — the exchange still
+    /// succeeds once the user finished signing in).
+    func link3DPrinterOSAccount(
+        record: EnginePresets.PhysicalPrinterRecord
+    ) async throws -> LinkedAccount {
+        guard let base = URL(string: record.url),
+              let scheme = base.scheme?.lowercased(), scheme == "http" || scheme == "https",
+              let host = base.host()
+        else {
+            throw AccountLinkError.badURL(record.url)
+        }
+        func endpoint(_ path: String) throws -> URLRequest {
+            var url = base
+            url.append(path: path)
+            var request = URLRequest(url: url)
+            request.httpMethod = "POST"
+            request.setValue(
+                "application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+            request.timeoutInterval = 15
+            return request
+        }
+        // 1. One-time login token (get_api_auth_token, app_name carries
+        // the calling app — the desktop sends "OrcaSlicer").
+        var tokenRequest = try endpoint("apiglobal/generate_login_token")
+        tokenRequest.httpBody = Data("app_type=plugin&app_name=OrcaPad".utf8)
+        let (tokenData, tokenResponse) = try await URLSession.shared.data(for: tokenRequest)
+        if let http = tokenResponse as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
+            throw AccountLinkError.http(status: http.statusCode, host: host)
+        }
+        let tokenObject: [String: Any]
+        do {
+            guard let parsed = try JSONSerialization.jsonObject(with: tokenData) as? [String: Any]
+            else {
+                throw AccountLinkError.rejected(
+                    "3DPrinterOS answered with unusable JSON: \(String(decoding: tokenData.prefix(160), as: UTF8.self))")
+            }
+            tokenObject = parsed
+        } catch let error as AccountLinkError {
+            throw error
+        } catch {
+            throw AccountLinkError.transport(error.localizedDescription)
+        }
+        guard (tokenObject["result"] as? Bool) == true,
+              let loginToken = tokenObject["message"] as? String, !loginToken.isEmpty
+        else {
+            let reason = (tokenObject["message"] as? String)
+                ?? String(decoding: tokenData.prefix(160), as: UTF8.self)
+            throw AccountLinkError.rejected("3DPrinterOS rejected the login-token request: \(reason)")
+        }
+        // 2. Browser sign-in. Cancelling the browser sheet is EXPLICITLY
+        // tolerated here: the desktop keeps polling its own dialog, and a
+        // user who finished signing in but dismissed the sheet should
+        // still get the session — the exchange below is the truth.
+        var loginURL = base
+        loginURL.append(path: "noauth/apiglobal_login_with_token/\(loginToken)")
+        do {
+            _ = try await webSession(url: loginURL, callbackScheme: "orcapad")
+        } catch AccountLinkError.cancelled {
+            // Explicit recovery, desktop parity: the desktop keeps polling
+            // its own dialog — a user who finished signing in but dismissed
+            // the sheet still gets the session; the exchange below decides.
+            linkLogger.notice("3DPrinterOS browser sheet dismissed; polling the login exchange")
+        }
+        // 3. Exchange (login_with_token): result/message.session/email.
+        var loginRequest = try endpoint("apiglobal/login_with_token")
+        loginRequest.httpBody = Data("token=\(loginToken)".utf8)
+        for attempt in 0..<10 {
+            let (data, response) = try await URLSession.shared.data(for: loginRequest)
+            if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
+                throw AccountLinkError.http(status: http.statusCode, host: host)
+            }
+            // result=false answers "not signed in yet" (the poll keeps
+            // going); unusable bodies fail the flow loudly.
+            let object: [String: Any]
+            do {
+                object = (try JSONSerialization.jsonObject(with: data)) as? [String: Any] ?? [:]
+            } catch {
+                throw AccountLinkError.rejected(
+                    "3DPrinterOS answered with unusable JSON: \(String(decoding: data.prefix(160), as: UTF8.self))")
+            }
+            if (object["result"] as? Bool) == true,
+               let message = object["message"] as? [String: Any],
+               let session = message["session"] as? String, !session.isEmpty
+            {
+                let email = (message["email"] as? String) ?? host
+                linkLogger.notice("3DPrinterOS account linked")
+                return LinkedAccount(apiKey: session, account: email)
+            }
+            guard attempt < 9 else { break }
+            try await Task.sleep(for: .milliseconds(500))
+        }
+        throw AccountLinkError.rejected(
+            "3DPrinterOS did not confirm the sign-in in time — try again")
+    }
+
+    // MARK: Browser session + OAuth helpers
+
+    /// Presents `url` in the system web-authentication sheet and resolves
+    /// with the first URL that comes back on `callbackScheme`. The desktop
+    /// hosts a localhost callback server (OAuthJob); on iOS the sheet IS
+    /// the callback receiver, so the scheme must be registered in the app
+    /// (App-Info.plist CFBundleURLTypes "orcapad").
+    @MainActor
+    private func webSession(url: URL, callbackScheme: String) async throws -> URL {
+        // The anchor must be produced ON the main actor (UIApplication is
+        // MainActor-isolated); the holder then only hands the stored window
+        // back to the framework.
+        let anchor: ASPresentationAnchor = await MainActor.run {
+            UIApplication.shared.connectedScenes
+                .compactMap { ($0 as? UIWindowScene)?.keyWindow }
+                .first ?? ASPresentationAnchor()
+        }
+        final class Holder: NSObject, ASWebAuthenticationPresentationContextProviding {
+            let anchor: ASPresentationAnchor
+            var session: ASWebAuthenticationSession?
+            init(anchor: ASPresentationAnchor) {
+                self.anchor = anchor
+            }
+            func presentationAnchor(
+                for session: ASWebAuthenticationSession
+            ) -> ASPresentationAnchor {
+                anchor
+            }
+        }
+        let holder = Holder(anchor: anchor)
+        return try await withCheckedThrowingContinuation { continuation in
+            let session = ASWebAuthenticationSession(
+                url: url,
+                callbackURLScheme: callbackScheme
+            ) { callbackURL, error in
+                // Referencing the holder keeps it (and through it the
+                // session) alive until this callback fires — the sheet must
+                // not deallocate out from under the user.
+                _ = holder
+                if let callbackURL {
+                    continuation.resume(returning: callbackURL)
+                } else if let error {
+                    let code = (error as? ASWebAuthenticationSessionError)?.code
+                    if code == .canceledLogin {
+                        continuation.resume(throwing: AccountLinkError.cancelled)
+                    } else {
+                        continuation.resume(
+                            throwing: AccountLinkError.transport(error.localizedDescription))
+                    }
+                } else {
+                    continuation.resume(
+                        throwing: AccountLinkError.transport("no callback from the sign-in sheet"))
+                }
+            }
+            holder.session = session
+            session.presentationContextProvider = holder
+            session.start()
+        }
+    }
+
+    /// Desktop generate_verification_code: random hex string of `bytes`*2
+    /// characters.
+    nonisolated private static func randomHex(bytes: Int) -> String {
+        var random = [UInt8](repeating: 0, count: bytes)
+        _ = SecRandomCopyBytes(kSecRandomDefault, bytes, &random)
+        return random.map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// Desktop sha256b64: base64url(SHA-256(input)) with '+'→'-', '/'→'_',
+    /// '=' stripped — RFC 7636 S256 (SimplyPrint.cpp:49-68).
+    nonisolated private static func pkceChallenge(_ verifier: String) -> String {
+        let digest = SHA256.hash(data: Data(verifier.utf8))
+        return Data(digest).base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+    }
+}
+
+/// Raw line-oriented TCP console (desktop Slic3r::Utils::TCPConsole over
+/// boost::asio, reimplemented on Network.framework for the MKS M23/M24
+/// start-print). Protocol parity with TCPConsole.cpp: commands are sent
+/// with a trailing "\n", answers are read line-by-line until an "ok"
+/// (case-insensitive) line; connect timeout 5 s, per-read/write timeout
+/// 10 s. Every failure is typed (connect / failed / timeout / closed) —
+/// no silent partial exchanges.
+///
+/// Concurrency: one console serves one async call chain; awaits serialize
+/// the buffer access, and the Network callbacks only resume continuations
+/// (one-shot guarded), so `@unchecked Sendable` is sound.
+private final class TCPConsole: @unchecked Sendable {
+    enum ConsoleError: LocalizedError, Sendable {
+        case connectFailed(host: String, port: UInt16, detail: String)
+        case connectTimeout(host: String, port: UInt16)
+        case writeFailed(String)
+        case readFailed(String)
+        case timeout(String)
+        case closed(String)
+
+        var errorDescription: String? {
+            switch self {
+            case .connectFailed(let host, let port, let detail):
+                return "could not connect to \(host):\(port) — \(detail)"
+            case .connectTimeout(let host, let port):
+                return "connecting to \(host):\(port) timed out"
+            case .writeFailed(let detail):
+                return "sending the command failed — \(detail)"
+            case .readFailed(let detail):
+                return "reading the answer failed — \(detail)"
+            case .timeout(let detail):
+                return "timed out waiting for the printer's answer — \(detail)"
+            case .closed(let detail):
+                return "the printer closed the connection — \(detail)"
+            }
+        }
+    }
+
+    private let connection: NWConnection
+    private let host: String
+    private let port: UInt16
+    private let queue = DispatchQueue(label: "ie.duz.OrcaPad.tcp-console")
+    private var lineBuffer = Data()
+
+    init(host: String, port: UInt16) throws {
+        self.host = host
+        self.port = port
+        guard let endpoint = NWEndpoint.Port(rawValue: port) else {
+            throw ConsoleError.connectFailed(host: host, port: port, detail: "invalid port")
+        }
+        connection = NWConnection(
+            to: NWEndpoint.hostPort(host: NWEndpoint.Host(host), port: endpoint),
+            using: .tcp
+        )
+    }
+
+    func close() {
+        connection.cancel()
+    }
+
+    /// Waits for the TCP connection to become ready (desktop connect
+    /// deadline; a timeout cancels the socket, which also resumes any
+    /// pending handler exactly once).
+    func connect(timeout: TimeInterval) async throws {
+        let resumed = ResumeOnce()
+        let host = self.host
+        let port = self.port
+        try await Self.withDeadline(
+            ConsoleError.connectTimeout(host: host, port: port),
+            seconds: timeout,
+            onCancel: { [self] in connection.cancel() }
+        ) {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                self.connection.stateUpdateHandler = { [resumed, host, port] state in
+                    switch state {
+                    case .ready:
+                        if resumed.claim() { continuation.resume(returning: ()) }
+                    case .failed(let error):
+                        if resumed.claim() {
+                            continuation.resume(throwing: ConsoleError.connectFailed(
+                                host: host, port: port, detail: error.localizedDescription))
+                        }
+                    case .cancelled:
+                        if resumed.claim() {
+                            continuation.resume(throwing: ConsoleError.connectFailed(
+                                host: host, port: port, detail: "cancelled"))
+                        }
+                    case .preparing, .setup, .waiting:
+                        break
+                    @unknown default:
+                        break
+                    }
+                }
+                self.connection.start(queue: self.queue)
+            }
+        }
+    }
+
+    /// Sends `command` + "\n" and reads lines until the printer answers
+    /// "ok" (TCPConsole done-string; other lines are ignored, exactly like
+    /// wait_next_line). A non-ok line after `readTimeout` is a timeout.
+    func run(command: String, readTimeout: TimeInterval) async throws {
+        try await send("\(command)\n", timeout: readTimeout)
+        while true {
+            let line = try await readLine(timeout: readTimeout)
+            if line.lowercased() == "ok" { return }
+        }
+    }
+
+    private func send(_ text: String, timeout: TimeInterval) async throws {
+        let resumed = ResumeOnce()
+        try await Self.withDeadline(
+            ConsoleError.timeout("writing \(text.trimmingCharacters(in: .whitespacesAndNewlines))"),
+            seconds: timeout,
+            onCancel: { [self] in connection.cancel() }
+        ) {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                self.connection.send(
+                    content: Data(text.utf8),
+                    completion: .contentProcessed { [resumed] error in
+                        if let error {
+                            if resumed.claim() {
+                                continuation.resume(throwing: ConsoleError.writeFailed(
+                                    error.localizedDescription))
+                            }
+                        } else if resumed.claim() {
+                            continuation.resume(returning: ())
+                        }
+                    }
+                )
+            }
+        }
+    }
+
+    /// Next "\n"-terminated line (trimmed); throws on EOF/transport error.
+    private func readLine(timeout: TimeInterval) async throws -> String {
+        while true {
+            if let index = lineBuffer.firstIndex(of: 0x0A) {
+                let lineData = lineBuffer[..<index]
+                lineBuffer = Data(lineBuffer[lineBuffer.index(after: index)...])
+                return String(decoding: lineData, as: UTF8.self)
+                    .trimmingCharacters(in: .whitespaces)
+            }
+            let chunk = try await receive(timeout: timeout)
+            guard !chunk.isEmpty else {
+                throw ConsoleError.closed("no newline before end of stream")
+            }
+            lineBuffer.append(chunk)
+        }
+    }
+
+    private func receive(timeout: TimeInterval) async throws -> Data {
+        let resumed = ResumeOnce()
+        return try await Self.withDeadline(
+            ConsoleError.timeout("reading a line"),
+            seconds: timeout,
+            onCancel: { [self] in connection.cancel() }
+        ) {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Data, Error>) in
+                self.connection.receive(
+                    minimumIncompleteLength: 1,
+                    maximumLength: 65_536
+                ) { [resumed] data, _, isComplete, error in
+                    if let error {
+                        if resumed.claim() {
+                            continuation.resume(throwing: ConsoleError.readFailed(
+                                error.localizedDescription))
+                        }
+                    } else if isComplete, data == nil || data?.isEmpty == true {
+                        if resumed.claim() { continuation.resume(returning: Data()) }
+                    } else if let data {
+                        if resumed.claim() { continuation.resume(returning: data) }
+                    } else if resumed.claim() {
+                        continuation.resume(throwing: ConsoleError.readFailed(
+                            "no data and no completion"))
+                    }
+                }
+            }
+        }
+    }
+
+    // MARK: Timeout plumbing
+
+    /// Races `body` against a deadline: on expiry `onCancel` runs (which
+    /// must make `body` fail so its continuation resumes exactly once) and
+    /// the deadline error is thrown. Task cancellation takes the same path
+    /// — the group cancel triggers `onCancel` through
+    /// withTaskCancellationHandler.
+    private static func withDeadline<Value: Sendable>(
+        _ deadlineError: ConsoleError,
+        seconds: TimeInterval,
+        onCancel: @escaping @Sendable () -> Void,
+        _ body: @escaping @Sendable () async throws -> Value
+    ) async throws -> Value {
+        try await withThrowingTaskGroup(of: Value.self) { group in
+            group.addTask {
+                try await withTaskCancellationHandler(operation: body, onCancel: onCancel)
+            }
+            group.addTask {
+                try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+                onCancel()
+                throw deadlineError
+            }
+            guard let first = try await group.next() else {
+                throw ConsoleError.readFailed("no outcome from the console race")
+            }
+            group.cancelAll()
+            return first
+        }
+    }
+
+    /// One-shot claim for continuation resumes (Network handlers can fire
+    /// twice: e.g. cancel() delivers both a failed receive and a failed
+    /// state transition) — only the first claim wins.
+    private final class ResumeOnce: @unchecked Sendable {
+        private let lock = NSLock()
+        private var done = false
+
+        func claim() -> Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            if done { return false }
+            done = true
+            return true
+        }
     }
 }

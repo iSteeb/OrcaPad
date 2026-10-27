@@ -3,6 +3,7 @@
 
 import Foundation
 import Observation
+import OrcaBridge
 import os
 
 /// Process-lifetime owner for client stores and their Bridge sessions.
@@ -16,6 +17,9 @@ final class AppEnvironment {
     let slicing: SliceService
     let printHost: PrintHostService
     let printers: PrinterStore
+    /// Online system-profile updates (0.19 flagship, Preferences ▸ Presets
+    /// and the launch check below).
+    let profileUpdates: ProfileUpdates
     private(set) var isBootstrapping = false
 
     init() {
@@ -26,11 +30,19 @@ final class AppEnvironment {
         slicing = SliceService(status: status)
         printHost = PrintHostService(status: status)
         printers = PrinterStore(status: status)
+        profileUpdates = ProfileUpdates(status: status)
         // Preset operations must REJECT (not silently queue) while the
         // engine is slicing — they would park on the engine mutex for the
         // whole slice and apply minutes later.
         presets.engineIsSlicing = { [weak self] in
             self?.document.isSlicing ?? false
+        }
+        // A refreshed SimplyPrint access token (the 401 retry inside an
+        // upload) is persisted back into the engine's printer records so
+        // the NEXT upload does not repeat the refresh (desktop
+        // save_oauth_credential parity).
+        printHost.onSimplyPrintTokenRefreshed = { [weak self] token in
+            Task { await self?.updateCloudHostAPIKey(hostType: "simplyprint", apiKey: token) }
         }
     }
 
@@ -155,6 +167,7 @@ final class AppEnvironment {
         guard !isBootstrapping else { return }
         isBootstrapping = true
         defer { isBootstrapping = false }
+        createDownloadsFolder()
         await document.bootstrap()
         await presets.load()
         // The plate grid derives from the selected machine's bed (ABI v27).
@@ -162,5 +175,133 @@ final class AppEnvironment {
             await document.syncBed(volume)
         }
         await restoreAutosaveIfNeeded()
+        await checkProfileUpdatesAtLaunch()
+    }
+
+    // MARK: Downloads folder (desktop "Downloads folder" parity)
+
+    /// Files-app-visible `Documents/Downloads`: Safari's "Save to Files"
+    /// can target it, so downloaded models land inside OrcaPad's own
+    /// container next to the exports. Created at launch; a failure is a
+    /// real filesystem problem and surfaces loudly.
+    private func createDownloadsFolder() {
+        let downloads = FileManager.default.urls(
+            for: .documentDirectory, in: .userDomainMask
+        )[0].appendingPathComponent("Downloads", isDirectory: true)
+        do {
+            try FileManager.default.createDirectory(
+                at: downloads, withIntermediateDirectories: true)
+        } catch {
+            status.report(.document, failure: AppFailure.wrap(
+                error, operation: "create Downloads folder"))
+        }
+    }
+
+    // MARK: Profile updates at launch (Preferences ▸ Presets ▸ toggle)
+
+    /// "Check at launch" (profiles.autoUpdate, default off): a quiet check
+    /// once the preset tree is loaded; found updates are REPORTED through
+    /// the status center, never installed without the user — installing
+    /// lives in Preferences ▸ Presets.
+    private func checkProfileUpdatesAtLaunch() async {
+        guard UserDefaults.standard.bool(forKey: "profiles.autoUpdate") else { return }
+        let vendors = await profileUpdates.installedVendors(from: presets)
+        guard !vendors.isEmpty else { return }
+        await profileUpdates.check(vendors: vendors)
+    }
+
+    // MARK: Cloud print-host account linking (0.19 device host completion)
+
+    /// Runs the SimplyPrint OAuth flow (PrintHostService) and stores the
+    /// access token on every SimplyPrint printer record — creating the
+    /// default record when none exists (the printer is picked on the
+    /// SimplyPrint side; the record URL is their home). Returns whether
+    /// the account ended up linked.
+    @discardableResult
+    func linkSimplyPrintAccount() async -> Bool {
+        let account: PrintHostService.LinkedAccount
+        do {
+            account = try await printHost.linkSimplyPrintAccount()
+        } catch {
+            status.report(.device, failure: AppFailure.wrap(
+                error, operation: "link SimplyPrint account"))
+            return false
+        }
+        return await updateCloudHostAPIKey(
+            hostType: "simplyprint",
+            apiKey: account.apiKey,
+            createWhenMissing: EnginePresets.PhysicalPrinterRecord(
+                name: "SimplyPrint",
+                hostType: "simplyprint",
+                url: "https://simplyprint.io",
+                webUI: "https://simplyprint.io/panel",
+                apiKey: account.apiKey,
+                presetNames: []
+            ))
+    }
+
+    /// Runs the 3DPrinterOS browser login-token flow against the EXISTING
+    /// 3DPrinterOS printer's host (their cloud URL); the returned session
+    /// becomes that record's API key (upstream stores the session in
+    /// 3dprinteros_api_cred.json — OrcaPad keeps it on the engine record).
+    @discardableResult
+    func link3DPrinterOSAccount() async -> Bool {
+        guard let existing = printers.printers.first(where: { $0.hostType == "3dprinteros" })
+        else {
+            status.report(.device, failure: .invariant(
+                operation: "link 3DPrinterOS account",
+                diagnostic: "add a 3DPrinterOS printer first (Device tab), then link its account"))
+            return false
+        }
+        let account: PrintHostService.LinkedAccount
+        do {
+            account = try await printHost.link3DPrinterOSAccount(record: existing)
+        } catch {
+            status.report(.device, failure: AppFailure.wrap(
+                error, operation: "link 3DPrinterOS account"))
+            return false
+        }
+        return await updateCloudHostAPIKey(
+            hostType: "3dprinteros",
+            apiKey: account.apiKey,
+            createWhenMissing: nil)
+    }
+
+    /// Writes `apiKey` on every record of `hostType` (optionally creating
+    /// the default record when none exists). Reports the outcome either way.
+    @discardableResult
+    private func updateCloudHostAPIKey(
+        hostType: String,
+        apiKey: String,
+        createWhenMissing: EnginePresets.PhysicalPrinterRecord? = nil
+    ) async -> Bool {
+        guard let engine = presets.engineForSlicing, presets.isReady else {
+            status.report(.device, "account link blocked: presets are not ready")
+            return false
+        }
+        var records = printers.printers.filter { $0.hostType == hostType }
+        if records.isEmpty, let created = createWhenMissing {
+            records = [created]
+        }
+        guard !records.isEmpty else {
+            status.report(.device, "account linked, but no \(hostType) printer stores it")
+            return false
+        }
+        var saved = false
+        for record in records {
+            let updated = EnginePresets.PhysicalPrinterRecord(
+                name: record.name,
+                hostType: record.hostType,
+                url: record.url,
+                webUI: record.webUI,
+                apiKey: apiKey,
+                presetNames: record.presetNames
+            )
+            saved = await printers.save(updated, presets: engine) || saved
+        }
+        if saved {
+            status.report(.device, "\(records[0].name): account linked")
+        }
+        return saved
     }
 }

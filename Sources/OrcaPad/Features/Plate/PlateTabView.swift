@@ -71,6 +71,17 @@ struct PlateTabView: View {
     @State private var showFPS = true
     @State private var simplifyPresented = false
     @State private var subdivideConfirmation = false
+    /// Assembly mode (desktop AssembleView toggle, ABI v42): explode
+    /// slider over the plate + assembly actions in the Measure panel.
+    @State private var assemblyMode = false
+    @State private var assemblyExplode: Double = 0
+    /// 3D navigator (desktop "Show 3D Navigator"): corner cube overlay.
+    @State private var showNavigator = true
+    /// Cut-connector placement (desktop CutDialog manual mode): taps on the
+    /// canvas place connectors on the cut plane while this is active.
+    @State private var cutPlacementActive = false
+    /// "Replace 3D file…" file-picker target object.
+    @State private var replaceFileTarget: ObjectID?
     /// Measure readout units (panel rows + the 3D midpoint label share it).
     @AppStorage("units.inches") private var measureInches = false
 
@@ -97,6 +108,21 @@ struct PlateTabView: View {
     @ViewBuilder
     private var bottomBars: some View {
         VStack(alignment: .leading, spacing: 8) {
+        if assemblyMode {
+            assemblyBar
+                .padding(.bottom, 2)
+        }
+        if cutPlacementActive {
+            CutPlacementBar(
+                connectorCount: document.cutConnectors.count,
+                isBusy: document.isBusy,
+                onClear: { Task { await document.clearCutConnectors() } },
+                onDone: {
+                    cutPlacementActive = false
+                    cutPresented = true
+                }
+            )
+        }
         PlateBar(
             plates: document.plates,
             currentID: document.currentPlate?.id,
@@ -161,7 +187,50 @@ struct PlateTabView: View {
             MeasurePanel(
                 features: document.measureFeatures,
                 result: document.measureResult,
-                onClear: { document.clearMeasure() }
+                onClear: { document.clearMeasure() },
+                showsAssembly: showsAssemblyActions,
+                onAssembleAction: { action in
+                    Task { await document.assembleAction(action) }
+                }
+            )
+            .padding(.bottom, 8)
+        }
+        if gizmoMode == .brimEars, document.selection != nil {
+            BrimEarsPanel(
+                earCount: document.brimPoints.count,
+                selectedIndex: document.brimEarSelection,
+                isBusy: document.isBusy,
+                diameter: Binding(
+                    get: { document.brimEarDiameter },
+                    set: { document.brimEarDiameter = $0 }
+                ),
+                maxAngleDeg: Binding(
+                    get: { document.brimEarMaxAngleDeg },
+                    set: { document.brimEarMaxAngleDeg = $0 }
+                ),
+                detectionLength: Binding(
+                    get: { document.brimEarDetectionLength },
+                    set: { document.brimEarDetectionLength = $0 }
+                ),
+                onAutoGenerate: {
+                    guard let engine = environment.presets.engineForSlicing else {
+                        environment.status.report(
+                            .document,
+                            failure: .invariant(
+                                operation: "auto brim ears",
+                                diagnostic: "presets are not loaded"
+                            )
+                        )
+                        return
+                    }
+                    Task { await document.autoBrimEars(presets: engine) }
+                },
+                onRemoveSelected: {
+                    Task { await document.removeSelectedBrimEar() }
+                },
+                onRemoveAll: {
+                    Task { await document.clearAllBrimEars() }
+                }
             )
             .padding(.bottom, 8)
         }
@@ -343,6 +412,31 @@ struct PlateTabView: View {
                     } else {
                         document.clearVLH()
                     }
+                    // Brim-ears gizmo (desktop GLGizmoBrimEars): reload the
+                    // ears on activation and after every revision change.
+                    if gizmoMode == .brimEars {
+                        await document.loadBrimEars()
+                    } else {
+                        document.clearBrimEars()
+                    }
+                }
+                // Assembly mode (desktop AssembleView): the explode data
+                // reloads on every revision change while the mode is on.
+                .task(id: "assembly-\(assemblyMode)-\(document.scene?.revision.rawValue ?? 0)") {
+                    if assemblyMode {
+                        await document.loadAssemblyData()
+                    } else {
+                        document.clearAssemblyData()
+                    }
+                }
+                // Cut flow (sheet + placement): the placed connectors reload
+                // on every revision change while the flow is active.
+                .task(id: "cut-\(cutPresented)-\(cutPlacementActive)-\(document.scene?.revision.rawValue ?? 0)-\(document.selection?.instanceID.rawValue ?? 0)") {
+                    if cutPresented || cutPlacementActive {
+                        await document.loadCutConnectors()
+                    } else {
+                        document.clearCutConnectorsCache()
+                    }
                 }
 
             // 3D object labels (View menu): SwiftUI chips exactly over the
@@ -372,6 +466,28 @@ struct PlateTabView: View {
                     .padding(.horizontal, 12)
                     .padding(.bottom, 6)
             }
+        }
+        // 3D navigator (desktop "Show 3D Navigator"): corner cube mirroring
+        // the camera; taps apply the desktop camera view presets.
+        .overlay(alignment: .topTrailing) {
+            if showNavigator, document.scene != nil {
+                NavigatorCube { preset in
+                    document.applyCameraView(preset)
+                }
+                .padding(.trailing, 14)
+                .padding(.top, 66)
+                .accessibilityLabel("3D navigator")
+            }
+        }
+        // Hardware-keyboard parity for the 3D editor (desktop KBShortcuts
+        // plater table): hidden zero-size buttons driving the SAME actions
+        // as the on-screen controls (PreviewTabView pattern).
+        .background {
+            keyboardShortcuts
+                .frame(width: 0, height: 0)
+                .opacity(0)
+                .accessibilityHidden(true)
+                .allowsHitTesting(false)
         }
         .fileImporter(
             isPresented: $importPresented,
@@ -461,13 +577,75 @@ struct PlateTabView: View {
                 keep: $cutKeep,
                 objectName: document.selection.flatMap { id in
                     document.scene?.object(id: id.objectID)?.name
-                } ?? "object")
-            {
+                } ?? "object",
+                connectorParams: Binding(
+                    get: { document.cutConnectorParams },
+                    set: { document.cutConnectorParams = $0 }
+                ),
+                connectorCount: document.cutConnectors.count,
+                isBusy: document.isBusy,
+                onClearConnectors: {
+                    Task { await document.clearCutConnectors() }
+                },
+                onPlaceConnectors: {
+                    cutPresented = false
+                    cutPlacementActive = true
+                }
+            ) {
                 cutPresented = false
+                cutPlacementActive = false
                 Task {
                     await document.cutSelected(axis: cutAxis, fraction: cutFraction, keep: cutKeep)
                 }
             }
+        }
+        // "Replace 3D file…": the picked file replaces the target object's
+        // mesh in place (desktop Replace-with-STL semantics).
+        .fileImporter(
+            isPresented: Binding(
+                get: { replaceFileTarget != nil },
+                set: { if !$0 { replaceFileTarget = nil } }
+            ),
+            allowedContentTypes: ImportTypes.models,
+            allowsMultipleSelection: false
+        ) { result in
+            switch result {
+            case .success(let urls):
+                guard let url = urls.first, let target = replaceFileTarget else { return }
+                replaceFileTarget = nil
+                Task { await document.replaceModelFile(objectID: target, from: url) }
+            case .failure(let error):
+                replaceFileTarget = nil
+                environment.status.report(
+                    .document,
+                    failure: AppFailure.wrap(error, operation: "choose replacement file")
+                )
+            }
+        }
+        // Rename (object menu + the desktop Space-key shortcut): the same
+        // prompt the Objects sheet hosts, attached to the Plate canvas.
+        .alert("Rename", isPresented: Binding(
+            get: { renameTarget != nil },
+            set: { if !$0 { renameTarget = nil } }
+        )) {
+            TextField("Name", text: $renameText)
+            Button("Rename") {
+                if let target = renameTarget {
+                    let name = renameText
+                    Task {
+                        switch target {
+                        case .object(let objectID):
+                            await document.rename(objectID, to: name)
+                        case .volume(let objectID, let volumeID):
+                            await document.renameVolume(
+                                volumeID, to: name, objectID: objectID
+                            )
+                        }
+                    }
+                }
+                renameTarget = nil
+            }
+            Button("Cancel", role: .cancel) { renameTarget = nil }
         }
         .sheet(item: $plateSettingsTarget) { plate in
             PlateSettingsSheet(
@@ -558,7 +736,21 @@ struct PlateTabView: View {
                     measureOverlay: gizmoMode == .measure
                         ? document.measureOverlay(labelText: measureLabelText) : nil,
                     vlhOverlay: gizmoMode == .vlh
-                        ? document.vlhRendererOverlay() : nil
+                        ? document.vlhRendererOverlay() : nil,
+                    brimEars: gizmoMode == .brimEars
+                        ? document.brimEarsOverlay() : nil,
+                    cutConnectors: cutPresented || cutPlacementActive
+                        ? document.cutConnectorsOverlay() : nil,
+                    cutPlane: cutPlacementActive
+                        ? document.cutPlaneForSelection(
+                            axis: cutAxis, fraction: cutFraction,
+                            bedCenter: bed.center)
+                        : nil,
+                    assemblyExplode: assemblyMode
+                        ? document.assemblyOverrides(
+                            ratio: assemblyExplode, bedCenter: bed.center)
+                        : [:],
+                    cameraZoomRequest: (document.cameraZoomRequest, document.cameraZoomScale)
                 ),
                 manipulation: CanvasManipulation(
                     onSelect: { document.select(objectID: $0, instanceID: $1) },
@@ -623,6 +815,15 @@ struct PlateTabView: View {
                         return
                     }
                     Task { await document.commitVLHAdjust(presets: engine, z: z) }
+                },
+                onBrimEarSelect: { index in
+                    document.setBrimEarSelection(index)
+                },
+                onBrimEarTap: { face in
+                    Task { await document.addBrimEar(at: face) }
+                },
+                onCutConnectorTap: { pick in
+                    Task { await document.addCutConnector(at: pick) }
                 }
                 )
             )
@@ -880,6 +1081,11 @@ struct PlateTabView: View {
                         Toggle("Gridlines", isOn: $showGridlines)
                         Divider()
                         Toggle("Shells + COG", isOn: $showShells)
+                        // Desktop View ▸ Assembly (AssembleView toggle) and
+                        // "Show 3D Navigator".
+                        Divider()
+                        Toggle("Assembly", isOn: $assemblyMode)
+                        Toggle("3D Navigator", isOn: $showNavigator)
                         Divider()
                         // Viewer quality (OrcaPad): MSAA flips the canvas'
                         // sample count — pipelines are built per count, so
@@ -1067,6 +1273,203 @@ struct PlateTabView: View {
     private func duplicateSelection() {
         guard let selection = document.selection else { return }
         Task { await document.addInstance(to: selection.objectID) }
+    }
+
+    /// Assembly actions appear in the Measure panel when both slots hold a
+    /// point or plane feature (desktop offers them on those picks) and an
+    /// instance is selected to apply them to.
+    private var showsAssemblyActions: Bool {
+        document.selection != nil
+            && document.measureFeatures.count == 2
+            && document.measureFeatures.allSatisfy { feature in
+                feature?.kind == .point || feature?.kind == .plane
+            }
+    }
+
+    /// Assembly explode bar (desktop AssembleView slider): ratio 0 = the
+    /// plater placement, 1 = the 3MF assembled placement.
+    private var assemblyBar: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "shippingbox")
+                .font(.caption)
+                .foregroundStyle(Color.accentColor)
+            Text("Assembly")
+                .font(.caption.weight(.semibold))
+            Slider(value: $assemblyExplode, in: 0...1)
+            Text(String(format: "%.0f%%", assemblyExplode * 100))
+                .font(.caption.monospacedDigit())
+                .frame(width: 40, alignment: .trailing)
+                .foregroundStyle(.secondary)
+            Divider().frame(height: 20)
+            Button {
+                withAnimation { assemblyExplode = 0 }
+            } label: {
+                Image(systemName: "arrow.counterclockwise")
+                    .font(.caption)
+            }
+            .buttonStyle(.bordered)
+            .disabled(assemblyExplode == 0)
+            .accessibilityLabel("Reset explode")
+        }
+        .padding(10)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14))
+    }
+
+    /// Desktop arrow keys: move the selection on the bed plane, 10 mm
+    /// (Shift = the 1 mm snap step) — the same begin/preview/commit chain
+    /// the drag gesture runs (one "Move" undo step per key press).
+    private func keyboardMove(dx: Double, dy: Double) {
+        guard document.selection != nil, !document.isBusy else { return }
+        document.beginManipulation()
+        document.moveSelected(by: SIMD2(Float(dx), Float(dy)))
+        Task { await document.commitSelectedTransform() }
+    }
+
+    /// Hardware-keyboard parity (desktop KBShortcutsDialog plater table —
+    /// see the plate.keyboard parity feature). Every shortcut drives the
+    /// SAME store action as its on-screen control; no new behaviors.
+    @ViewBuilder
+    private var keyboardShortcuts: some View {
+        // Arrange / orient (desktop A / Shift+A / Q / Shift+Q).
+        Button("Arrange all", action: arrangeFromKeyboard)
+            .keyboardShortcut("a", modifiers: [])
+        Button("Arrange selected plates", action: arrangeFromKeyboard)
+            .keyboardShortcut("a", modifiers: .shift)
+        Button("Orient", action: orientFromKeyboard)
+            .keyboardShortcut("q", modifiers: [])
+        Button("Orient all on plate", action: orientFromKeyboard)
+            .keyboardShortcut("q", modifiers: .shift)
+        // Camera views (desktop Ctrl+0..6; 5/6 are the side angles —
+        // OrcaPad's left/right presets).
+        Button("Default view") { document.applyCameraView(.defaultValue) }
+            .keyboardShortcut("0", modifiers: .command)
+        Button("Top view") { document.applyCameraView(.top) }
+            .keyboardShortcut("1", modifiers: .command)
+        Button("Bottom view") { document.applyCameraView(.bottom) }
+            .keyboardShortcut("2", modifiers: .command)
+        Button("Front view") { document.applyCameraView(.front) }
+            .keyboardShortcut("3", modifiers: .command)
+        Button("Rear view") { document.applyCameraView(.rear) }
+            .keyboardShortcut("4", modifiers: .command)
+        Button("Left view") { document.applyCameraView(.left) }
+            .keyboardShortcut("5", modifiers: .command)
+        Button("Right view") { document.applyCameraView(.right) }
+            .keyboardShortcut("6", modifiers: .command)
+        // Zoom (desktop I/O).
+        Button("Zoom in") { document.requestCameraZoom(1.25) }
+            .keyboardShortcut("i", modifiers: [])
+        Button("Zoom out") { document.requestCameraZoom(0.8) }
+            .keyboardShortcut("o", modifiers: [])
+        // Selection / delete / clone / history (desktop Esc, Del, Ctrl+K,
+        // Ctrl+D, Ctrl+Z, Ctrl+Y, Ctrl+A; Ctrl+Y is the desktop redo key).
+        Button("Deselect all") {
+            document.select(objectID: nil, instanceID: nil)
+        }
+        .keyboardShortcut(.cancelAction)
+        Button("Delete selected", action: deleteSelection)
+            .keyboardShortcut(.delete, modifiers: [])
+        Button("Clone selected", action: duplicateSelection)
+            .keyboardShortcut("k", modifiers: .command)
+        Button("Delete all") { Task { await document.deleteAll() } }
+            .keyboardShortcut("d", modifiers: .command)
+        Button("Undo") { Task { await document.undo() } }
+            .keyboardShortcut("z", modifiers: .command)
+        Button("Redo") { Task { await document.redo() } }
+            .keyboardShortcut("y", modifiers: .command)
+        Button("Select all") { document.selectAll() }
+            .keyboardShortcut("a", modifiers: .command)
+        // Gizmos (desktop M/R/S/F/C/U/E/Y; P/H pick the painter layers).
+        Button("Gizmo move") { gizmoMode = .move }
+            .keyboardShortcut("m", modifiers: [])
+        Button("Gizmo rotate") { gizmoMode = .rotate }
+            .keyboardShortcut("r", modifiers: [])
+        Button("Gizmo scale") { gizmoMode = .scale }
+            .keyboardShortcut("s", modifiers: [])
+        Button("Gizmo place face on bed") { gizmoMode = .layFlat }
+            .keyboardShortcut("f", modifiers: [])
+        Button("Gizmo cut") {
+            if document.selection != nil { cutPresented = true }
+        }
+        .keyboardShortcut("c", modifiers: [])
+        Button("Gizmo measure") { gizmoMode = .measure }
+            .keyboardShortcut("u", modifiers: [])
+        Button("Gizmo brim ears") { gizmoMode = .brimEars }
+            .keyboardShortcut("e", modifiers: [])
+        Button("Gizmo assemble") { assemblyMode.toggle() }
+            .keyboardShortcut("y", modifiers: [])
+        Button("Paint seam") {
+            gizmoMode = .paint
+            document.selectPaintLayer(.seam)
+        }
+        .keyboardShortcut("p", modifiers: [])
+        Button("Paint fuzzy skin") {
+            gizmoMode = .paint
+            document.selectPaintLayer(.fuzzy)
+        }
+        .keyboardShortcut("h", modifiers: [])
+        // Bed-plane moves (desktop arrows 10 mm, Shift = 1 mm step).
+        Button("Move +Y") { keyboardMove(dx: 0, dy: 10) }
+            .keyboardShortcut(.upArrow, modifiers: [])
+        Button("Move −Y") { keyboardMove(dx: 0, dy: -10) }
+            .keyboardShortcut(.downArrow, modifiers: [])
+        Button("Move −X") { keyboardMove(dx: -10, dy: 0) }
+            .keyboardShortcut(.leftArrow, modifiers: [])
+        Button("Move +X") { keyboardMove(dx: 10, dy: 0) }
+            .keyboardShortcut(.rightArrow, modifiers: [])
+        Button("Move +Y 1 mm") { keyboardMove(dx: 0, dy: 1) }
+            .keyboardShortcut(.upArrow, modifiers: .shift)
+        Button("Move −Y 1 mm") { keyboardMove(dx: 0, dy: -1) }
+            .keyboardShortcut(.downArrow, modifiers: .shift)
+        Button("Move −X 1 mm") { keyboardMove(dx: -1, dy: 0) }
+            .keyboardShortcut(.leftArrow, modifiers: .shift)
+        Button("Move +X 1 mm") { keyboardMove(dx: 1, dy: 0) }
+            .keyboardShortcut(.rightArrow, modifiers: .shift)
+        // Filament 1–9 for the selection (desktop number keys).
+        ForEach(Array("123456789".enumerated()), id: \.offset) { index, key in
+            Button("Set extruder \(index + 1)") {
+                guard let selection = document.selection else { return }
+                Task {
+                    await document.setSetting(
+                        objectID: selection.objectID,
+                        volumeID: selection.volumeID,
+                        key: "extruder", value: String(index + 1))
+                }
+            }
+            .keyboardShortcut(KeyEquivalent(key), modifiers: [])
+        }
+        // Rename the selection (desktop Space on a selected object).
+        Button("Rename selection") {
+            guard let selection = document.selection,
+                  let object = document.scene?.object(id: selection.objectID) else { return }
+            renameText = object.name
+            renameTarget = .object(object.id)
+        }
+        .keyboardShortcut(.space, modifiers: [])
+        // Toggle printable (desktop V).
+        Button("Toggle printable") {
+            guard let selection = document.selection else { return }
+            let printable = document.scene?.object(id: selection.objectID)?
+                .instances.allSatisfy(\.printable) ?? true
+            Task {
+                await document.setPrintable(
+                    objectID: selection.objectID,
+                    instanceID: nil,
+                    printable: !printable)
+            }
+        }
+        .keyboardShortcut("v", modifiers: [])
+    }
+
+    private func arrangeFromKeyboard() {
+        guard let engine = environment.presets.engineForSlicing,
+              document.scene?.objects.isEmpty != true, !document.isBusy else { return }
+        Task { await document.arrangeAll(presets: engine, allowRotations: false) }
+    }
+
+    private func orientFromKeyboard() {
+        guard let engine = environment.presets.engineForSlicing,
+              document.scene?.objects.isEmpty != true, !document.isBusy else { return }
+        Task { await document.orientAll(presets: engine) }
     }
 
     private func deleteSelection() {
@@ -1751,6 +2154,23 @@ extension PlateTabView {
                     Label("Edit in Parameter Table", systemImage: "tablecells")
                 }
             }
+            // Desktop "Reload from disk" / "Replace with STL" (ABI v42):
+            // the mesh is replaced IN PLACE (transform and settings stay).
+            Divider()
+            if document.hasModelSource(object.id) {
+                Button {
+                    Task { await document.reloadFromDisk(objectID: object.id) }
+                } label: {
+                    Label("Reload from disk", systemImage: "arrow.clockwise.circle")
+                }
+                .disabled(document.isBusy)
+            }
+            Button {
+                replaceFileTarget = object.id
+            } label: {
+                Label("Replace 3D file…", systemImage: "doc.badge.arrow.up")
+            }
+            .disabled(document.isBusy)
             Button {
                 renameText = object.name
                 renameTarget = .object(object.id)
@@ -2121,9 +2541,28 @@ private struct CutSheet: View {
     @Binding var fraction: Double
     @Binding var keep: EnginePlater.CutKeep
     let objectName: String
+    /// Cut-connector placement parameters (desktop CutDialog connector
+    /// panel; store-owned so the placement bar shares them).
+    @Binding var connectorParams: DocumentStore.CutConnectorParams
+    /// Placed connectors on the selected object.
+    var connectorCount: Int = 0
+    var isBusy: Bool = false
+    var onClearConnectors: (() -> Void)? = nil
+    /// Enters placement mode: dismisses the sheet, taps on the canvas place
+    /// connectors on the cut plane (the sheet is modal — canvas taps need
+    /// it gone).
+    var onPlaceConnectors: (() -> Void)? = nil
     let onCut: () -> Void
 
     @Environment(\.dismiss) private var dismiss
+
+    /// Desktop connector option tables (GLGizmoCut.cpp:198-204).
+    private let connectorTypes = [("Plug", Int32(0)), ("Dowel", Int32(1)), ("Snap", Int32(2))]
+    private let connectorStyles = [("Prism", Int32(0)), ("Frustum", Int32(1))]
+    private let connectorShapes = [
+        ("Triangle", Int32(0)), ("Square", Int32(1)),
+        ("Hexagon", Int32(2)), ("Circle", Int32(3))
+    ]
 
     var body: some View {
         NavigationStack {
@@ -2165,6 +2604,77 @@ private struct CutSheet: View {
                 } footer: {
                     Text("The cut runs through the object's bounding box; the object is replaced by what you keep (one undo step).")
                 }
+                Section {
+                    Picker("Type", selection: Binding(
+                        get: { connectorParams.type },
+                        set: { newValue in
+                            connectorParams.type = newValue
+                            // Desktop option dependencies (GLGizmoCut.cpp:
+                            // 2402-2421): dowel forces prism, snap forces
+                            // circle.
+                            if newValue == 1 { connectorParams.style = 0 }
+                            if newValue == 2 { connectorParams.shape = 3 }
+                        }
+                    )) {
+                        ForEach(connectorTypes, id: \.1) { option in
+                            Text(option.0).tag(option.1)
+                        }
+                    }
+                    // Desktop option gating (GLGizmoCut.cpp:2405/2414):
+                    // Style applies to plugs only; Snap has no shape.
+                    if connectorParams.type == 0 {
+                        Picker("Style", selection: $connectorParams.style) {
+                            ForEach(connectorStyles, id: \.1) { option in
+                                Text(option.0).tag(option.1)
+                            }
+                        }
+                    }
+                    if connectorParams.type != 2 {
+                        Picker("Shape", selection: $connectorParams.shape) {
+                            ForEach(connectorShapes, id: \.1) { option in
+                                Text(option.0).tag(option.1)
+                            }
+                        }
+                    }
+                    Stepper(value: $connectorParams.radius, in: 0.25...10, step: 0.25) {
+                        stepperRow("Radius", symbol: "circle.dashed",
+                                   value: String(format: "%.2f mm", connectorParams.radius))
+                    }
+                    Stepper(value: $connectorParams.height, in: 0.5...20, step: 0.5) {
+                        stepperRow("Depth", symbol: "arrow.up.and.down",
+                                   value: String(format: "%.1f mm", connectorParams.height))
+                    }
+                    Stepper(value: $connectorParams.radiusTolerance, in: 0...1, step: 0.05) {
+                        stepperRow("Radius tolerance", symbol: "plusminus.circle",
+                                   value: String(format: "%.2f", connectorParams.radiusTolerance))
+                    }
+                    Stepper(value: $connectorParams.heightTolerance, in: 0...2, step: 0.05) {
+                        stepperRow("Depth tolerance", symbol: "plusminus",
+                                   value: String(format: "%.2f", connectorParams.heightTolerance))
+                    }
+                } header: {
+                    Text("Connectors")
+                } footer: {
+                    Text("\(connectorCount) connector(s) placed — the cut drills them automatically. Snap connectors have fixed depth and no shape; dowels are always prisms.")
+                }
+                Section {
+                    if let onPlaceConnectors {
+                        Button {
+                            onPlaceConnectors()
+                        } label: {
+                            Label("Place on plate…", systemImage: "hand.tap")
+                        }
+                        .disabled(isBusy)
+                    }
+                    if connectorCount > 0, let onClearConnectors {
+                        Button(role: .destructive) {
+                            onClearConnectors()
+                        } label: {
+                            Label("Remove all connectors", systemImage: "eraser")
+                        }
+                        .disabled(isBusy)
+                    }
+                }
             }
             .navigationTitle("Cut")
             .navigationBarTitleDisplayMode(.inline)
@@ -2174,7 +2684,56 @@ private struct CutSheet: View {
                 }
             }
         }
-        .presentationDetents([.medium])
+        .presentationDetents([.medium, .large])
+    }
+
+    /// One labeled stepper row with the formatted value on the trailing
+    /// edge (the system stepper shows no value by itself).
+    private func stepperRow(_ label: String, symbol: String, value: String) -> some View {
+        HStack {
+            Label(label, systemImage: symbol)
+            Spacer()
+            Text(value)
+                .font(.callout.monospacedDigit())
+                .foregroundStyle(.secondary)
+        }
+    }
+}
+
+/// Cut-connector placement bar: shown on the canvas while placement mode
+/// is active (the modal Cut sheet had to dismiss — canvas taps need it
+/// gone). Taps on the cut plane add connectors; Done returns to the sheet.
+private struct CutPlacementBar: View {
+    let connectorCount: Int
+    let isBusy: Bool
+    let onClear: () -> Void
+    let onDone: () -> Void
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "circle.dotted")
+                .font(.caption)
+                .foregroundStyle(Color.accentColor)
+            Text("Placing cut connectors — tap the cut plane")
+                .font(.caption.weight(.semibold))
+            Text("\(connectorCount) placed")
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(.secondary)
+            Spacer(minLength: 8)
+            Button(role: .destructive, action: onClear) {
+                Label("Clear", systemImage: "eraser")
+                    .font(.caption)
+            }
+            .buttonStyle(.bordered)
+            .disabled(isBusy || connectorCount == 0)
+            Button(action: onDone) {
+                Label("Back to cut", systemImage: "square.split.bottomthird")
+                    .font(.caption)
+            }
+            .buttonStyle(.bordered)
+        }
+        .padding(10)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14))
     }
 }
 
@@ -2750,6 +3309,13 @@ private struct ManipulationPanel: View {
                 Label(
                     "Tap two features (points, edges, circles or faces) to measure them.",
                     systemImage: "ruler"
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            case .brimEars:
+                Label(
+                    "Tap the object to place a brim ear at bed level; tap an ear to select it.",
+                    systemImage: "ear"
                 )
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -3362,6 +3928,10 @@ private struct ToolsPanel<Content: View>: View {
                 .foregroundStyle(.secondary)
         case .measure:
             Text("tap two features to measure")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+        case .brimEars:
+            Text("tap the object to place ears")
                 .font(.callout)
                 .foregroundStyle(.secondary)
         case .vlh:

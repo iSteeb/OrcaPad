@@ -276,7 +276,7 @@ static void test_md5_shim() {
 
 static void test_abi_version() {
     CHECK_EQ(orca_bridge_abi_version(), ORCA_BRIDGE_ABI_VERSION);
-    CHECK_EQ(ORCA_BRIDGE_ABI_VERSION, 41);
+    CHECK_EQ(ORCA_BRIDGE_ABI_VERSION, 42);
 }
 
 struct ProgressRecord {
@@ -4263,6 +4263,220 @@ static void test_vlh_plates_floating(const std::string &dir,
     orca_plater_free(plater);
 }
 
+
+// --- ABI v42: brim ears, reload, assembly actions, cut connectors -------------
+
+static void test_v42_features(const std::string &dir,
+                              const std::string &data_dir) {
+    orca_plater *plater = nullptr;
+    GUARD(g0, orca_plater_new(&plater));
+    expect_ok(g0, "plater_new");
+    orca_revision revision = 0;
+    const std::string cube = write_cube_stl(dir, "v42_cube.stl");
+    orca_object_id object_id = 0;
+    GUARD(g1, import_one(plater, cube.c_str(), 100.0, 100.0, &object_id, &revision));
+    expect_ok(g1, "import cube");
+
+    // --- brim ears: empty -> auto-generate (4 right-angle corners) -> CRUD
+    orca_brim_point *ears = nullptr;
+    uint32_t ear_count = 0;
+    GUARD(b0, orca_plater_object_brim_points(plater, object_id, &ears, &ear_count));
+    expect_ok(b0, "read empty brim points");
+    CHECK_EQ(ear_count, 0u);
+    orca_presets *presets = nullptr;
+    GUARD(b0p, orca_presets_new(data_dir.c_str(), &presets));
+    expect_ok(b0p, "presets_new");
+    uint32_t added = 0;
+    GUARD(b1, orca_plater_object_brim_points_auto(
+                  plater, presets, object_id, 125.0, 1.0, 4.0, &added, &revision));
+    expect_ok(b1, "auto brim ears");
+    CHECK_EQ(added, 4u); // the cube's four 90-degree bottom corners
+    GUARD(b2, orca_plater_object_brim_points(plater, object_id, &ears, &ear_count));
+    expect_ok(b2, "read auto ears");
+    CHECK_EQ(ear_count, 4u);
+    CHECK_NEAR(ears[0].head_front_radius, 4.0, 1e-6);
+    // points sit at the decimated corners of the (recentered) 20mm cube
+    CHECK(std::abs(ears[0].position[0]) > 9.0);
+    // world z = -1e-4 mapped through the inverse instance matrix (offset
+    // z = +10 for the rested, origin-centered cube) -> object z ~ -10
+    CHECK_NEAR(ears[0].position[2], -10.0, 0.01);
+    orca_brim_points_dispose(ears);
+    GUARD(b3, orca_plater_object_brim_point_add(plater, object_id, 1.0, 1.0, 0.0,
+                                                5.0, &revision));
+    expect_ok(b3, "manual brim point");
+    GUARD(b4, orca_plater_object_brim_points(plater, object_id, &ears, &ear_count));
+    expect_ok(b4, "read after add");
+    CHECK_EQ(ear_count, 5u);
+    orca_brim_points_dispose(ears);
+    GUARD(b5, orca_plater_object_brim_points_clear(plater, object_id, &revision));
+    expect_ok(b5, "clear brim points");
+    GUARD(b5b, orca_plater_object_brim_points_clear(plater, object_id, &revision));
+    expect_code(b5b, ORCA_STATUS_NOT_FOUND, "clear empty brim points");
+    GUARD(b6, orca_plater_object_brim_point_add(plater, object_id, 0, 0, 0, 0.0,
+                                                &revision));
+    expect_code(b6, ORCA_STATUS_INVALID_ARGUMENT, "zero radius rejected");
+
+    // --- reload from disk: mesh replaced in place, undo restores
+    const std::string smaller = dir + "/v42_small.stl";
+    {
+        FILE *file = fopen(smaller.c_str(), "wb");
+        CHECK(file != nullptr);
+        if (file) {
+            char header[80];
+            memset(header, 0, sizeof header);
+            fwrite(header, 1, 80, file);
+            unsigned int count = 12;
+            fwrite(&count, 4, 1, file);
+            const float v[8][3] = {
+                {0, 0, 0}, {10, 0, 0}, {10, 10, 0}, {0, 10, 0},
+                {0, 0, 10}, {10, 0, 10}, {10, 10, 10}, {0, 10, 10},
+            };
+            const int facets[12][3] = {
+                {0, 2, 1}, {0, 3, 2}, {4, 5, 6}, {4, 6, 7},
+                {0, 1, 5}, {0, 5, 4}, {1, 2, 6}, {1, 6, 5},
+                {2, 3, 7}, {2, 7, 6}, {3, 0, 4}, {3, 4, 7},
+            };
+            for (const auto &facet : facets) {
+                const float *a = v[facet[0]];
+                const float *b = v[facet[1]];
+                const float *c = v[facet[2]];
+                float normal[3] = {
+                    (b[1] - a[1]) * (c[2] - a[2]) - (b[2] - a[2]) * (c[1] - a[1]),
+                    (b[2] - a[2]) * (c[0] - a[0]) - (b[0] - a[0]) * (c[2] - a[2]),
+                    (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]),
+                };
+                fwrite(normal, 4, 3, file);
+                fwrite(v[facet[0]], 4, 3, file);
+                fwrite(v[facet[1]], 4, 3, file);
+                fwrite(v[facet[2]], 4, 3, file);
+                unsigned short attribute = 0;
+                fwrite(&attribute, 2, 1, file);
+            }
+            fclose(file);
+        }
+    }
+    orca_scene_snapshot snap;
+    memset(&snap, 0, sizeof snap);
+    GUARD(r0, orca_plater_snapshot(plater, &snap));
+    expect_ok(r0, "snapshot before reload");
+    const orca_instance_id instance_id = snap.objects[0].instances[0].id;
+    orca_scene_snapshot_dispose(&snap);
+    GUARD(r1, orca_plater_object_replace_mesh(plater, object_id,
+                                              smaller.c_str(), &revision));
+    expect_ok(r1, "reload from disk");
+    memset(&snap, 0, sizeof snap);
+    GUARD(r2, orca_plater_snapshot(plater, &snap));
+    expect_ok(r2, "snapshot after reload");
+    // 12 triangles but a 10mm bbox (the file's own coordinates)
+    CHECK_NEAR(snap.objects[0].bbox_max[0] - snap.objects[0].bbox_min[0],
+               10.0, 1e-3);
+    CHECK_EQ(snap.objects[0].instance_count, 1);
+    orca_scene_snapshot_dispose(&snap);
+    GUARD(r3, orca_plater_undo(plater, &revision));
+    expect_ok(r3, "undo reload");
+    GUARD(r4, orca_plater_object_replace_mesh(plater, object_id,
+                                              (dir + "/missing.stl").c_str(),
+                                              &revision));
+    expect_code(r4, ORCA_STATUS_IO_FAILURE, "reload missing file");
+
+    // --- assembly: info read + parallel action on two planes
+    orca_assemble_info *info = nullptr;
+    uint32_t info_count = 0;
+    GUARD(a0, orca_plater_object_assemble_info(plater, object_id, &info, &info_count));
+    expect_ok(a0, "assemble info");
+    CHECK_EQ(info_count, 1u);
+    CHECK_EQ(info[0].initialized, 0u);
+    orca_assemble_info_dispose(info);
+    orca_measure *measure = nullptr;
+    GUARD(a1, orca_plater_object_measure(plater, object_id, &measure));
+    expect_ok(a1, "measure for assembly");
+    orca_surface_feature top{};
+    GUARD(a2, orca_measure_pick(measure, 2, 0.0, 0.0, 10.0, &top));
+    expect_ok(a2, "pick top plane");
+    CHECK_EQ(top.type, ORCA_MEASURE_PLANE);
+    orca_surface_feature right{};
+    GUARD(a3, orca_measure_pick(measure, 7, 20.0, 10.0, 10.0, &right));
+    expect_ok(a3, "pick right plane");
+    CHECK_EQ(right.type, ORCA_MEASURE_PLANE);
+    GUARD(a4, orca_plater_instance_assemble_action(
+                  plater, object_id, instance_id, &top, &right, 0, &revision));
+    expect_ok(a4, "set to parallel");
+    GUARD(a4b, orca_plater_instance_assemble_action(
+                  plater, object_id, instance_id, &top, &right, 9, &revision));
+    expect_code(a4b, ORCA_STATUS_INVALID_ARGUMENT, "unknown assembly action");
+    GUARD(a5, orca_plater_undo(plater, &revision));
+    expect_ok(a5, "undo assembly action");
+    orca_measure_dispose(measure);
+
+    // --- cut connectors: CRUD + the existing cut consumes them
+    orca_cut_connector connector;
+    memset(&connector, 0, sizeof connector);
+    connector.position[0] = 0.0;
+    connector.position[1] = 0.0;
+    connector.position[2] = 10.0; // mid-height of the object-space cube
+    connector.normal[0] = 0.0;
+    connector.normal[1] = 0.0;
+    connector.normal[2] = 1.0;
+    connector.radius = 4.0f;
+    connector.height = 8.0f;
+    connector.type = 0;   // plug
+    connector.style = 0;  // prism
+    connector.shape = 3;  // circle
+    orca_cut_connector *listed = nullptr;
+    uint32_t listed_count = 0;
+    GUARD(c0, orca_plater_object_cut_connectors(plater, object_id, &listed, &listed_count));
+    expect_ok(c0, "read empty connectors");
+    CHECK_EQ(listed_count, 0u);
+    GUARD(c1, orca_plater_object_cut_connector_add(plater, object_id, &connector, &revision));
+    expect_ok(c1, "add connector");
+    connector.radius = -1.0f;
+    GUARD(c2, orca_plater_object_cut_connector_add(plater, object_id, &connector, &revision));
+    expect_code(c2, ORCA_STATUS_INVALID_ARGUMENT, "negative radius rejected");
+    connector.radius = 4.0f;
+    GUARD(c3, orca_plater_object_cut_connectors(plater, object_id, &listed, &listed_count));
+    expect_ok(c3, "read connectors");
+    CHECK_EQ(listed_count, 1u);
+    CHECK_NEAR(listed[0].radius, 4.0, 1e-6);
+    CHECK_NEAR(listed[0].position[2], 10.0, 1e-6);
+    orca_cut_connectors_dispose(listed);
+    // cut with connectors through the EXISTING cut path: the engine
+    // consumes the list (CutUtils reads ModelObject::cut_connectors) and
+    // clears it with the cut's own snapshot
+    orca_object_id first_result = 0;
+    uint32_t result_count = 0;
+    GUARD(c4, orca_plater_object_cut(plater, object_id, instance_id,
+                                     0.0, 0.0, 100.0, 0.0, 0.0, 1.0, 2,
+                                     &first_result, &result_count, &revision));
+    expect_ok(c4, "cut with connectors");
+    CHECK(result_count >= 1u);
+    GUARD(c5, orca_plater_undo(plater, &revision));
+    expect_ok(c5, "undo cut");
+
+    // --- paint fill (ABI v42): smart fill on the flat top face paints it
+    memset(&snap, 0, sizeof snap);
+    GUARD(f00, orca_plater_snapshot(plater, &snap));
+    expect_ok(f00, "snapshot for paint fill");
+    const orca_volume_id fill_volume = snap.objects[0].volumes[0].id;
+    orca_scene_snapshot_dispose(&snap);
+    GUARD(f01, orca_plater_volume_paint_fill(
+                  plater, object_id, fill_volume, ORCA_PAINT_SUPPORT,
+                  100.0, 100.0, 20.0, 0.0, 0.0, -1.0, 30.0, 0, 1, &revision));
+    expect_ok(f01, "smart fill top face");
+    orca_paint_mesh painted;
+    GUARD(f02, orca_plater_volume_paint(plater, object_id, fill_volume,
+                                        ORCA_PAINT_SUPPORT, &painted));
+    expect_ok(f02, "read painted triangles");
+    CHECK(painted.count >= 2u); // the coplanar top face
+    orca_paint_mesh_dispose(&painted);
+    GUARD(f03, orca_plater_volume_paint_fill(
+                  plater, object_id, fill_volume, ORCA_PAINT_SUPPORT,
+                  100.0, 100.0, 20.0, 0.0, 0.0, -1.0, -5.0, 0, 1, &revision));
+    expect_code(f03, ORCA_STATUS_INVALID_ARGUMENT, "negative fill angle");
+
+    orca_presets_free(presets);
+    orca_plater_free(plater);
+}
+
 static void test_project_roundtrip(const std::string &dir, const std::string &data_dir) {
     orca_presets *presets = nullptr;
     GUARD(gp, orca_presets_new(data_dir.c_str(), &presets));
@@ -5103,6 +5317,7 @@ int main() {
     test_exports(dir, data_dir);
     test_measure_and_mesh_ops(dir);
     test_vlh_plates_floating(dir, data_dir);
+    test_v42_features(dir, data_dir);
     test_cut(dir);
     test_config_io(dir, data_dir);
     test_painting(dir);

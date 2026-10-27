@@ -79,11 +79,18 @@ struct PreviewTabView: View {
             guard let outcome = environment.slicing.lastOutcome,
                   consumedSliceJob != outcome.jobID else { return }
             consumedSliceJob = outcome.jobID
+            // ColorPrint scheme inputs: the slot colours + colour-change
+            // ticks captured at load (ticks are document state; a re-slice
+            // after editing them reloads with fresh colours).
+            let filamentColours = environment.presets.filamentSlots.map(\.colour)
+            let colourChanges = (await environment.document.customGcodes()) ?? []
             if outcome.plateSections.isEmpty {
                 await store.load(
                     url: outcome.outputURL,
                     identity: "slice:\(outcome.jobID)",
-                    origin: outcome.plateOrigin ?? .zero
+                    origin: outcome.plateOrigin ?? .zero,
+                    filamentColours: filamentColours,
+                    colourChanges: colourChanges
                 )
             } else {
                 // Combined slice-all file: split at the ; ORCA_PLATE markers,
@@ -96,7 +103,9 @@ struct PreviewTabView: View {
                     origins: Dictionary(
                         uniqueKeysWithValues: outcome.plateSections.map {
                             ($0.plateIndex, $0.origin)
-                        })
+                        }),
+                    filamentColours: filamentColours,
+                    colourChanges: colourChanges
                 )
             }
             frameRequest += 1
@@ -671,6 +680,37 @@ struct PreviewTabView: View {
                         Spacer()
                     }
                 }
+            case .colorPrint:
+                // Desktop ColorPrint legend: the slot colours + every
+                // colour-change band it splits into.
+                ForEach(0..<max(store.colorPrintExtruderCount, 1), id: \.self) { index in
+                    HStack(spacing: 6) {
+                        RoundedRectangle(cornerRadius: 2)
+                            .fill(swatch(
+                                index < store.colorPrintBaseColours.count
+                                    ? store.colorPrintBaseColours[index]
+                                    : store.colorPrintColour(extruder: UInt8(index), height: 0)))
+                            .frame(width: 12, height: 12)
+                        Text("T\(index) filament")
+                            .font(.caption2)
+                        Spacer()
+                    }
+                }
+                ForEach(store.colorPrintChanges) { change in
+                    HStack(spacing: 6) {
+                        RoundedRectangle(cornerRadius: 2)
+                            .fill(swatch(change.colour))
+                            .frame(width: 12, height: 12)
+                        Text(String(format: "T%d colour change @ %.2f mm", change.extruder, change.height))
+                            .font(.caption2)
+                        Spacer()
+                    }
+                }
+                if store.colorPrintChanges.isEmpty {
+                    Text("No colour-change ticks — showing the slot colours per extruder.")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
             }
             estimationTotals
         }
@@ -802,6 +842,7 @@ private struct PreviewDock: View {
         case .acceleration: return "Accel"
         case .jerk: return "Jerk"
         case .tool: return "Tool"
+        case .colorPrint: return "Color"
         }
     }
 

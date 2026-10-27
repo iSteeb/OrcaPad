@@ -30,6 +30,9 @@ enum GizmoMode: String, CaseIterable, Sendable {
     /// drags adjust the layer-height curve, the panel runs Adaptive /
     /// Smooth / Reset.
     case vlh
+    /// Desktop brim ears gizmo (ABI v42): taps place ear anchors at bed
+    /// level, auto-generate detects first-layer contour corners.
+    case brimEars
 
     /// Menu label + symbol for the Tools menu and the collapsible panel.
     var menuLabel: String {
@@ -42,6 +45,7 @@ enum GizmoMode: String, CaseIterable, Sendable {
         case .paint: return "Paint"
         case .measure: return "Measure"
         case .vlh: return "Layers"
+        case .brimEars: return "Brim ears"
         }
     }
 
@@ -55,6 +59,7 @@ enum GizmoMode: String, CaseIterable, Sendable {
         case .select: return "rectangle.dashed"
         case .measure: return "ruler"
         case .vlh: return "square.3.layers.3d.top.down.forward"
+        case .brimEars: return "ear"
         }
     }
 }
@@ -278,6 +283,131 @@ final class Renderer: NSObject, MTKViewDelegate {
     func setVLHOverlay(_ overlay: VLHOverlay?) {
         vlhOverlay = overlay
         vlhDirty = true
+    }
+
+    // MARK: Brim-ears overlay (desktop GLGizmoBrimEars, ABI v42)
+
+    /// The selected object's placed ears in OBJECT space (position + ear
+    /// radius); drawn as markers through the instance matrix exactly like
+    /// the measure features.
+    struct BrimEarsOverlay {
+        let objectID: ObjectID
+        let points: [(position: SIMD3<Double>, radius: Double)]
+        var selectedIndex: Int?
+    }
+
+    private var brimEarsOverlay: BrimEarsOverlay?
+
+    func setBrimEars(_ overlay: BrimEarsOverlay?) {
+        brimEarsOverlay = overlay
+    }
+
+    // MARK: Cut-connector overlay (desktop CutDialog, ABI v42)
+
+    /// The selected object's placed cut connectors in OBJECT space, drawn
+    /// as short cylinders aligned to each connector's normal.
+    struct CutConnectorsOverlay {
+        let objectID: ObjectID
+        let connectors: [EnginePlater.CutConnector]
+    }
+
+    private var cutConnectorsOverlay: CutConnectorsOverlay?
+
+    func setCutConnectors(_ overlay: CutConnectorsOverlay?) {
+        cutConnectorsOverlay = overlay
+    }
+
+    // MARK: Cut plane (connector placement picking, desktop CutDialog
+    // manual mode)
+
+    /// One cut plane in VIEWER space (plane through the selected instance
+    /// at the Cut sheet's axis/fraction); taps intersect it to place a
+    /// connector on the plane.
+    struct CutPlane {
+        let objectID: ObjectID
+        let instanceID: InstanceID
+        /// A point on the plane (viewer world).
+        let point: SIMD3<Float>
+        /// Plane normal (viewer world, unit length).
+        let normal: SIMD3<Float>
+    }
+
+    /// A connector-placement hit: the ENGINE-space point on the cut plane
+    /// plus the same point converted back to RAW object space (mesh
+    /// coordinates, pivot included — the FacePick convention) and the
+    /// engine-space plane normal.
+    struct CutPlanePick {
+        let objectID: ObjectID
+        let instanceID: InstanceID
+        let enginePoint: SIMD3<Double>
+        let objectPoint: SIMD3<Double>
+        let engineNormal: SIMD3<Double>
+    }
+
+    private var cutPlane: CutPlane?
+
+    func setCutPlane(_ plane: CutPlane?) {
+        cutPlane = plane
+    }
+
+    /// Ray-vs-cut-plane intersection, accepted only inside the object's
+    /// local bounding box (desktop lets you click the plane preview where
+    /// it crosses the object; the bbox is its touch-proxy).
+    func pickCutPlane(at point: CGPoint, in view: MTKView) -> CutPlanePick? {
+        guard let plane = cutPlane,
+              let obj = objects.first(where: { $0.objectID == plane.objectID }),
+              let inst = obj.instances.first(where: {
+                  $0.instanceID == plane.instanceID
+              }) else { return nil }
+        let ray = screenRay(at: point, in: view)
+        let denominator = simd_dot(ray.dir, plane.normal)
+        guard abs(denominator) > 1e-6 else { return nil }
+        let t = simd_dot(plane.point - ray.origin, plane.normal) / denominator
+        guard t > 0 else { return nil }
+        let hit = ray.origin + ray.dir * t
+        // Containment in the instance's local AABB (packed viewer local).
+        let local4 = inst.model.inverse * SIMD4(hit.x, hit.y, hit.z, 1)
+        let local = SIMD3(local4.x, local4.y, local4.z)
+        let margin: Float = 1.5
+        guard local.x >= obj.bboxMin.x - margin, local.x <= obj.bboxMax.x + margin,
+              local.y >= obj.bboxMin.y - margin, local.y <= obj.bboxMax.y + margin,
+              local.z >= obj.bboxMin.z - margin, local.z <= obj.bboxMax.z + margin
+        else { return nil }
+        // Viewer world -> ENGINE world (bed re-anchor + axis mapping —
+        // the exact inverse of CoordinateMapper.viewerPoint(fromEngine:)).
+        let engine = SIMD3<Double>(
+            Double(hit.x + bed.center.x),
+            Double(-hit.z + bed.center.y),
+            Double(hit.y))
+        // Packed viewer local -> raw object space (the FacePick formula).
+        let object4 = CoordinateMapper.viewerToEngine * SIMD4<Float>(
+            local.x, local.y, local.z, 0)
+        let objectPoint = SIMD3<Double>(
+            Double(object4.x), Double(object4.y), Double(object4.z))
+            + SIMD3<Double>(Double(obj.pivot.x), Double(obj.pivot.y), Double(obj.pivot.z))
+        // Viewer normal -> engine normal (the plane is axis-aligned in the
+        // engine frame, so the mapped unit vector is exact).
+        let normal4 = CoordinateMapper.viewerToEngine * SIMD4<Float>(
+            plane.normal.x, plane.normal.y, plane.normal.z, 0)
+        return CutPlanePick(
+            objectID: plane.objectID,
+            instanceID: plane.instanceID,
+            enginePoint: engine,
+            objectPoint: objectPoint,
+            engineNormal: simd_normalize(SIMD3<Double>(
+                Double(normal4.x), Double(normal4.y), Double(normal4.z))))
+    }
+
+    // MARK: Assembly explode (desktop AssembleView, ABI v42)
+
+    /// Per-instance render-matrix overrides in VIEWER space (assembly
+    /// explode): every mesh draw path replaces the instance's model matrix
+    /// with its override while one is present. Computed by DocumentStore
+    /// from the engine's assemble transforms; the renderer only consumes.
+    private var assemblyOverrides: [InstanceID: simd_float4x4] = [:]
+
+    func setAssemblyOverrides(_ overrides: [InstanceID: simd_float4x4]) {
+        assemblyOverrides = overrides
     }
 
     /// Rebuilds the VLH draw buffers from the current overlay + scene
@@ -746,6 +876,24 @@ final class Renderer: NSObject, MTKViewDelegate {
         }
         guard let best else { return nil }
         return (flattenPlanes[best.index].engineNormal, best.index)
+    }
+
+    /// Nearest brim-ear marker under the tap (screen-space radius, the
+    /// desktop hover/point-grab semantics; nil = no marker hit). Indices
+    /// address the CURRENT overlay's `points` array.
+    func pickBrimEar(at point: CGPoint, in view: MTKView) -> Int? {
+        guard let overlay = brimEarsOverlay,
+              let geometry = brimEarsGeometry(overlay) else { return nil }
+        var best: (index: Int, distance: CGFloat)?
+        for (index, marker) in geometry.markers.enumerated() {
+            guard let projected = projectToScreen(marker, in: view) else { continue }
+            let distance = hypot(projected.x - point.x, projected.y - point.y)
+            // Finger-sized grab radius around each marker.
+            if distance <= 28, distance < (best?.distance ?? .greatestFiniteMagnitude) {
+                best = (index, distance)
+            }
+        }
+        return best?.index
     }
 
     private static let objectColor = SIMD4<Float>(0.96, 0.52, 0.11, 1)
@@ -1778,7 +1926,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         var vertices: [VertexPC] = []
         let accent = SIMD4<Float>(0.16, 0.80, 0.95, 1)
         switch gizmoMode {
-        case .layFlat, .select, .paint, .measure, .vlh:
+        case .layFlat, .select, .paint, .measure, .vlh, .brimEars:
             // no on-canvas gizmo: lay flat taps a facet; select draws the
             // marquee rectangle; paint taps facets with the sphere brush;
             // measure taps features (its overlay is state, not a gizmo);
@@ -1930,8 +2078,9 @@ final class Renderer: NSObject, MTKViewDelegate {
                     // A mirrored (left-handed) matrix flips winding: cull the
                     // other face set so the shell stays a halo.
                     encoder.setCullMode(inst.mirrored ? .back : .front)
-                    outlineUniforms.mvp = viewProj * inst.model
-                    outlineUniforms.model = inst.model
+                    let outlineModel = assemblyOverrides[inst.instanceID] ?? inst.model
+                    outlineUniforms.mvp = viewProj * outlineModel
+                    outlineUniforms.model = outlineModel
                     outlineUniforms.color = Renderer.outlineColor
                     outlineUniforms.width = obj.outlineWidth
                     var ou = outlineUniforms
@@ -1958,7 +2107,7 @@ final class Renderer: NSObject, MTKViewDelegate {
             // current plate draws normally. Off-plate opacity handled by
             // the color choice below.
             for inst in obj.instances {
-                let model = inst.model
+                let model = assemblyOverrides[inst.instanceID] ?? inst.model
                 cubeUniforms.mvp = viewProj * model
                 cubeUniforms.model = model
                 var color = inst.selected ? Renderer.selectedColor
@@ -1996,8 +2145,9 @@ final class Renderer: NSObject, MTKViewDelegate {
             for draw in obj.volumes where draw.indexCount > 0 {
                 encoder.setVertexBuffer(draw.vb, offset: 0, index: 0)
                 for inst in obj.instances {
-                    cubeUniforms.mvp = viewProj * inst.model
-                    cubeUniforms.model = inst.model
+                    let volumeModel = assemblyOverrides[inst.instanceID] ?? inst.model
+                    cubeUniforms.mvp = viewProj * volumeModel
+                    cubeUniforms.model = volumeModel
                     cubeUniforms.color = obj.selectedVolumeID == draw.volumeID
                         ? Renderer.selectedVolumeColor : draw.color
                     cubeUniforms.normalSign = inst.mirrored ? -1 : 1
@@ -2096,8 +2246,9 @@ final class Renderer: NSObject, MTKViewDelegate {
                   range.count > 0 else { continue }
             encoder.setVertexBuffer(obj.vb, offset: 0, index: 0)
             for inst in obj.instances where inst.selected {
-                cubeUniforms.mvp = viewProj * inst.model
-                cubeUniforms.model = inst.model
+                let partModel = assemblyOverrides[inst.instanceID] ?? inst.model
+                cubeUniforms.mvp = viewProj * partModel
+                cubeUniforms.model = partModel
                 cubeUniforms.color = Renderer.selectedVolumeColor
                 cubeUniforms.normalSign = inst.mirrored ? -1 : 1
                 var cu = cubeUniforms
@@ -2229,6 +2380,80 @@ final class Renderer: NSObject, MTKViewDelegate {
             }
         }
 
+        // Brim ears (desktop GLGizmoBrimEars): ear markers at bed level —
+        // a filled disc plus three orthogonal rings per ear (the measure
+        // point-marker pattern), the selected ear in the accent family.
+        if gizmoMode == .brimEars, let overlay = brimEarsOverlay,
+           let geometry = brimEarsGeometry(overlay) {
+            encoder.pushDebugGroup("brim-ears")
+            if !geometry.fill.isEmpty {
+                encoder.setRenderPipelineState(pcBlendPipeline)
+                encoder.setDepthStencilState(translucentDepthState)
+                var earUniforms = LineUniforms(mvp: viewProj)
+                encoder.setVertexBytes(
+                    &earUniforms,
+                    length: MemoryLayout<LineUniforms>.stride, index: 1)
+                var fill = geometry.fill
+                encoder.setVertexBytes(
+                    &fill,
+                    length: MemoryLayout<VertexPC>.stride * fill.count, index: 0)
+                encoder.drawPrimitives(
+                    type: .triangle, vertexStart: 0, vertexCount: fill.count)
+            }
+            if geometry.lines.count >= 2 {
+                encoder.setRenderPipelineState(linePipeline)
+                encoder.setDepthStencilState(overlayDepthState)
+                var earUniforms = LineUniforms(mvp: viewProj)
+                encoder.setVertexBytes(
+                    &earUniforms,
+                    length: MemoryLayout<LineUniforms>.stride, index: 1)
+                var lines = geometry.lines
+                encoder.setVertexBytes(
+                    &lines,
+                    length: MemoryLayout<VertexPC>.stride * lines.count, index: 0)
+                encoder.drawPrimitives(
+                    type: .line, vertexStart: 0, vertexCount: lines.count)
+            }
+            encoder.popDebugGroup()
+        }
+
+        // Cut connectors (desktop CutDialog): short cylinders aligned to
+        // each connector's normal at its object-space position (marker
+        // pattern; drawn whenever the cut flow provides them).
+        if let overlay = cutConnectorsOverlay,
+           let geometry = cutConnectorsGeometry(overlay) {
+            encoder.pushDebugGroup("cut-connectors")
+            if !geometry.fill.isEmpty {
+                encoder.setRenderPipelineState(pcBlendPipeline)
+                encoder.setDepthStencilState(translucentDepthState)
+                var connectorUniforms = LineUniforms(mvp: viewProj)
+                encoder.setVertexBytes(
+                    &connectorUniforms,
+                    length: MemoryLayout<LineUniforms>.stride, index: 1)
+                var fill = geometry.fill
+                encoder.setVertexBytes(
+                    &fill,
+                    length: MemoryLayout<VertexPC>.stride * fill.count, index: 0)
+                encoder.drawPrimitives(
+                    type: .triangle, vertexStart: 0, vertexCount: fill.count)
+            }
+            if geometry.lines.count >= 2 {
+                encoder.setRenderPipelineState(linePipeline)
+                encoder.setDepthStencilState(overlayDepthState)
+                var connectorUniforms = LineUniforms(mvp: viewProj)
+                encoder.setVertexBytes(
+                    &connectorUniforms,
+                    length: MemoryLayout<LineUniforms>.stride, index: 1)
+                var lines = geometry.lines
+                encoder.setVertexBytes(
+                    &lines,
+                    length: MemoryLayout<VertexPC>.stride * lines.count, index: 0)
+                encoder.drawPrimitives(
+                    type: .line, vertexStart: 0, vertexCount: lines.count)
+            }
+            encoder.popDebugGroup()
+        }
+
         // Gizmo overlay: always on top so it stays readable inside meshes.
         if let gizmo = selectedGizmo() {
             var vertices = gizmoVertices(gizmo)
@@ -2297,6 +2522,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         publishLabels(in: view)
         publishMeasureLabel(in: view)
         publishVLHLabels(in: view)
+        publishOrientation()
 
         trackFPS()
     }
@@ -2454,6 +2680,177 @@ final class Renderer: NSObject, MTKViewDelegate {
             return
         }
         MeasureLabelCenter.shared.update(MeasureLabel(text: text, point: point))
+    }
+
+    // MARK: Brim-ear / cut-connector overlay geometry (object space →
+    // selected instance; the measure overlay pattern)
+
+    /// Ear marker colors: unselected cyan (slot-A family), selected in the
+    /// accent-blue selection family, with a translucent fill disc.
+    private static let brimEarColor = SIMD4<Float>(0.30, 0.95, 1.00, 1)
+    private static let brimEarSelectedColor = SIMD4<Float>(1.00, 0.82, 0.25, 1)
+    private static let brimEarFillColor = SIMD4<Float>(0.30, 0.95, 1.00, 0.30)
+    /// Connector color family (desktop draws connectors in the gizmo's
+    /// highlight color): amber outline, faint fill.
+    private static let connectorColor = SIMD4<Float>(1.00, 0.82, 0.25, 1)
+    private static let connectorFillColor = SIMD4<Float>(1.00, 0.82, 0.25, 0.22)
+
+    /// Object-space point/direction → viewer-world conversion for the
+    /// selected instance of one object (identical to the measure overlay's
+    /// packed/world/worldDir mapping).
+    private func overlayFrame(
+        objectID: ObjectID
+    ) -> (world: (SIMD3<Double>) -> SIMD3<Float>,
+          worldDir: (SIMD3<Double>) -> SIMD3<Float>,
+          model: simd_float4x4)? {
+        guard let obj = objects.first(where: { $0.objectID == objectID }),
+              !hiddenObjectIDs.contains(objectID),
+              let inst = obj.instances.first(where: { $0.instanceID == primaryInstanceID })
+                  ?? obj.instances.first
+        else { return nil }
+        let model = inst.model
+        let pivot = obj.pivot
+        let world: (SIMD3<Double>) -> SIMD3<Float> = { p in
+            let shifted = SIMD3<Float>(Float(p.x), Float(p.y), Float(p.z)) - pivot
+            let local = SIMD3(shifted.x, shifted.z, -shifted.y)
+            let w = model * SIMD4(local.x, local.y, local.z, 1)
+            return SIMD3(w.x, w.y, w.z)
+        }
+        let worldDir: (SIMD3<Double>) -> SIMD3<Float> = { n in
+            let viewer = SIMD3<Float>(Float(n.x), Float(n.z), -Float(n.y))
+            let columns = model.columns
+            let direction = viewer.x * SIMD3(columns.0.x, columns.0.y, columns.0.z)
+                + viewer.y * SIMD3(columns.1.x, columns.1.y, columns.1.z)
+                + viewer.z * SIMD3(columns.2.x, columns.2.y, columns.2.z)
+            let length = simd_length(direction)
+            return length > 1e-9 ? direction / length : SIMD3(0, 1, 0)
+        }
+        return (world, worldDir, model)
+    }
+
+    /// The brim-ear markers in viewer world space plus each marker's world
+    /// position (for `pickBrimEar` projection). Nil when the object or its
+    /// instance is gone (or hidden) — nothing draws.
+    private func brimEarsGeometry(
+        _ overlay: BrimEarsOverlay
+    ) -> (lines: [VertexPC], fill: [VertexPC], markers: [SIMD3<Float>])? {
+        guard let frame = overlayFrame(objectID: overlay.objectID) else { return nil }
+        var lines: [VertexPC] = []
+        var fill: [VertexPC] = []
+        var markers: [SIMD3<Float>] = []
+        func ring(
+            _ center: SIMD3<Float>, _ u: SIMD3<Float>, _ v: SIMD3<Float>,
+            radius: Float, color: SIMD4<Float>
+        ) {
+            let segments = 24
+            for index in 0..<segments {
+                let a0 = Float(index) / Float(segments) * 2 * .pi
+                let a1 = Float(index + 1) / Float(segments) * 2 * .pi
+                lines.append(VertexPC(
+                    position: center + (u * cos(a0) + v * sin(a0)) * radius, color: color))
+                lines.append(VertexPC(
+                    position: center + (u * cos(a1) + v * sin(a1)) * radius, color: color))
+            }
+        }
+        func disc(
+            _ center: SIMD3<Float>, _ u: SIMD3<Float>, _ v: SIMD3<Float>,
+            radius: Float, color: SIMD4<Float>
+        ) {
+            let segments = 24
+            for index in 0..<segments {
+                let a0 = Float(index) / Float(segments) * 2 * .pi
+                let a1 = Float(index + 1) / Float(segments) * 2 * .pi
+                fill.append(VertexPC(position: center, color: color))
+                fill.append(VertexPC(
+                    position: center + (u * cos(a0) + v * sin(a0)) * radius, color: color))
+                fill.append(VertexPC(
+                    position: center + (u * cos(a1) + v * sin(a1)) * radius, color: color))
+            }
+        }
+        for (index, ear) in overlay.points.enumerated() {
+            let center = frame.world(ear.position)
+            markers.append(center)
+            let selected = index == overlay.selectedIndex
+            let color = selected ? Renderer.brimEarSelectedColor : Renderer.brimEarColor
+            // The marker reads at the ear's own radius but never vanishes
+            // for tiny ears (a finger-sized floor).
+            let extent = max(Float(ear.radius), 0.8)
+            // Ears sit at bed level facing up (engine +Z): one ring in the
+            // bed plane plus two orthogonal rings, and a faint flat disc.
+            let up = frame.worldDir(SIMD3(0, 0, 1))
+            let helper = abs(up.y) < 0.9 ? SIMD3<Float>(0, 1, 0) : SIMD3<Float>(1, 0, 0)
+            let u = simd_normalize(simd_cross(up, helper))
+            let v = simd_cross(up, u)
+            ring(center, u, v, radius: extent, color: color)
+            ring(center, SIMD3(1, 0, 0), SIMD3(0, 1, 0), radius: extent, color: color)
+            ring(center, SIMD3(0, 1, 0), SIMD3(0, 0, 1), radius: extent, color: color)
+            disc(center, u, v, radius: extent,
+                 color: selected ? SIMD4<Float>(1.00, 0.82, 0.25, 0.35)
+                     : Renderer.brimEarFillColor)
+        }
+        return (lines, fill, markers)
+    }
+
+    /// The placed cut connectors in viewer world space: one short cylinder
+    /// per connector (caps + side lines), aligned to the connector normal
+    /// through the instance matrix. Nil when the object is gone/hidden.
+    private func cutConnectorsGeometry(
+        _ overlay: CutConnectorsOverlay
+    ) -> (lines: [VertexPC], fill: [VertexPC])? {
+        guard let frame = overlayFrame(objectID: overlay.objectID) else { return nil }
+        var lines: [VertexPC] = []
+        var fill: [VertexPC] = []
+        func ring(
+            _ center: SIMD3<Float>, _ u: SIMD3<Float>, _ v: SIMD3<Float>,
+            radius: Float, color: SIMD4<Float>
+        ) {
+            let segments = 20
+            for index in 0..<segments {
+                let a0 = Float(index) / Float(segments) * 2 * .pi
+                let a1 = Float(index + 1) / Float(segments) * 2 * .pi
+                lines.append(VertexPC(
+                    position: center + (u * cos(a0) + v * sin(a0)) * radius, color: color))
+                lines.append(VertexPC(
+                    position: center + (u * cos(a1) + v * sin(a1)) * radius, color: color))
+            }
+        }
+        func disc(
+            _ center: SIMD3<Float>, _ u: SIMD3<Float>, _ v: SIMD3<Float>,
+            radius: Float, color: SIMD4<Float>
+        ) {
+            let segments = 20
+            for index in 0..<segments {
+                let a0 = Float(index) / Float(segments) * 2 * .pi
+                let a1 = Float(index + 1) / Float(segments) * 2 * .pi
+                fill.append(VertexPC(position: center, color: color))
+                fill.append(VertexPC(
+                    position: center + (u * cos(a0) + v * sin(a0)) * radius, color: color))
+                fill.append(VertexPC(
+                    position: center + (u * cos(a1) + v * sin(a1)) * radius, color: color))
+            }
+        }
+        for connector in overlay.connectors {
+            let center = frame.world(connector.position)
+            let axis = frame.worldDir(connector.normal)
+            let helper = abs(axis.y) < 0.9 ? SIMD3<Float>(0, 1, 0) : SIMD3<Float>(1, 0, 0)
+            let u = simd_normalize(simd_cross(axis, helper))
+            let v = simd_cross(axis, u)
+            let radius = max(Float(connector.radius), 0.3)
+            let half = max(Float(connector.height) * 0.5, 0.3)
+            let top = center + axis * half
+            let bottom = center - axis * half
+            ring(top, u, v, radius: radius, color: Renderer.connectorColor)
+            ring(bottom, u, v, radius: radius, color: Renderer.connectorColor)
+            disc(top, u, v, radius: radius, color: Renderer.connectorFillColor)
+            disc(bottom, u, v, radius: radius, color: Renderer.connectorFillColor)
+            for step in 0..<4 {
+                let angle = Float(step) / 4 * 2 * .pi
+                let offset = (u * cos(angle) + v * sin(angle)) * radius
+                lines.append(VertexPC(position: top + offset, color: Renderer.connectorColor))
+                lines.append(VertexPC(position: bottom + offset, color: Renderer.connectorColor))
+            }
+        }
+        return (lines, fill)
     }
 
     // MARK: VLH overlay geometry (object space → selected instance)
@@ -2668,6 +3065,14 @@ final class Renderer: NSObject, MTKViewDelegate {
     }
 
     // MARK: Status publishing
+
+    /// Publishes the camera's current orientation for the 3D navigator
+    /// overlay (NavigatorCube redraws from it; ObjectLabelCenter pattern —
+    /// equality-dropped so an idle camera does not churn SwiftUI).
+    private func publishOrientation() {
+        CameraOrientationCenter.shared.update(
+            CameraOrientation(yaw: camera.yaw, pitch: camera.pitch))
+    }
 
     private func trackFPS() {
         let now = CACurrentMediaTime()

@@ -146,6 +146,7 @@ void orca_result_dispose(orca_result *result) {
 #include "libslic3r/QuadricEdgeCollapse.hpp"
 #include "libslic3r/TriangleMeshDeal.hpp"
 #include "libslic3r/Slicing.hpp"
+#include "libslic3r/TriangleMeshSlicer.hpp"
 
 #include "nlohmann/json.hpp"
 
@@ -4267,6 +4268,668 @@ orca_result orca_plater_object_drop(orca_plater *plater,
         const double lift = -object->min_z();
         if (std::abs(lift) > 1e-9)
             object->translate_instances(Slic3r::Vec3d(0.0, 0.0, lift));
+        orcapad_touch_object(*plater, object_id);
+        *out_revision = mutation.commit();
+        return orcapad_ok();
+    });
+}
+
+
+static Slic3r::FacetsAnnotation *orcapad_paint_annotation(
+    Slic3r::ModelVolume *volume, uint8_t layer, const char *operation,
+    orca_result *failure);
+static int orcapad_volume_facet_under(
+    const Slic3r::ModelVolume *volume, const Slic3r::Vec3d &hit_local,
+    const Slic3r::Vec3d &view_dir_local, const char *operation,
+    orca_result *out_failure);
+
+orca_result orca_plater_volume_paint_fill(orca_plater *plater,
+                                          orca_object_id object_id,
+                                          orca_volume_id volume_id,
+                                          uint8_t layer,
+                                          double hit_x, double hit_y, double hit_z,
+                                          double view_dx, double view_dy, double view_dz,
+                                          double angle_deg, uint8_t propagate,
+                                          int32_t state,
+                                          orca_revision *out_revision) {
+    constexpr const char *operation = "orca_plater_volume_paint_fill";
+    if (out_revision) *out_revision = 0;
+    if (!plater)
+        return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation,
+                            "plater handle is null");
+    if (!out_revision)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "output pointer is null");
+    if (!std::isfinite(hit_x) || !std::isfinite(hit_y) || !std::isfinite(hit_z) ||
+        !std::isfinite(view_dx) || !std::isfinite(view_dy) || !std::isfinite(view_dz) ||
+        !std::isfinite(angle_deg) || angle_deg < 0.0 || angle_deg > 180.0)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "hit, view direction or fill angle is invalid");
+    if (state < int32_t(Slic3r::EnforcerBlockerType::NONE) ||
+        state > int32_t(Slic3r::EnforcerBlockerType::ExtruderMax))
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "paint state is out of range");
+    return orcapad_guard(operation, [&]() -> orca_result {
+        Slic3r::ModelObject *object = plater_obj(plater, object_id);
+        if (!object)
+            return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation,
+                                "object was not found");
+        Slic3r::ModelVolume *volume = plater_volume(object, volume_id);
+        if (!volume)
+            return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation,
+                                "volume was not found");
+        orca_result failure = orcapad_ok();
+        Slic3r::FacetsAnnotation *annotation =
+            orcapad_paint_annotation(volume, layer, operation, &failure);
+        if (!annotation) return failure;
+        if (!orcapad_revision_available(*plater))
+            return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
+                                "document revision is exhausted");
+        Slic3r::ModelInstance *instance =
+            object->instances.empty() ? nullptr : object->instances.front();
+        if (!instance)
+            return orcapad_fail(ORCA_STATUS_INVALID_MODEL, operation,
+                                "object has no instance");
+        const Slic3r::Transform3d trafo = instance->get_matrix() * volume->get_matrix();
+        const Slic3r::Transform3d inverse = trafo.inverse();
+        const Slic3r::Vec3d hit_local =
+            (inverse * Slic3r::Vec3d(hit_x, hit_y, hit_z));
+        const Slic3r::Vec3d view_local =
+            (inverse.linear() * Slic3r::Vec3d(view_dx, view_dy, view_dz));
+        orca_result facet_failure = orcapad_ok();
+        const int facet = orcapad_volume_facet_under(
+            volume, hit_local, view_local, operation, &facet_failure);
+        if (facet < 0) return facet_failure;
+
+        OrcapadMutation mutation(*plater, "Paint");
+        Slic3r::TriangleSelector selector(volume->mesh());
+        selector.deserialize(annotation->get_data(), false);
+        Slic3r::Transform3d trafo_no_translate = Slic3r::Transform3d::Identity();
+        trafo_no_translate.linear() = trafo.linear();
+        const Slic3r::Vec3f hit_mesh = hit_local.cast<float>();
+        if (angle_deg > 0.0) {
+            selector.seed_fill_select_triangles(
+                hit_mesh, facet, trafo_no_translate,
+                Slic3r::TriangleSelector::ClippingPlane{},
+                static_cast<float>(angle_deg), 0.0f, false);
+        } else {
+            selector.bucket_fill_select_triangles(
+                hit_mesh, facet, Slic3r::TriangleSelector::ClippingPlane{},
+                0.0f, propagate != 0, true);
+        }
+        selector.seed_fill_apply_on_triangles(
+            static_cast<Slic3r::EnforcerBlockerType>(state));
+        if (!annotation->set(selector))
+            return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation,
+                                "the fill selected nothing at that position");
+        orcapad_touch_object(*plater, object_id);
+        *out_revision = mutation.commit();
+        return orcapad_ok();
+    });
+}
+
+// --- brim ears (desktop GLGizmoBrimEars, ABI v42) ------------------------------
+
+orca_result orca_plater_object_brim_points(orca_plater *plater,
+                                           orca_object_id object_id,
+                                           orca_brim_point **out,
+                                           uint32_t *out_count) {
+    constexpr const char *operation = "orca_plater_object_brim_points";
+    if (out) *out = nullptr;
+    if (out_count) *out_count = 0;
+    if (!plater)
+        return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation,
+                            "plater handle is null");
+    if (!out || !out_count)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "output pointer is null");
+    return orcapad_guard(operation, [&]() -> orca_result {
+        Slic3r::ModelObject *object = plater_obj(plater, object_id);
+        if (!object)
+            return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation,
+                                "object was not found");
+        const size_t count = object->brim_points.size();
+        orca_brim_point *points = static_cast<orca_brim_point *>(
+            count ? std::malloc(count * sizeof(orca_brim_point)) : nullptr);
+        if (count && !points)
+            return orcapad_fail(ORCA_STATUS_OUT_OF_MEMORY, operation,
+                                "could not allocate the brim points");
+        for (size_t index = 0; index < count; ++index) {
+            const Slic3r::BrimPoint &point = object->brim_points[index];
+            points[index] = orca_brim_point{
+                {point.pos.x(), point.pos.y(), point.pos.z()},
+                point.head_front_radius};
+        }
+        *out = points;
+        *out_count = static_cast<uint32_t>(count);
+        return orcapad_ok();
+    });
+}
+
+void orca_brim_points_dispose(orca_brim_point *points) { std::free(points); }
+
+orca_result orca_plater_object_brim_point_add(orca_plater *plater,
+                                              orca_object_id object_id,
+                                              double x, double y, double z,
+                                              double radius,
+                                              orca_revision *out_revision) {
+    constexpr const char *operation = "orca_plater_object_brim_point_add";
+    if (out_revision) *out_revision = 0;
+    if (!plater)
+        return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation,
+                            "plater handle is null");
+    if (!out_revision)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "output pointer is null");
+    if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z) ||
+        !std::isfinite(radius) || radius <= 0.0)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "position must be finite and radius positive");
+    return orcapad_guard(operation, [&]() -> orca_result {
+        Slic3r::ModelObject *object = plater_obj(plater, object_id);
+        if (!object)
+            return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation,
+                                "object was not found");
+        if (!orcapad_revision_available(*plater))
+            return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
+                                "document revision is exhausted");
+        OrcapadMutation mutation(*plater, "Brim ears");
+        object->brim_points.emplace_back(
+            Slic3r::Vec3f(static_cast<float>(x), static_cast<float>(y),
+                          static_cast<float>(z)),
+            static_cast<float>(radius));
+        orcapad_touch_object(*plater, object_id);
+        *out_revision = mutation.commit();
+        return orcapad_ok();
+    });
+}
+
+orca_result orca_plater_object_brim_points_clear(orca_plater *plater,
+                                                 orca_object_id object_id,
+                                                 orca_revision *out_revision) {
+    constexpr const char *operation = "orca_plater_object_brim_points_clear";
+    if (out_revision) *out_revision = 0;
+    if (!plater)
+        return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation,
+                            "plater handle is null");
+    if (!out_revision)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "output pointer is null");
+    return orcapad_guard(operation, [&]() -> orca_result {
+        Slic3r::ModelObject *object = plater_obj(plater, object_id);
+        if (!object)
+            return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation,
+                                "object was not found");
+        if (object->brim_points.empty())
+            return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation,
+                                "object has no brim ears");
+        if (!orcapad_revision_available(*plater))
+            return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
+                                "document revision is exhausted");
+        OrcapadMutation mutation(*plater, "Brim ears");
+        object->brim_points.clear();
+        orcapad_touch_object(*plater, object_id);
+        *out_revision = mutation.commit();
+        return orcapad_ok();
+    });
+}
+
+/// Desktop GLGizmoBrimEars::auto_generate: first-layer contours decimated
+/// by Douglas-Peucker, corners picked by the engine's own convex/concave
+/// angle filters, points placed just under the first layer in object space.
+orca_result orca_plater_object_brim_points_auto(orca_plater *plater,
+                                                orca_presets *presets,
+                                                orca_object_id object_id,
+                                                double max_angle_deg,
+                                                double detection_length_mm,
+                                                double radius_mm,
+                                                uint32_t *out_added,
+                                                orca_revision *out_revision) {
+    constexpr const char *operation = "orca_plater_object_brim_points_auto";
+    if (out_added) *out_added = 0;
+    if (out_revision) *out_revision = 0;
+    if (!plater)
+        return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation,
+                            "plater handle is null");
+    if (!out_added || !out_revision)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "output pointer is null");
+    if (!std::isfinite(max_angle_deg) || max_angle_deg <= 0.0 ||
+        max_angle_deg >= 180.0)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "max angle must be within (0, 180) degrees");
+    if (!std::isfinite(detection_length_mm) || detection_length_mm <= 0.0)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "detection length must be positive");
+    return orcapad_guard(operation, [&]() -> orca_result {
+        Slic3r::ModelObject *object = plater_obj(plater, object_id);
+        if (!object)
+            return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation,
+                                "object was not found");
+        if (object->instances.empty())
+            return orcapad_fail(ORCA_STATUS_INVALID_MODEL, operation,
+                                "object has no instance");
+        // slice height: half the first layer height (inside layer 1)
+        double layer_height = 0.2;
+        if (presets) {
+            const Slic3r::DynamicPrintConfig config =
+                presets->bundle->full_config();
+            if (auto *option = config.option<Slic3r::ConfigOptionFloat>(
+                    "initial_layer_print_height"))
+                layer_height = option->value;
+            else if (auto *fallback =
+                         config.option<Slic3r::ConfigOptionFloat>(
+                             "layer_height"))
+                layer_height = fallback->value;
+        }
+        const double slice_z = std::max(0.5 * layer_height, 0.05);
+        // default ear radius: initial_layer_line_width x 16 (desktop
+        // get_brim_default_radius), derived like the gizmo
+        float radius = static_cast<float>(radius_mm);
+        if (radius <= 0.0f) {
+            double nozzle = 0.4;
+            double line_width = nozzle;
+            if (presets) {
+                const Slic3r::DynamicPrintConfig config =
+                    presets->bundle->full_config();
+                if (auto *nozzles = config.option<Slic3r::ConfigOptionFloats>(
+                        "nozzle_diameter"))
+                    if (!nozzles->values.empty())
+                        nozzle = nozzles->values.front();
+                const Slic3r::ConfigOptionDef *def =
+                    Slic3r::print_config_def.get("initial_layer_line_width");
+                if (def && def->ratio_over == "nozzle_diameter")
+                    line_width = nozzle * 1.0; // default 100% ratio
+            }
+            radius = static_cast<float>(line_width * 16.0);
+        }
+        // world mesh through the first instance (mirrors the gizmo slicing
+        // the volume in world space), then points inverse to object space
+        const Slic3r::Transform3d matrix = object->instances.front()->get_matrix();
+        Slic3r::TriangleMesh mesh = object->raw_mesh();
+        mesh.transform(matrix, true);
+        const Slic3r::Transform3d inverse = matrix.inverse();
+        std::vector<Slic3r::ExPolygons> slices;
+        try {
+            slices = Slic3r::slice_mesh_ex(
+                mesh.its, {static_cast<float>(slice_z)},
+                Slic3r::MeshSlicingParamsEx{}, []{});
+        } catch (const std::exception &error) {
+            return orcapad_fail(ORCA_STATUS_ENGINE_FAILURE, operation,
+                                error.what());
+        }
+        if (slices.empty() || slices.front().empty())
+            return orcapad_fail(ORCA_STATUS_INVALID_MODEL, operation,
+                                "the object has no first-layer contour");
+        const double angle_threshold =
+            (180.0 - max_angle_deg) * M_PI / 180.0;
+        const double tolerance = scale_(detection_length_mm);
+        std::vector<Slic3r::BrimPoint> placed;
+        for (const Slic3r::ExPolygons &expolygons : slices) {
+            for (const Slic3r::ExPolygon &expolygon : expolygons) {
+                Slic3r::Polygon contour = expolygon.contour;
+                contour.douglas_peucker(tolerance);
+                Slic3r::Points outer = contour.convex_points(angle_threshold);
+                for (const Slic3r::Point &point : outer) {
+                    const Slic3r::Vec3d world(
+                        Slic3r::unscale<double>(point.x()), Slic3r::unscale<double>(point.y()),
+                        -1e-4);
+                    const Slic3r::Vec3d local = inverse * world;
+                    placed.emplace_back(local.cast<float>(), radius);
+                }
+                for (const Slic3r::Polygon &hole : expolygon.holes) {
+                    Slic3r::Polygon inner = hole;
+                    inner.douglas_peucker(tolerance);
+                    Slic3r::Points corners = inner.concave_points(angle_threshold);
+                    for (const Slic3r::Point &point : corners) {
+                        const Slic3r::Vec3d world(
+                            unscale_(point.x()), unscale_(point.y()), -1e-4);
+                        const Slic3r::Vec3d local = inverse * world;
+                        placed.emplace_back(local.cast<float>(), radius);
+                    }
+                }
+            }
+        }
+        if (placed.empty())
+            return orcapad_fail(ORCA_STATUS_INVALID_MODEL, operation,
+                                "no corners matched the angle threshold");
+        if (!orcapad_revision_available(*plater))
+            return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
+                                "document revision is exhausted");
+        OrcapadMutation mutation(*plater, "Brim ears");
+        for (Slic3r::BrimPoint &point : placed)
+            object->brim_points.push_back(std::move(point));
+        orcapad_touch_object(*plater, object_id);
+        *out_added = static_cast<uint32_t>(placed.size());
+        *out_revision = mutation.commit();
+        return orcapad_ok();
+    });
+}
+
+// --- reload from disk (desktop Reload from disk / Replace, ABI v42) ------------
+
+orca_result orca_plater_object_replace_mesh(orca_plater *plater,
+                                            orca_object_id object_id,
+                                            const char *path,
+                                            orca_revision *out_revision) {
+    constexpr const char *operation = "orca_plater_object_replace_mesh";
+    if (out_revision) *out_revision = 0;
+    if (!plater)
+        return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation,
+                            "plater handle is null");
+    if (!out_revision)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "output pointer is null");
+    if (!path || !path[0])
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "path is empty");
+    struct stat probe;
+    if (stat(path, &probe) != 0)
+        return orcapad_fail(ORCA_STATUS_IO_FAILURE, operation,
+                            "replacement file is not accessible");
+    return orcapad_guard(operation, [&]() -> orca_result {
+        Slic3r::ModelObject *object = plater_obj(plater, object_id);
+        if (!object)
+            return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation,
+                                "object was not found");
+        Slic3r::Model replacement;
+        try {
+            replacement = Slic3r::Model::read_from_file(path);
+        } catch (const std::exception &error) {
+            return orcapad_fail(ORCA_STATUS_INVALID_MODEL, operation,
+                                error.what());
+        }
+        if (replacement.objects.empty())
+            return orcapad_fail(ORCA_STATUS_INVALID_MODEL, operation,
+                                "replacement contains no model object");
+        Slic3r::TriangleMesh mesh;
+        for (const Slic3r::ModelObject *source : replacement.objects)
+            mesh.merge(source->raw_mesh());
+        if (mesh.its.indices.empty() || mesh.its.vertices.empty())
+            return orcapad_fail(ORCA_STATUS_INVALID_MODEL, operation,
+                                "replacement carries no geometry");
+        if (!orcapad_revision_available(*plater))
+            return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
+                                "document revision is exhausted");
+        OrcapadMutation mutation(*plater, "Reload from disk");
+        // Keep the object (instances, settings); the file's parts merge
+        // into the first volume; extra volumes drop. Paint annotations
+        // die with the old triangle indices.
+        Slic3r::ModelVolume *volume = object->volumes.front();
+        volume->set_mesh(std::move(mesh));
+        volume->set_transformation(Slic3r::Geometry::Transformation());
+        while (object->volumes.size() > 1) {
+            Slic3r::ModelVolume *extra = object->volumes.back();
+            object->delete_volume(object->volumes.size() - 1);
+            (void)extra;
+        }
+        orcapad_clear_paint_annotations(volume);
+        orcapad_touch_object(*plater, object_id);
+        *out_revision = mutation.commit();
+        return orcapad_ok();
+    });
+}
+
+// --- assembly (desktop AssembleView + GLGizmoAssembly, ABI v42) ----------------
+
+orca_result orca_plater_object_assemble_info(orca_plater *plater,
+                                             orca_object_id object_id,
+                                             orca_assemble_info **out,
+                                             uint32_t *out_count) {
+    constexpr const char *operation = "orca_plater_object_assemble_info";
+    if (out) *out = nullptr;
+    if (out_count) *out_count = 0;
+    if (!plater)
+        return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation,
+                            "plater handle is null");
+    if (!out || !out_count)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "output pointer is null");
+    return orcapad_guard(operation, [&]() -> orca_result {
+        Slic3r::ModelObject *object = plater_obj(plater, object_id);
+        if (!object)
+            return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation,
+                                "object was not found");
+        const size_t count = object->instances.size();
+        orca_assemble_info *info = static_cast<orca_assemble_info *>(
+            count ? std::calloc(count, sizeof(orca_assemble_info)) : nullptr);
+        if (count && !info)
+            return orcapad_fail(ORCA_STATUS_OUT_OF_MEMORY, operation,
+                                "could not allocate the assembly info");
+        for (size_t index = 0; index < count; ++index) {
+            Slic3r::ModelInstance *instance = object->instances[index];
+            const Slic3r::Transform3d matrix =
+                instance->get_assemble_transformation().get_matrix();
+            for (int column = 0; column < 4; ++column)
+                for (int row = 0; row < 4; ++row)
+                    info[index].matrix[column * 4 + row] =
+                        matrix(row, column);
+            const Slic3r::Vec3d offset = instance->get_offset_to_assembly();
+            info[index].offset_to_assembly[0] = offset.x();
+            info[index].offset_to_assembly[1] = offset.y();
+            info[index].offset_to_assembly[2] = offset.z();
+            info[index].initialized =
+                instance->is_assemble_initialized() ? 1 : 0;
+        }
+        *out = info;
+        *out_count = static_cast<uint32_t>(count);
+        return orcapad_ok();
+    });
+}
+
+void orca_assemble_info_dispose(orca_assemble_info *info) { std::free(info); }
+
+orca_result orca_plater_instance_assemble_action(orca_plater *plater,
+                                                 orca_object_id object_id,
+                                                 orca_instance_id instance_id,
+                                                 const orca_surface_feature *a,
+                                                 const orca_surface_feature *b,
+                                                 int32_t action,
+                                                 orca_revision *out_revision) {
+    constexpr const char *operation = "orca_plater_instance_assemble_action";
+    if (out_revision) *out_revision = 0;
+    if (!plater)
+        return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation,
+                            "plater handle is null");
+    if (!out_revision)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "output pointer is null");
+    if (!a || !b)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "surface feature pointer is null");
+    if (action < 0 || action > 3)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "action must be 0 parallel, 1 center coincident, "
+                            "2/3 reverse rotation");
+    return orcapad_guard(operation, [&]() -> orca_result {
+        Slic3r::ModelObject *object = plater_obj(plater, object_id);
+        if (!object)
+            return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation,
+                                "object was not found");
+        Slic3r::ModelInstance *instance = nullptr;
+        for (Slic3r::ModelInstance *candidate : object->instances)
+            if (candidate->id().id == instance_id) instance = candidate;
+        if (!instance)
+            return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation,
+                                "instance was not found");
+        const indexed_triangle_set its = object->raw_mesh().its;
+        if (its.indices.size() < 4)
+            return orcapad_fail(ORCA_STATUS_INVALID_MODEL, operation,
+                                "object mesh is too small");
+        const Slic3r::Measure::AssemblyAction actions =
+            Slic3r::Measure::get_assembly_action(
+                orcapad_feature_from_abi(a), orcapad_feature_from_abi(b));
+        const bool offered = action == 0 ? actions.can_set_to_parallel
+                            : action == 1 ? actions.can_set_to_center_coincidence
+                            : action == 2 ? actions.can_set_feature_1_reverse_rotation
+                                          : actions.can_set_feature_2_reverse_rotation;
+        if (!offered)
+            return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                                "the engine does not offer this assembly "
+                                "action for the picked features");
+        const Slic3r::Transform3d apply =
+            action == 0 ? actions.tran_for_parallel
+            : action == 1 ? actions.tran_for_center_coincidence
+                          : actions.tran_for_reverse_rotation;
+        if (!orcapad_revision_available(*plater))
+            return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
+                                "document revision is exhausted");
+        OrcapadMutation mutation(*plater, "Assembly");
+        instance->set_transformation(Slic3r::Geometry::Transformation(
+            apply * instance->get_transformation().get_matrix()));
+        orcapad_touch_object(*plater, object_id);
+        *out_revision = mutation.commit();
+        return orcapad_ok();
+    });
+}
+
+// --- cut connectors (desktop CutDialog connectors, ABI v42) --------------------
+
+static bool orcapad_cut_connector_from_abi(
+    const orca_cut_connector *raw, Slic3r::CutConnector *out) {
+    if (!raw || !out) return false;
+    if (!std::isfinite(raw->position[0]) || !std::isfinite(raw->position[1]) ||
+        !std::isfinite(raw->position[2]) || !std::isfinite(raw->normal[0]) ||
+        !std::isfinite(raw->normal[1]) || !std::isfinite(raw->normal[2]))
+        return false;
+    if (!std::isfinite(raw->radius) || raw->radius <= 0.0f ||
+        !std::isfinite(raw->height) || raw->height <= 0.0f ||
+        raw->radius_tolerance < 0.0f || raw->radius_tolerance > 1.0f ||
+        raw->height_tolerance < 0.0f || raw->height_tolerance > 1.0f)
+        return false;
+    if (raw->type < 0 || raw->type > 2 || raw->style < 0 || raw->style > 1 ||
+        raw->shape < 0 || raw->shape > 3)
+        return false;
+    out->pos = Slic3r::Vec3d(raw->position[0], raw->position[1],
+                             raw->position[2]);
+    // drill axis: rotate +Z onto the connector normal
+    Slic3r::Vec3d normal(raw->normal[0], raw->normal[1], raw->normal[2]);
+    if (normal.squaredNorm() < 1e-12) return false;
+    normal.normalize();
+    out->rotation_m = Slic3r::Transform3d(
+        Eigen::Quaterniond::FromTwoVectors(Slic3r::Vec3d::UnitZ(),
+                                            normal));
+    out->radius = raw->radius;
+    out->height = raw->height;
+    out->radius_tolerance = raw->radius_tolerance;
+    out->height_tolerance = raw->height_tolerance;
+    out->z_angle = 0.f;
+    out->attribs = Slic3r::CutConnectorAttributes(
+        static_cast<Slic3r::CutConnectorType>(raw->type),
+        static_cast<Slic3r::CutConnectorStyle>(raw->style),
+        static_cast<Slic3r::CutConnectorShape>(raw->shape));
+    return true;
+}
+
+orca_result orca_plater_object_cut_connectors(orca_plater *plater,
+                                              orca_object_id object_id,
+                                              orca_cut_connector **out,
+                                              uint32_t *out_count) {
+    constexpr const char *operation = "orca_plater_object_cut_connectors";
+    if (out) *out = nullptr;
+    if (out_count) *out_count = 0;
+    if (!plater)
+        return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation,
+                            "plater handle is null");
+    if (!out || !out_count)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "output pointer is null");
+    return orcapad_guard(operation, [&]() -> orca_result {
+        Slic3r::ModelObject *object = plater_obj(plater, object_id);
+        if (!object)
+            return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation,
+                                "object was not found");
+        const size_t count = object->cut_connectors.size();
+        orca_cut_connector *connectors = static_cast<orca_cut_connector *>(
+            count ? std::calloc(count, sizeof(orca_cut_connector)) : nullptr);
+        if (count && !connectors)
+            return orcapad_fail(ORCA_STATUS_OUT_OF_MEMORY, operation,
+                                "could not allocate the connectors");
+        for (size_t index = 0; index < count; ++index) {
+            const Slic3r::CutConnector &connector =
+                object->cut_connectors[index];
+            orca_cut_connector &slot = connectors[index];
+            slot.position[0] = connector.pos.x();
+            slot.position[1] = connector.pos.y();
+            slot.position[2] = connector.pos.z();
+            Slic3r::Vec3d axis =
+                (connector.rotation_m * Slic3r::Vec3d::UnitZ()).normalized();
+            slot.normal[0] = axis.x();
+            slot.normal[1] = axis.y();
+            slot.normal[2] = axis.z();
+            slot.radius = connector.radius;
+            slot.height = connector.height;
+            slot.radius_tolerance = connector.radius_tolerance;
+            slot.height_tolerance = connector.height_tolerance;
+            slot.type = static_cast<int32_t>(connector.attribs.type);
+            slot.style = static_cast<int32_t>(connector.attribs.style);
+            slot.shape = static_cast<int32_t>(connector.attribs.shape);
+        }
+        *out = connectors;
+        *out_count = static_cast<uint32_t>(count);
+        return orcapad_ok();
+    });
+}
+
+void orca_cut_connectors_dispose(orca_cut_connector *connectors) {
+    std::free(connectors);
+}
+
+orca_result orca_plater_object_cut_connector_add(
+    orca_plater *plater, orca_object_id object_id,
+    const orca_cut_connector *connector, orca_revision *out_revision) {
+    constexpr const char *operation = "orca_plater_object_cut_connector_add";
+    if (out_revision) *out_revision = 0;
+    if (!plater)
+        return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation,
+                            "plater handle is null");
+    if (!out_revision)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "output pointer is null");
+    return orcapad_guard(operation, [&]() -> orca_result {
+        Slic3r::ModelObject *object = plater_obj(plater, object_id);
+        if (!object)
+            return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation,
+                                "object was not found");
+        Slic3r::CutConnector parsed;
+        if (!orcapad_cut_connector_from_abi(connector, &parsed))
+            return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                                "connector values are invalid");
+        if (!orcapad_revision_available(*plater))
+            return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
+                                "document revision is exhausted");
+        OrcapadMutation mutation(*plater, "Cut connectors");
+        object->cut_connectors.push_back(parsed);
+        orcapad_touch_object(*plater, object_id);
+        *out_revision = mutation.commit();
+        return orcapad_ok();
+    });
+}
+
+orca_result orca_plater_object_cut_connectors_clear(
+    orca_plater *plater, orca_object_id object_id,
+    orca_revision *out_revision) {
+    constexpr const char *operation = "orca_plater_object_cut_connectors_clear";
+    if (out_revision) *out_revision = 0;
+    if (!plater)
+        return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation,
+                            "plater handle is null");
+    if (!out_revision)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "output pointer is null");
+    return orcapad_guard(operation, [&]() -> orca_result {
+        Slic3r::ModelObject *object = plater_obj(plater, object_id);
+        if (!object)
+            return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation,
+                                "object was not found");
+        if (object->cut_connectors.empty())
+            return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation,
+                                "object has no cut connectors");
+        if (!orcapad_revision_available(*plater))
+            return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
+                                "document revision is exhausted");
+        OrcapadMutation mutation(*plater, "Cut connectors");
+        object->cut_connectors.clear();
         orcapad_touch_object(*plater, object_id);
         *out_revision = mutation.commit();
         return orcapad_ok();

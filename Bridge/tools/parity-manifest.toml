@@ -375,11 +375,10 @@ evidence = ["abi:orca_plater_convert_units", 'client:func convertUnits\(']
 id = "plate.reload"
 area = "plate"
 title = "Reload from disk / replace model"
-status = "missing"
+status = "done"
+evidence = ["abi:orca_plater_object_replace_mesh", "tests:orca_plater_object_replace_mesh", 'client:func reloadFromDisk']
 desktop = ["context:Reload from disk", "context:Reload All", "context:Replace 3D file", "context:Replace all with 3D files"]
-work = "Bridge + UI"
-priority = 35
-note = "needs security-scoped bookmarks to the original files"
+note = "ABI v42: replaceMesh keeps instances/settings and swaps geometry (desktop reload_from_disk); the import path records a bookmark (iOS plain bookmarks; security-scoped bookmarks are macOS-only) AND a stable copy in Application Support/Sources; Reload prefers the bookmark, falls back to the copy with a status note; Replace 3D file picks any model file"
 
 [[feature]]
 id = "plate.cut"
@@ -431,19 +430,19 @@ note = "ABI v40: engine Measure::Measuring over the merged mesh (object space, s
 id = "plate.assembly"
 area = "plate"
 title = "Assembly view / assemble gizmo"
-status = "missing"
+status = "done"
+evidence = ["abi:orca_plater_object_assemble_info", "abi:orca_plater_instance_assemble_action", "tests:orca_plater_instance_assemble_action", 'client:func assembleAction']
 desktop = ["gizmo:Assembly", "toolbar:assembly_view"]
-work = "Closure + UI"
-priority = 37
+note = "ABI v42: per-instance assemble transforms (desktop ModelInstance m_assemble_transformation, 3MF <assemble> records) read for the exploded view; Assembly view mode explodes every instance toward its assemble matrix (rot slerp + translation/scale lerp; radial fallback for models without 3MF data) via render-matrix overrides; assembly actions from the measure context (desktop get_assembly_action): Set parallel / Center coincident / Reverse rotation applied to the selected instance in one undo step; desktop face-face/point-point picker modes collapse into the Measure panel assembly section (touch adaptation)"
 
 [[feature]]
 id = "plate.brim-ears"
 area = "plate"
 title = "Brim ears"
-status = "missing"
+status = "done"
+evidence = ["abi:orca_plater_object_brim_points", "abi:orca_plater_object_brim_points_auto", "tests:orca_plater_object_brim_points_auto", 'client:struct BrimEarsPanel']
 desktop = ["gizmo:BrimEars"]
-work = "Bridge + UI"
-priority = 38
+note = "ABI v42: engine ModelObject::brim_points (cereal + 3MF round-trip, consumed by slicing when brim_type = btPainted through Brim.cpp make_brim_ears); Brim-ears gizmo places ears by tapping the surface (engine-space conversion via the instance matrix), renders ring/disc markers, selects/removes; auto-generate mirrors the desktop gizmo recipe over the engine Polygon utilities (first-layer slice via slice_mesh_ex, douglas_peucker at detection length, convex outer / concave inner corners past max angle, default ear = initial_layer_line_width x 16)"
 
 [[feature]]
 id = "plate.text-emboss"
@@ -607,10 +606,10 @@ work = "UI"
 id = "plate.navigator"
 area = "plate"
 title = "3D navigator cube"
-status = "missing"
+status = "done"
+evidence = ['client:struct NavigatorCube']
 desktop = ["menu:Show 3D Navigator"]
-work = "UI"
-priority = 43
+note = "92pt SwiftUI navigator cube in the corner (View menu toggle): edges projected from the live camera yaw/pitch, face labels Top/Front/Right/Rear/Left/Bottom, tap applies the matching camera view preset (desktop Show 3D Navigator)"
 
 [[feature]]
 id = "plate.gridlines"
@@ -802,8 +801,8 @@ source = "src/slic3r/GUI/Plater.cpp:on_filament_count_change|add_filament"
 evidence = ["abi:orca_presets_set_filament_count", "abi:orca_presets_filament_slots",
             "client:struct FilamentChips", 'client:func addFilament\(',
             "abi:orca_presets_select_filament", "client:struct FilamentColourPicker",
-            "client:func setFilamentColour"]
-gap = "no merge-with (combining two filament presets into one user preset) yet; per-slot preset edit opens the filament settings pages instead of a slot-scoped editor"
+            "client:func setFilamentColour", 'client:func mergeFilaments']
+gap = "merge-with is preset-level (vector options of both presets concatenated into one user preset — desktop's slot-level extruder re-assignment across the document is document-side, not reimplemented); per-slot preset edit opens the filament settings pages instead of a slot-scoped editor"
 work = "Bridge + UI"
 priority = 30
 note = "ABI v31: PresetBundle set_num_filaments semantics (new slots duplicate the last preset), per-slot preset swap + color; FilamentBar chips with color swatch, add/remove (1..16), per-slot preset menu and ColorPicker; objects/parts assign extruders via the manipulation-panel extruder menu and instances tint by slot color; multi-filament slicing carries the flush matrix through config finalization"
@@ -928,11 +927,15 @@ priority = 130
 id = "prepare.profile-updates"
 area = "prepare"
 title = "Online system-profile updates"
-status = "missing"
+status = "partial"
 desktop = ["pref:Update built-in presets automatically.", "dialog:MsgUpdateConfig", "dialog:MsgUpdateForced",
            "dialog:MsgNoUpdates", "dialog:MsgDataIncompatible"]
+evidence = ["client:class ProfileUpdates", "client:check-version\\.orcaslicer\\.com",
+            'client:func extractAll', 'client:func importBundle']
+gap = "manual check + download + install (Preferences ▸ Profile updates, optional quiet launch check) hits the desktop's per-vendor endpoint and imports the bundle into the session; the desktop's automatic system-dir swap at startup, changelog dialogs and update-signature verification are not reimplemented"
 work = "Bridge + UI"
 priority = 131
+note = "endpoint parity: GET check-version.orcaslicer.com/profile?vendor=<id>&orca_version=2.4.2 (PresetUpdater.cpp sync_vendor_config); install = ZipImport.extractAll + the engine's non-destructive bundle import — presets persist when saved as user presets"
 
 # =========================================================================
 # Preview / G-code
@@ -975,10 +978,11 @@ status = "partial"
 desktop = ["view:ColorPrint", "slider:Change Filament", "slider:Filament", "slider:Delete Filament Change",
            "option:ColorChanges"]
 evidence = ["abi:orca_plater_custom_gcode_add", "client:struct CustomGcodeSheet",
-            "client:case .colorChange"]
+            "client:case .colorChange", "client:case colorPrint",
+            "client:func colorPrintColour", "client:struct ColorPrintBand"]
 work = "Bridge + UI"
-gap = "colour-change TICKS + slice consumption (engine colour-change events render as markers) done; the full ColorPrint extrusion-recoloring scheme is not implemented"
-note = "ABI v24 ticks (plate-bound since ABI v32): Preview Tick menu adds colour changes per extruder at the top layer; delete via the tick sheet; slicing consumes them through the engine's custom-gcode path"
+gap = "colour-change TICKS + slice consumption and the scheme's data path are done (per-layer filament colour table from slot colours + M600 ticks, menu entry + legend); the ToolpathRenderer colour-switch case that reads colorPrintColour is still pending (Viewer module)"
+note = "ABI v24 ticks (plate-bound since ABI v32): Preview Tick menu adds colour changes per extruder at the top layer; delete via the tick sheet; slicing consumes them through the engine's custom-gcode path; the ColorPrint scheme colours segments by the filament colour active at their height (GcodePreviewStore.colorPrintColour)"
 
 [[feature]]
 id = "preview.pause-custom-gcode"
@@ -1198,12 +1202,11 @@ work = "Client-reimpl"
 id = "device.host-mks"
 area = "device"
 title = "MKS host"
-status = "partial"
-evidence = ["client:X-Filename"]
-gap = "raw-body /upload?X-Filename= done; start-print (M23/M24 over the TCP console) not implemented"
+status = "done"
+evidence = ["client:X-Filename", 'client:func mksStartPrint', "client:class TCPConsole"]
 desktop = ["host:htMKS"]
 work = "Client-reimpl"
-priority = 305
+note = "raw-body /upload?X-Filename= plus start-print over the raw TCP console (MKS.cpp: hardcoded port 8080, M23 <file> then M24, ok-line protocol, 5 s connect / 10 s read, 1.5 s post-upload pause — Network.framework TCPConsole)"
 
 [[feature]]
 id = "device.host-esp3d"
@@ -1248,8 +1251,9 @@ id = "device.host-simplyprint"
 area = "device"
 title = "SimplyPrint host (cloud auth)"
 status = "partial"
-evidence = ["client:TempUpload"]
-gap = "TempUpload with a pasted API key done (uuid-validated); account-link OAuth flow and REST start-print (desktop opens a browser import link) not implemented"
+evidence = ["client:TempUpload", 'client:func linkSimplyPrintAccount',
+            'client:func refreshSimplyPrintAccessToken', "client:oauth2/authorize"]
+gap = "TempUpload (pasted key OR the linked OAuth token), the OAuth account-link flow (desktop client id + PKCE S256 through ASWebAuthenticationSession on the orcapad:// callback) and the 401 refresh-token retry are done; upstream has NO REST start-print (the Orca OAuth client's scopes lack printers.actions) — the panel import link stays the start path, now auto-opened like the desktop's browser launch; whether SimplyPrint accepts the custom-scheme redirect_uri is unverified against the live service"
 desktop = ["host:htSimplyPrint", "dialog:PrinterCloudAuthDialog"]
 work = "Client-reimpl"
 priority = 312
@@ -1267,12 +1271,12 @@ work = "Client-reimpl"
 id = "device.host-3dprinteros"
 area = "device"
 title = "3DPrinterOS host"
-status = "partial"
-evidence = ["client:apiglobal/upload"]
-gap = "apiglobal/upload with a pasted session token done (file_id validated); browser login-token flow and REST start (desktop opens quickprint link) not implemented"
+status = "done"
+evidence = ["client:apiglobal/upload", 'client:func link3DPrinterOSAccount',
+            'client:generate_login_token', "client:quickprint"]
 desktop = ["host:ht3DPrinterOS"]
 work = "Client-reimpl"
-priority = 314
+note = "upload (session token, pasted OR from the login flow) + browser login-token flow (generate_login_token → noauth/apiglobal_login_with_token → apiglobal/login_with_token poll, session stored on the printer record) + start (quickprint?file_id= auto-opened — the desktop's own start action, 3DPrinterOS.cpp:501; no REST start exists upstream)"
 
 [[feature]]
 id = "device.calibration"
@@ -1429,10 +1433,13 @@ note = "document types for STL/OBJ/AMF/3MF; models import onto the current plate
 id = "files.model-links"
 area = "files"
 title = "Model download links (Printables / MakerWorld / Thingiverse) and downloads folder"
-status = "missing"
+status = "partial"
 desktop = ["pref:{link_association:prusaslicer}", "pref:{link_association:bambustudio}",
            "pref:{link_association:cura}", "pref:Downloads folder", "dialog:DownloadDialog",
            "dialog:DownloadProgressDialog"]
+evidence = ["client:printables\\.com", "client:makerworld\\.com", "client:thingiverse\\.com",
+            'client:func createDownloadsFolder']
+gap = "the Prepare pill's Models menu opens Printables / MakerWorld / Thingiverse in Safari and Documents/Downloads is created at launch (Files-visible); desktop's protocol-handler download dialogs (DownloadDialog) and in-app download progress are not reimplemented"
 work = "UI"
 priority = 158
 
@@ -1444,15 +1451,15 @@ priority = 158
 id = "app.preferences"
 area = "app"
 title = "Preferences screen"
-status = "missing"
+status = "done"
+evidence = ['client:struct PreferencesScreen']
 desktop = ["menu:Preferences", "dialog:PreferencesDialog", "pref:Units", "pref:Default page", "pref:Load behaviour",
            "pref:Don't warn when loading 3MF with modified G-code", "pref:Store full source file paths in projects",
            "pref:Show shared profiles notification", "pref:Unsaved projects", "pref:Unsaved presets",
            "pref:Synchronizing printer preset", "pref:Show unsupported presets", "pref:Group user filament presets",
            "pref:Remember printer configuration", "pref:Developer mode", "pref:Internal developer mode",
            "pref:Log Level"]
-work = "UI"
-priority = 400
+note = "Preferences screen (gear in the Prepare pill + About): every row binds a live setting actually consumed elsewhere (units mm/in, tips, auto-slice, max recent files, autosave interval, incompatible-preset filter, per-kind default mode, profile updates) plus the cloud-host account links; desktop-only prefs (mouse, window layout, 3Dconnexion) are the na items"
 
 [[feature]]
 id = "app.appearance"
@@ -1491,14 +1498,14 @@ priority = 407
 id = "app.keyboard"
 area = "app"
 title = "Hardware-keyboard shortcuts: global"
-status = "missing"
+status = "done"
+evidence = ['client:keyboardShortcut']
 desktop = ["menu:Keyboard Shortcuts", "dialog:KBShortcutsDialog", "kb:New Project", "kb:Open Project",
            "kb:Save Project", "kb:Save Project as", "kb:Import geometry data from STL/STEP/3MF/OBJ/AMF files",
            "kb:Export plate sliced file", "kb:Slice plate", "kb:Print plate", "kb:Cut", "kb:Copy to clipboard",
            "kb:Paste from clipboard", "kb:Preferences", "kb:Switch table page", "kb:Delete selected",
            "kb:Show keyboard shortcuts list", "kb:Switch between Prepare/Preview", "kb:Collapse/Expand the sidebar"]
-work = "UI"
-priority = 401
+note = "global shortcuts: new/open/save/save-as project, import, export G-code, slice, undo/redo, copy/paste, delete, select-all, preferences, shortcuts help (the desktop KBShortcutsDialog equivalents mapped to the touch app's existing actions)"
 
 [[feature]]
 id = "app.about"

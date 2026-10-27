@@ -58,6 +58,9 @@ final class DocumentStore {
     private(set) var frameRequest: UInt64 = 0
     private(set) var cameraRequestID: UInt64 = 0
     private(set) var cameraPreset: CameraViewPreset = .defaultValue
+    /// Zoom step request (id + multiplicative scale, like the pinch).
+    private(set) var cameraZoomRequest: UInt64 = 0
+    private(set) var cameraZoomScale: Float = 1
     private(set) var isMutating = false
     private(set) var isSlicing = false
     private(set) var isBootstrapping = false
@@ -65,6 +68,7 @@ final class DocumentStore {
     init(status: StatusCenter) {
         self.status = status
         loadRecentModels()
+        loadModelSourceObjectIDs()
     }
 
     var isReady: Bool { plater != nil && scene != nil }
@@ -102,6 +106,7 @@ final class DocumentStore {
         isMutating = true
         let displayName = source.lastPathComponent
         status.report(.document, "\(displayName): loading…")
+        let previousObjectIDs = Set((scene?.objects ?? []).map(\.id))
         let result = await BackgroundWork.run(operation: "import model") {
             let sandboxURL = try EnginePaths.copyImportIntoSandbox(source, kind: "model")
             let mutation = try plater.apply(
@@ -133,6 +138,15 @@ final class DocumentStore {
             frameRequest += 1
             status.report(.document, commit.status)
             recordRecentModel(source)
+            // Desktop "Reload from disk" needs the ORIGINAL source: record
+            // it for every object this import created (multi-object files
+            // create several; the mutation only names the first).
+            let createdIDs = commit.mutation.snapshot.objects
+                .map(\.id)
+                .filter { !previousObjectIDs.contains($0) }
+            if !createdIDs.isEmpty {
+                await recordModelSource(source, objectIDs: createdIDs)
+            }
         case .failure(let failure):
             status.report(.document, failure: failure)
         }
@@ -163,6 +177,20 @@ final class DocumentStore {
         return stored > 0 ? stored : 10
     }
 
+    /// Reloads which objects carry a model source (bookmark presence —
+    /// the copy records are written together with it at import time).
+    private func loadModelSourceObjectIDs() {
+        let prefix = Self.modelSourceBookmarkKey
+        var ids = Set<ObjectID>()
+        for key in UserDefaults.standard.dictionaryRepresentation().keys
+        where key.hasPrefix(prefix) {
+            if let raw = UInt64(key.dropFirst(prefix.count)), raw != 0 {
+                ids.insert(ObjectID(rawValue: raw))
+            }
+        }
+        modelSourceObjectIDs = ids
+    }
+
     private func loadRecentModels() {
         guard let data = UserDefaults.standard.data(forKey: Self.recentModelsKey) else { return }
         do {
@@ -187,6 +215,231 @@ final class DocumentStore {
         } catch {
             status.report(.document, failure: AppFailure.wrap(
                 error, operation: "save recent models"))
+        }
+    }
+
+    // MARK: Model sources (desktop "Reload from disk", ABI v42)
+
+    /// Per-object model sources for "Reload from disk": a security-scoped
+    /// bookmark to the picked ORIGINAL (preferred) plus a stable import-time
+    /// copy under Application Support/Sources (fallback when the bookmark
+    /// no longer resolves — iOS file-picker access can be revoked). The
+    /// fallback is never silent: the status says which source was used.
+    private nonisolated static let modelSourceBookmarkKey = "model.source.bookmark."
+    private nonisolated static let modelSourceCopyNameKey = "model.source.copyname."
+    private nonisolated static let modelSourcesFolder = "Sources"
+    /// Objects with a recorded source (drives menu visibility; primitives,
+    /// text and SVG objects have none).
+    private(set) var modelSourceObjectIDs: Set<ObjectID> = []
+
+    private nonisolated static func bookmarkKey(_ objectID: ObjectID) -> String {
+        modelSourceBookmarkKey + String(objectID.rawValue)
+    }
+
+    private nonisolated static func copyNameKey(_ objectID: ObjectID) -> String {
+        modelSourceCopyNameKey + String(objectID.rawValue)
+    }
+
+    /// Application Support/Sources/<name> — the stable copies made at
+    /// import time (the temp import copy is NOT stable: the next import
+    /// deletes its directory). Objects from one multi-object file share a
+    /// single copy (named after the first created object).
+    private nonisolated static func modelSourcesDirectory() throws -> URL {
+        let fileManager = FileManager.default
+        let directory = fileManager.urls(
+            for: .applicationSupportDirectory, in: .userDomainMask
+        )[0].appendingPathComponent(modelSourcesFolder, isDirectory: true)
+        try fileManager.createDirectory(
+            at: directory, withIntermediateDirectories: true)
+        return directory
+    }
+
+    /// Records one source for freshly imported objects: a security-scoped
+    /// bookmark to the ORIGINAL plus one stable copy shared by every object
+    /// the import created. Failures surface (the object stays imported;
+    /// only "Reload from disk" degrades to the copy or disappears).
+    private func recordModelSource(_ source: URL, objectIDs: [ObjectID]) async {
+        guard !objectIDs.isEmpty else { return }
+        let objectIDs = objectIDs
+        let recorded = await BackgroundWork.run(operation: "record model source") {
+            () -> [ObjectID] in
+            let fileManager = FileManager.default
+            let scoped = source.startAccessingSecurityScopedResource()
+            defer {
+                if scoped { source.stopAccessingSecurityScopedResource() }
+            }
+            // iOS: plain bookmarks (security-scoped bookmarks are
+            // macOS-only); resolving + startAccessing works for picker URLs.
+            let bookmark = try source.bookmarkData()
+            let directory = try Self.modelSourcesDirectory()
+            let copyName = String(objectIDs[0].rawValue) +
+                (source.pathExtension.isEmpty ? "" : "." + source.pathExtension)
+            let destination = directory.appendingPathComponent(copyName)
+            if fileManager.fileExists(atPath: destination.path) {
+                try fileManager.removeItem(at: destination)
+            }
+            try fileManager.copyItem(at: source, to: destination)
+            for objectID in objectIDs {
+                UserDefaults.standard.set(
+                    bookmark, forKey: Self.bookmarkKey(objectID))
+                UserDefaults.standard.set(
+                    copyName, forKey: Self.copyNameKey(objectID))
+            }
+            return objectIDs
+        }
+        switch recorded {
+        case .success(let ids):
+            modelSourceObjectIDs.formUnion(ids)
+        case .failure(let failure):
+            status.report(.document, failure: failure)
+        }
+    }
+
+    /// Whether "Reload from disk" is available for an object (a recorded
+    /// bookmark or copy; new objects from shapes/text/SVG have none).
+    func hasModelSource(_ objectID: ObjectID) -> Bool {
+        modelSourceObjectIDs.contains(objectID)
+    }
+
+    /// Drops the recorded sources of discarded objects (bookmark + copy
+    /// name keys); a shared copy file is removed only when NO remaining
+    /// object still references it.
+    private func discardModelSources(_ objectIDs: [ObjectID]) async {
+        guard !objectIDs.isEmpty else { return }
+        let objectIDs = objectIDs
+        let discard = await BackgroundWork.run(operation: "discard model source") {
+            let defaults = UserDefaults.standard
+            var releasedNames = Set<String>()
+            for objectID in objectIDs {
+                defaults.removeObject(forKey: Self.bookmarkKey(objectID))
+                if let name = defaults.string(forKey: Self.copyNameKey(objectID)) {
+                    releasedNames.insert(name)
+                }
+                defaults.removeObject(forKey: Self.copyNameKey(objectID))
+            }
+            // Copy files survive while any other object still uses them.
+            let referenced = Set(
+                defaults.dictionaryRepresentation()
+                    .compactMap { key, value -> String? in
+                        key.hasPrefix(Self.modelSourceCopyNameKey)
+                            ? value as? String : nil
+                    }
+            )
+            let fileManager = FileManager.default
+            let directory = try Self.modelSourcesDirectory()
+            let names = try fileManager.contentsOfDirectory(atPath: directory.path)
+            for name in names
+            where releasedNames.contains(name) && !referenced.contains(name) {
+                try fileManager.removeItem(
+                    at: directory.appendingPathComponent(name))
+            }
+            return objectIDs
+        }
+        switch discard {
+        case .success(let ids):
+            modelSourceObjectIDs.subtract(ids)
+        case .failure(let failure):
+            status.report(.document, failure: failure)
+        }
+    }
+
+    /// Desktop "Reload from disk": replaces the object's mesh in place
+    /// (transform/settings stay; paint clears). Prefers the bookmarked
+    /// ORIGINAL; falls back to the import-time copy when the original is
+    /// unreachable — the status names the source either way.
+    func reloadFromDisk(objectID: ObjectID) async {
+        guard let plater, !isBusy else {
+            status.report(.document, "reload blocked: document is busy")
+            return
+        }
+        isMutating = true
+        let result = await BackgroundWork.run(operation: "reload from disk") {
+            () -> (mutation: EnginePlater.MutationResult, source: String) in
+            var note = "the import-time copy"
+            var fileURL: URL?
+            if let bookmark = UserDefaults.standard.data(forKey: Self.bookmarkKey(objectID)) {
+                do {
+                    var stale = false
+                    let original = try URL(
+                        resolvingBookmarkData: bookmark,
+                        options: [],
+                        relativeTo: nil,
+                        bookmarkDataIsStale: &stale)
+                    let scoped = original.startAccessingSecurityScopedResource()
+                    defer {
+                        if scoped { original.stopAccessingSecurityScopedResource() }
+                    }
+                    if FileManager.default.fileExists(atPath: original.path) {
+                        fileURL = try EnginePaths.copyImportIntoSandbox(
+                            original, kind: "reload")
+                        note = "the original file"
+                    }
+                } catch {
+                    // Unresolvable/revoked bookmark: fall through to the
+                    // stable copy; the status still says which source ran.
+                    note = "the import-time copy (the original file is no longer reachable)"
+                }
+            }
+            if fileURL == nil {
+                // Fallback: the import-time copy (shared per import — its
+                // name is recorded per object).
+                let name = UserDefaults.standard.string(
+                    forKey: Self.copyNameKey(objectID))
+                guard let name, !name.isEmpty else {
+                    throw AppFailure.invariant(
+                        operation: "reload from disk",
+                        diagnostic: "no original file or import-time copy is recorded for this object")
+                }
+                let candidate = try Self.modelSourcesDirectory()
+                    .appendingPathComponent(name)
+                guard FileManager.default.fileExists(atPath: candidate.path) else {
+                    throw AppFailure.invariant(
+                        operation: "reload from disk",
+                        diagnostic: "the recorded import-time copy is missing")
+                }
+                fileURL = candidate
+            }
+            guard let resolved = fileURL else {
+                throw AppFailure.invariant(
+                    operation: "reload from disk",
+                    diagnostic: "no source file resolved for the reload")
+            }
+            let mutation = try plater.apply(
+                .replaceMesh(objectID: objectID, path: resolved.path))
+            return (mutation, note)
+        }
+        isMutating = false
+        switch result {
+        case .success(let outcome):
+            install(outcome.mutation.snapshot)
+            status.report(.document, "reloaded from \(outcome.source)")
+        case .failure(let failure):
+            status.report(.document, failure: failure)
+        }
+    }
+
+    /// "Replace 3D file…": swap the object's mesh for a newly picked file
+    /// and re-record it as the object's source.
+    func replaceModelFile(objectID: ObjectID, from source: URL) async {
+        guard let plater, !isBusy else {
+            status.report(.document, "replace blocked: document is busy")
+            return
+        }
+        isMutating = true
+        let result = await BackgroundWork.run(operation: "replace model file") {
+            let sandboxURL = try EnginePaths.copyImportIntoSandbox(source, kind: "reload")
+            return try plater.apply(
+                .replaceMesh(objectID: objectID, path: sandboxURL.path))
+        }
+        isMutating = false
+        switch result {
+        case .success(let mutation):
+            install(mutation.snapshot)
+            status.report(.document, "model replaced: \(source.lastPathComponent)")
+            await discardModelSources([objectID])
+            await recordModelSource(source, objectIDs: [objectID])
+        case .failure(let failure):
+            status.report(.document, failure: failure)
         }
     }
 
@@ -216,6 +469,11 @@ final class DocumentStore {
             selection = nil
             install(opened.snapshot)
             frameRequest += 1
+            // The whole document was replaced (see newProject): drop the
+            // previous document's model sources.
+            let stale = Array(modelSourceObjectIDs)
+            modelSourceObjectIDs = []
+            if !stale.isEmpty { await discardModelSources(stale) }
             let settings = opened.configApplied ? "project settings applied" : "geometry only (no settings)"
             status.report(.document, "\(displayName): \(opened.objectCount) object(s) · \(settings)")
             return true
@@ -544,6 +802,12 @@ final class DocumentStore {
             clearFlattenPlanes()
             install(fresh.1)
             frameRequest += 1
+            // The whole document was replaced: drop every recorded model
+            // source (deleting single objects keeps theirs — undo must keep
+            // "Reload from disk" working for restored objects).
+            let stale = Array(modelSourceObjectIDs)
+            modelSourceObjectIDs = []
+            if !stale.isEmpty { await discardModelSources(stale) }
             status.report(.document, "new project")
         case .failure(let failure):
             status.report(.document, failure: failure)
@@ -957,6 +1221,14 @@ final class DocumentStore {
     func applyCameraView(_ preset: CameraViewPreset) {
         cameraPreset = preset
         cameraRequestID += 1
+    }
+
+    /// One multiplicative zoom step for the canvas camera (the hardware
+    /// keyboard's Zoom in/out, desktop I/O keys; the pinch gesture applies
+    /// the same camera.zoom).
+    func requestCameraZoom(_ scale: Float) {
+        cameraZoomScale = scale
+        cameraZoomRequest += 1
     }
 
     /// Desktop "Cut": plane cut through the object's world bbox; the object
@@ -2184,6 +2456,490 @@ final class DocumentStore {
 
     func setFlattenHighlight(_ index: Int?) {
         flattenHighlight = index
+    }
+
+    // MARK: Brim ears (desktop GLGizmoBrimEars, ABI v42)
+
+    /// The selected object's placed ears (object space). Loaded when the
+    /// gizmo activates / the document changes (the Plate tab's canvas
+    /// task drives `loadBrimEars` like the flatten planes).
+    private(set) var brimPoints: [(position: SIMD3<Double>, radius: Double)] = []
+    private(set) var brimEarsObjectID: ObjectID?
+    private(set) var brimEarSelection: Int?
+    private var brimEarsKey: (revision: DocumentRevision, objectID: ObjectID)?
+    /// Panel fields (desktop input window): ear diameter (desktop "Head
+    /// diameter"; the engine default is initial_layer_line_width × 16 ≈
+    /// 6.5 mm on a 0.4 nozzle), auto-detection angle and detection length.
+    var brimEarDiameter: Double = 6.5
+    var brimEarMaxAngleDeg: Double = 125
+    var brimEarDetectionLength: Double = 1
+
+    /// Loads (and caches per revision + object) the selected object's ears.
+    func loadBrimEars() async {
+        guard let plater, let selection, !isBusy else {
+            brimPoints = []
+            brimEarsObjectID = nil
+            brimEarsKey = nil
+            return
+        }
+        let key = (revision: scene?.revision ?? DocumentRevision(rawValue: 0),
+                   objectID: selection.objectID)
+        if let brimEarsKey,
+           brimEarsKey.revision == key.revision,
+           brimEarsKey.objectID == key.objectID { return }
+        brimEarsKey = key
+        let objectID = selection.objectID
+        let result = await BackgroundWork.run(operation: "read brim ears") {
+            try plater.brimPoints(objectID: objectID)
+        }
+        switch result {
+        case .success(let points):
+            brimEarsObjectID = objectID
+            brimPoints = points
+            if let selection = brimEarSelection, selection >= points.count {
+                brimEarSelection = nil
+            }
+        case .failure(let failure):
+            brimPoints = []
+            brimEarsObjectID = nil
+            status.report(.document, failure: failure)
+        }
+    }
+
+    /// Clears the brim-ears session (gizmo off).
+    func clearBrimEars() {
+        brimPoints = []
+        brimEarsObjectID = nil
+        brimEarSelection = nil
+        brimEarsKey = nil
+    }
+
+    /// Toggles (or clears with nil) the selected ear marker.
+    func setBrimEarSelection(_ index: Int?) {
+        if let index, index == brimEarSelection {
+            brimEarSelection = nil
+        } else {
+            brimEarSelection = index
+        }
+    }
+
+    /// One manual ear at a mesh tap (desktop on_mouse LeftDown: the world
+    /// hit's z is forced to bed level and converted back to object space —
+    /// ears always sit on the first layer, facing up). Only taps on the
+    /// SELECTED instance place ears (desktop raycasts the selected
+    /// volume); other taps fall through to selection/camera as usual.
+    func addBrimEar(at pick: Renderer.FacePick) async {
+        guard let selection,
+              selection.objectID == pick.objectID,
+              selection.instanceID == pick.instanceID,
+              let object = scene?.object(id: pick.objectID),
+              let instance = object.instances.first(where: {
+                  $0.id == pick.instanceID
+              }) else { return }
+        let matrix = instance.matrix
+        let hit = matrix * SIMD4<Double>(
+            pick.objectPoint.x, pick.objectPoint.y, pick.objectPoint.z, 1)
+        let bedLevel = SIMD3<Double>(hit.x, hit.y, -0.0001)
+        let objectPoint = matrix.inverse * SIMD4<Double>(
+            bedLevel.x, bedLevel.y, bedLevel.z, 1)
+        guard objectPoint.w != 0 else { return }
+        let position = SIMD3<Double>(
+            objectPoint.x / objectPoint.w,
+            objectPoint.y / objectPoint.w,
+            objectPoint.z / objectPoint.w)
+        let radius = brimEarDiameter / 2
+        if await applyMutation(
+            .addBrimPoint(objectID: pick.objectID, position: position, radius: radius),
+            operation: "add brim ear"
+        ) != nil {
+            status.report(.document, "brim ear added")
+        }
+    }
+
+    /// Desktop "Delete selected" on ears: the ABI exposes clear-all +
+    /// add-one only, so the removal clears and re-adds the remaining ears
+    /// (sequential one-undo-step mutations for ONE user action — undo
+    /// steps back through them).
+    func removeSelectedBrimEar() async {
+        guard let brimEarsObjectID,
+              let index = brimEarSelection,
+              index < brimPoints.count else { return }
+        let objectID = brimEarsObjectID
+        let remaining = brimPoints.enumerated()
+            .filter { $0.offset != index }
+            .map { $0.element }
+        brimEarSelection = nil
+        guard await applyMutation(
+            .clearBrimPoints(objectID: objectID),
+            operation: "remove brim ear"
+        ) != nil else { return }
+        for ear in remaining {
+            guard await applyMutation(
+                .addBrimPoint(
+                    objectID: objectID, position: ear.position, radius: ear.radius),
+                operation: "remove brim ear"
+            ) != nil else { return }
+        }
+    }
+
+    /// Panel "Remove all": clears every ear of the selected object.
+    func clearAllBrimEars() async {
+        guard let brimEarsObjectID else { return }
+        brimEarSelection = nil
+        _ = await applyMutation(
+            .clearBrimPoints(objectID: brimEarsObjectID),
+            operation: "clear brim ears"
+        )
+    }
+
+    /// Desktop auto-generate ("Auto add brim ears"): corners of the
+    /// first-layer contour past max angle. Replaces the existing ears —
+    /// clear + auto in one background run (desktop's auto ADDS to the
+    /// cache; a destructive regenerate is the predictable touch semantic
+    /// and matches the panel's "Auto-generate" wording). radius <= 0 =
+    /// the engine default (initial_layer_line_width × 16).
+    func autoBrimEars(presets: EnginePresets) async {
+        guard let plater, let selection, !isBusy else {
+            status.report(.document, "auto brim ears blocked: document is busy or object missing")
+            return
+        }
+        let objectID = selection.objectID
+        let hadEars = !brimPoints.isEmpty
+        let maxAngle = brimEarMaxAngleDeg
+        let detection = brimEarDetectionLength
+        isMutating = true
+        let result = await BackgroundWork.run(operation: "auto brim ears") {
+            if hadEars {
+                _ = try plater.apply(.clearBrimPoints(objectID: objectID))
+            }
+            return try plater.autoBrimEars(
+                presets: presets, objectID: objectID,
+                maxAngleDeg: maxAngle, detectionLengthMM: detection,
+                radiusMM: 0)
+        }
+        isMutating = false
+        switch result {
+        case .success(let outcome):
+            // Re-sync from the engine (the run bypassed applyMutation's
+            // install; snapshot read keeps revision checks honest).
+            let snapshot = await BackgroundWork.run(operation: "read snapshot") {
+                try plater.snapshot()
+            }
+            switch snapshot {
+            case .success(let snapshot):
+                install(snapshot)
+            case .failure(let failure):
+                status.report(.document, failure: failure)
+            }
+            status.report(.document, "auto brim ears: \(outcome.added) ear(s) added")
+        case .failure(let failure):
+            status.report(.document, failure: failure)
+        }
+    }
+
+    /// Assembles the renderer overlay payload for the Plate tab.
+    func brimEarsOverlay() -> Renderer.BrimEarsOverlay? {
+        guard let brimEarsObjectID else { return nil }
+        return Renderer.BrimEarsOverlay(
+            objectID: brimEarsObjectID,
+            points: brimPoints,
+            selectedIndex: brimEarSelection
+        )
+    }
+
+    // MARK: Cut connectors (desktop CutDialog, ABI v42)
+
+    /// Placement parameters of the cut flow (desktop CutDialog defaults:
+    /// Plug / Prism / Circle, size 2.5 mm, depth 3 mm, depth tolerance
+    /// 0.1). Store-owned so the placement bar and the sheet stay in sync.
+    struct CutConnectorParams: Sendable, Equatable {
+        /// 0 plug, 1 dowel, 2 snap.
+        var type: Int32 = 0
+        /// 0 prism, 1 frustum.
+        var style: Int32 = 0
+        /// 0 triangle, 1 square, 2 hexagon, 3 circle.
+        var shape: Int32 = 3
+        var radius: Double = 1.25
+        var height: Double = 3
+        var radiusTolerance: Double = 0
+        var heightTolerance: Double = 0.1
+    }
+
+    var cutConnectorParams = CutConnectorParams()
+    /// The selected object's placed connectors (object space); loaded while
+    /// the cut flow is active (sheet or placement mode).
+    private(set) var cutConnectors: [EnginePlater.CutConnector] = []
+    private(set) var cutConnectorsObjectID: ObjectID?
+    private var cutConnectorsKey: (revision: DocumentRevision, objectID: ObjectID)?
+
+    /// Loads (and caches per revision + object) the selected object's
+    /// cut connectors; the Plate tab's cut-flow task drives it.
+    func loadCutConnectors() async {
+        guard let plater, let selection, !isBusy else {
+            cutConnectors = []
+            cutConnectorsObjectID = nil
+            cutConnectorsKey = nil
+            return
+        }
+        let key = (revision: scene?.revision ?? DocumentRevision(rawValue: 0),
+                   objectID: selection.objectID)
+        if let cutConnectorsKey,
+           cutConnectorsKey.revision == key.revision,
+           cutConnectorsKey.objectID == key.objectID { return }
+        cutConnectorsKey = key
+        let objectID = selection.objectID
+        let result = await BackgroundWork.run(operation: "read cut connectors") {
+            try plater.cutConnectors(objectID: objectID)
+        }
+        switch result {
+        case .success(let connectors):
+            cutConnectorsObjectID = objectID
+            cutConnectors = connectors
+        case .failure(let failure):
+            cutConnectors = []
+            cutConnectorsObjectID = nil
+            status.report(.document, failure: failure)
+        }
+    }
+
+    /// Clears the cut-connector session (cut flow closed).
+    func clearCutConnectorsCache() {
+        cutConnectors = []
+        cutConnectorsObjectID = nil
+        cutConnectorsKey = nil
+    }
+
+    /// The cut plane for connector placement: the Cut sheet's axis/fraction
+    /// through the selected instance's world bbox (the exact `cutSelected`
+    /// geometry), converted to viewer space for the renderer.
+    func cutPlaneForSelection(
+        axis: EngineAxis, fraction: Double, bedCenter: SIMD2<Float>
+    ) -> Renderer.CutPlane? {
+        guard let selection,
+              let object = scene?.object(id: selection.objectID),
+              let instance = object.instances.first(where: {
+                  $0.id == selection.instanceID
+              }) else { return nil }
+        let matrix = instance.matrix
+        var low = SIMD3<Double>(repeating: .infinity)
+        var high = SIMD3<Double>(repeating: -.infinity)
+        for position in object.mesh.positions {
+            let p = SIMD3<Double>(Double(position.x), Double(position.y), Double(position.z))
+            let world = matrix * SIMD4<Double>(p.x, p.y, p.z, 1)
+            low = simd_min(low, SIMD3<Double>(world.x, world.y, world.z))
+            high = simd_max(high, SIMD3<Double>(world.x, world.y, world.z))
+        }
+        let axisIndex = Int(axis.rawValue)
+        let point = SIMD3<Double>(
+            axisIndex == 0 ? low.x + (high.x - low.x) * fraction : 0.5 * (low.x + high.x),
+            axisIndex == 1 ? low.y + (high.y - low.y) * fraction : 0.5 * (low.y + high.y),
+            axisIndex == 2 ? low.z + (high.z - low.z) * fraction : 0.5 * (low.z + high.z))
+        let viewerPoint = CoordinateMapper.viewerPoint(
+            fromEngine: SIMD3<Float>(Float(point.x), Float(point.y), Float(point.z)),
+            bedCenter: bedCenter)
+        let viewerNormal = CoordinateMapper.viewerAxis(axis)
+        return Renderer.CutPlane(
+            objectID: selection.objectID,
+            instanceID: selection.instanceID,
+            point: viewerPoint,
+            normal: viewerNormal)
+    }
+
+    /// One connector placed on the cut plane (the renderer already
+    /// converted the hit to object space; the normal is the cut plane's
+    /// axis normal rotated into object space).
+    func addCutConnector(at pick: Renderer.CutPlanePick) async {
+        guard let object = scene?.object(id: pick.objectID),
+              let instance = object.instances.first(where: {
+                  $0.id == pick.instanceID
+              }) else { return }
+        let rotation = instance.matrix.inverse * SIMD4<Double>(
+            pick.engineNormal.x, pick.engineNormal.y, pick.engineNormal.z, 0)
+        let objectNormal = simd_normalize(SIMD3<Double>(
+            rotation.x, rotation.y, rotation.z))
+        let connector = EnginePlater.CutConnector(
+            position: pick.objectPoint,
+            normal: objectNormal,
+            radius: Float(cutConnectorParams.radius),
+            height: Float(cutConnectorParams.height),
+            radiusTolerance: Float(cutConnectorParams.radiusTolerance),
+            heightTolerance: Float(cutConnectorParams.heightTolerance),
+            type: cutConnectorParams.type,
+            style: cutConnectorParams.style,
+            shape: cutConnectorParams.shape
+        )
+        _ = await applyMutation(
+            .addCutConnector(objectID: pick.objectID, connector: connector),
+            operation: "add cut connector"
+        )
+    }
+
+    /// Panel "Remove all" of the cut flow (one undo step).
+    func clearCutConnectors() async {
+        guard let cutConnectorsObjectID else { return }
+        _ = await applyMutation(
+            .clearCutConnectors(objectID: cutConnectorsObjectID),
+            operation: "clear cut connectors"
+        )
+    }
+
+    /// Assembles the renderer overlay payload for the Plate tab.
+    func cutConnectorsOverlay() -> Renderer.CutConnectorsOverlay? {
+        guard let cutConnectorsObjectID else { return nil }
+        return Renderer.CutConnectorsOverlay(
+            objectID: cutConnectorsObjectID,
+            connectors: cutConnectors
+        )
+    }
+
+    // MARK: Assembly (desktop AssembleView explode, ABI v42)
+
+    /// Per-object, per-instance assemble data (the facade returns one
+    /// entry per instance IN the object's instance order).
+    private(set) var assemblyData: [ObjectID: [(instanceID: InstanceID,
+                                                info: EnginePlater.AssembleInfo)]] = [:]
+    private var assemblyKey: DocumentRevision?
+
+    /// Loads the whole document's assemble info (assembly mode explodes
+    /// EVERYTHING, desktop parity); cached per revision.
+    func loadAssemblyData() async {
+        guard let plater, let scene, !isBusy else {
+            assemblyData = [:]
+            assemblyKey = nil
+            return
+        }
+        let revision = scene.revision
+        if let assemblyKey, assemblyKey == revision { return }
+        assemblyKey = revision
+        let objects = scene.objects
+        let result = await BackgroundWork.run(operation: "read assemble info") {
+            var data: [ObjectID: [(instanceID: InstanceID,
+                                   info: EnginePlater.AssembleInfo)]] = [:]
+            for object in objects {
+                let infos = try plater.assembleInfo(objectID: object.id)
+                data[object.id] = zip(object.instances, infos).map {
+                    (instanceID: $0.0.id, info: $0.1)
+                }
+            }
+            return data
+        }
+        switch result {
+        case .success(let data):
+            assemblyData = data
+        case .failure(let failure):
+            assemblyData = [:]
+            status.report(.document, failure: failure)
+        }
+    }
+
+    /// Clears the assembly session (assembly mode off).
+    func clearAssemblyData() {
+        assemblyData = [:]
+        assemblyKey = nil
+    }
+
+    /// Per-instance viewer-space render matrices for the explode slider:
+    /// ratio 0 = the plater placement, ratio 1 = the 3MF assembled
+    /// placement (translation lerped, rotation slerped in object space).
+    /// Instances without initialized assemble data fall back to a radial
+    /// explode away from the plate center by ratio × object diagonal
+    /// (desktop has no fallback — projects without 3MF assembly data stay
+    /// put there; OrcaPad always gives the slider meaning).
+    func assemblyOverrides(ratio: Double, bedCenter: SIMD2<Float>)
+        -> [InstanceID: simd_float4x4] {
+        guard ratio > 0.001, let scene else { return [:] }
+        let clamped = min(max(ratio, 0), 1)
+        var overrides: [InstanceID: simd_float4x4] = [:]
+        for object in scene.objects {
+            let diagonal = Double(simd_distance(
+                object.mesh.bounds.minimum, object.mesh.bounds.maximum))
+            for instance in object.instances {
+                let engineMatrix: simd_double4x4
+                let info = assemblyData[object.id]?.first {
+                    $0.instanceID == instance.id
+                }?.info
+                if let info, info.initialized {
+                    // Object-space delta current -> assembled, interpolated
+                    // by the ratio (desktop GLVolume::world_matrix explodes
+                    // by translation; OrcaPad also blends the rotation so
+                    // re-oriented assemblies read correctly mid-slider).
+                    let current = instance.matrix
+                    let delta = current.inverse * info.matrix
+                    let columns = delta.columns
+                    let scale3 = (
+                        simd_length(SIMD3<Double>(columns.0.x, columns.0.y, columns.0.z))
+                            + simd_length(SIMD3<Double>(columns.1.x, columns.1.y, columns.1.z))
+                            + simd_length(SIMD3<Double>(columns.2.x, columns.2.y, columns.2.z))) / 3
+                    let rotation = simd_double3x3(
+                        SIMD3<Double>(columns.0.x, columns.0.y, columns.0.z),
+                        SIMD3<Double>(columns.1.x, columns.1.y, columns.1.z),
+                        SIMD3<Double>(columns.2.x, columns.2.y, columns.2.z))
+                    let quaternion = simd_quatd(rotation)
+                    let identity = simd_quatd(ix: 0, iy: 0, iz: 0, r: 1)
+                    let blended = simd_slerp(identity, quaternion, clamped)
+                    let blendedRotation = simd_double3x3(blended)
+                    let blendedScale = 1 + (scale3 - 1) * clamped
+                    let translation = SIMD3<Double>(
+                        columns.3.x, columns.3.y, columns.3.z) * clamped
+                    let engineDelta = simd_double4x4(
+                        SIMD4<Double>(
+                            blendedRotation.columns.0.x * blendedScale,
+                            blendedRotation.columns.0.y * blendedScale,
+                            blendedRotation.columns.0.z * blendedScale, 0),
+                        SIMD4<Double>(
+                            blendedRotation.columns.1.x * blendedScale,
+                            blendedRotation.columns.1.y * blendedScale,
+                            blendedRotation.columns.1.z * blendedScale, 0),
+                        SIMD4<Double>(
+                            blendedRotation.columns.2.x * blendedScale,
+                            blendedRotation.columns.2.y * blendedScale,
+                            blendedRotation.columns.2.z * blendedScale, 0),
+                        SIMD4<Double>(translation.x, translation.y, translation.z, 1))
+                    engineMatrix = current * engineDelta
+                } else {
+                    // Radial fallback: away from the plate center in X/Y.
+                    let origin = instance.matrix * SIMD4<Double>(0, 0, 0, 1)
+                    var direction = SIMD2<Double>(origin.x, origin.y)
+                        - SIMD2<Double>(Double(bedCenter.x), Double(bedCenter.y))
+                    let length = simd_length(direction)
+                    if length < 1e-6 {
+                        direction = SIMD2<Double>(1, 0)
+                    } else {
+                        direction /= length
+                    }
+                    let offset = direction * (clamped * max(diagonal, 10))
+                    engineMatrix = simd_double4x4(
+                        SIMD4<Double>(1, 0, 0, 0),
+                        SIMD4<Double>(0, 1, 0, 0),
+                        SIMD4<Double>(0, 0, 1, 0),
+                        SIMD4<Double>(offset.x, offset.y, 0, 1)) * instance.matrix
+                }
+                overrides[instance.id] = CoordinateMapper.modelMatrix(
+                    engineMatrix: EngineMatrix.float(engineMatrix),
+                    enginePivot: object.mesh.pivot,
+                    bedCenter: bedCenter
+                )
+            }
+        }
+        return overrides
+    }
+
+    /// Assembly actions from the Measure panel (desktop gizmo assemble):
+    /// 0 set parallel, 1 center coincident, 2/3 reverse rotation — applied
+    /// to the SELECTED instance using the two picked measure features.
+    func assembleAction(_ action: Int32) async {
+        guard let selection,
+              let a = measureFeatures[0],
+              let b = measureFeatures[1] else { return }
+        if await applyMutation(
+            .assembleAction(
+                objectID: selection.objectID,
+                instanceID: selection.instanceID,
+                a: a, b: b, action: action),
+            operation: "assembly action"
+        ) != nil {
+            status.report(.document, "assembly action applied")
+        }
     }
 
     func commitSelectedTransform() async {

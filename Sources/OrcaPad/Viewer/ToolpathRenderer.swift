@@ -322,6 +322,8 @@ final class ToolpathRenderer: NSObject, MTKViewDelegate {
         }
         switch mode {
         case .feature: return ToolpathPalette.color(role: segment.role)
+        case .colorPrint:
+            return store.colorPrintColour(extruder: segment.extruder, height: segment.printZ)
         case .speed: return ToolpathPalette.gradient(normalized(segment.feedrate, store.feedrateRange))
         case .layerHeight: return ToolpathPalette.gradient(normalized(segment.height, store.heightRange))
         case .lineWidth: return ToolpathPalette.gradient(normalized(segment.width, store.widthRange))

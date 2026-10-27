@@ -4,6 +4,21 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+	<!-- Browser account linking (0.19 device hosts): ASWebAuthenticationSession
+	     receives the SimplyPrint OAuth callback and the 3DPrinterOS login
+	     on this scheme (the desktop instead runs a localhost callback
+	     server — OAuthJob; iOS replaces it with the registered scheme). -->
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>ie.duz.OrcaPad.callbacks</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>orcapad</string>
+			</array>
+		</dict>
+	</array>
 	<!-- Expose Documents in the Files app ("On My iPhone → OrcaPad") -->
 	<key>UIFileSharingEnabled</key>
 	<true/>

@@ -111,6 +111,11 @@ public final class EnginePlater: @unchecked Sendable {
         case paintSphere(objectID: ObjectID, volumeID: VolumeID, layer: PaintLayer,
                          hit: SIMD3<Double>, viewDir: SIMD3<Double>,
                          radiusMM: Double, state: Int32)
+        /// Desktop smart fill / bucket fill (ABI v42): angleDeg > 0 floods
+        /// facets under the angle threshold; 0 = bucket fill.
+        case paintFill(objectID: ObjectID, volumeID: VolumeID, layer: PaintLayer,
+                       hit: SIMD3<Double>, viewDir: SIMD3<Double>,
+                       angleDeg: Double, propagate: Bool, state: Int32)
         /// Removes every stroke of one paint layer.
         case paintReset(objectID: ObjectID, volumeID: VolumeID, layer: PaintLayer)
         /// Desktop layer-range modifiers (ABI v39): REPLACES the object's
@@ -136,6 +141,54 @@ public final class EnginePlater: @unchecked Sendable {
         /// Desktop variable layer height (ABI v41): REPLACES the object's
         /// profile (empty = reset to uniform).
         case setHeightProfile(objectID: ObjectID, pairs: [Double])
+        /// Desktop brim ears (ABI v42): one placed ear.
+        case addBrimPoint(objectID: ObjectID, position: SIMD3<Double>, radius: Double)
+        /// Removes every brim ear of the object.
+        case clearBrimPoints(objectID: ObjectID)
+        /// Desktop "Reload from disk" (ABI v42): mesh replaced in place.
+        case replaceMesh(objectID: ObjectID, path: String)
+        /// Desktop cut connectors (ABI v42): one drilled connector.
+        case addCutConnector(objectID: ObjectID, connector: CutConnector)
+        /// Removes every cut connector of the object.
+        case clearCutConnectors(objectID: ObjectID)
+        /// Desktop assembly action (ABI v42): parallel / center coincident /
+        /// reverse rotation applied to the instance.
+        case assembleAction(objectID: ObjectID, instanceID: InstanceID,
+                            a: SurfaceFeature, b: SurfaceFeature, action: Int32)
+    }
+
+    /// One drilled cut connector (desktop CutDialog, ABI v42). Position and
+    /// normal are OBJECT space; the drill axis follows the normal.
+    public struct CutConnector: Sendable, Equatable {
+        public var position: SIMD3<Double>
+        public var normal: SIMD3<Double>
+        public var radius: Float
+        public var height: Float
+        public var radiusTolerance: Float
+        public var heightTolerance: Float
+        /// 0 plug, 1 dowel, 2 snap.
+        public var type: Int32
+        /// 0 prism, 1 frustum.
+        public var style: Int32
+        /// 0 triangle, 1 square, 2 hexagon, 3 circle.
+        public var shape: Int32
+
+        public init(
+            position: SIMD3<Double>, normal: SIMD3<Double>,
+            radius: Float, height: Float,
+            radiusTolerance: Float = 0, heightTolerance: Float = 0.1,
+            type: Int32 = 0, style: Int32 = 0, shape: Int32 = 3
+        ) {
+            self.position = position
+            self.normal = normal
+            self.radius = radius
+            self.height = height
+            self.radiusTolerance = radiusTolerance
+            self.heightTolerance = heightTolerance
+            self.type = type
+            self.style = style
+            self.shape = shape
+        }
     }
 
     /// One plate's print settings (desktop PlateSettingsDialog, ABI v41).
@@ -1107,6 +1160,18 @@ public final class EnginePlater: @unchecked Sendable {
                     operation: "paint"
                 )
 
+            case .paintFill(let objectID, let volumeID, let layer, let hit,
+                            let viewDir, let angleDeg, let propagate, let state):
+                try BridgeResult.consume(
+                    orca_plater_volume_paint_fill(
+                        handle, objectID.rawValue, volumeID.rawValue, layer.rawValue,
+                        hit.x, hit.y, hit.z,
+                        viewDir.x, viewDir.y, viewDir.z,
+                        angleDeg, propagate ? 1 : 0, state, &mutationRevision
+                    ),
+                    operation: "paint fill"
+                )
+
             case .setHeightRanges(let objectID, let ranges):
                 var raw = ranges.map { range in
                     orca_height_range(
@@ -1211,6 +1276,68 @@ public final class EnginePlater: @unchecked Sendable {
                             &mutationRevision)
                     },
                     operation: "set layer-height profile"
+                )
+
+            case .addBrimPoint(let objectID, let position, let radius):
+                try BridgeResult.consume(
+                    orca_plater_object_brim_point_add(
+                        handle, objectID.rawValue,
+                        position.x, position.y, position.z, radius,
+                        &mutationRevision),
+                    operation: "add brim ear"
+                )
+
+            case .clearBrimPoints(let objectID):
+                try BridgeResult.consume(
+                    orca_plater_object_brim_points_clear(
+                        handle, objectID.rawValue, &mutationRevision),
+                    operation: "clear brim ears"
+                )
+
+            case .replaceMesh(let objectID, let path):
+                try BridgeResult.consume(
+                    path.withCString { pointer in
+                        orca_plater_object_replace_mesh(
+                            handle, objectID.rawValue, pointer, &mutationRevision)
+                    },
+                    operation: "reload from disk"
+                )
+
+            case .addCutConnector(let objectID, let connector):
+                var raw = orca_cut_connector()
+                raw.position = (connector.position.x, connector.position.y,
+                                connector.position.z)
+                raw.normal = (connector.normal.x, connector.normal.y,
+                              connector.normal.z)
+                raw.radius = connector.radius
+                raw.height = connector.height
+                raw.radius_tolerance = connector.radiusTolerance
+                raw.height_tolerance = connector.heightTolerance
+                raw.type = connector.type
+                raw.style = connector.style
+                raw.shape = connector.shape
+                try BridgeResult.consume(
+                    orca_plater_object_cut_connector_add(
+                        handle, objectID.rawValue, &raw, &mutationRevision),
+                    operation: "add cut connector"
+                )
+
+            case .clearCutConnectors(let objectID):
+                try BridgeResult.consume(
+                    orca_plater_object_cut_connectors_clear(
+                        handle, objectID.rawValue, &mutationRevision),
+                    operation: "clear cut connectors"
+                )
+
+            case .assembleAction(let objectID, let instanceID, let a, let b,
+                                 let action):
+                var rawA = Self.encodeMeasureFeature(a)
+                var rawB = Self.encodeMeasureFeature(b)
+                try BridgeResult.consume(
+                    orca_plater_instance_assemble_action(
+                        handle, objectID.rawValue, instanceID.rawValue,
+                        &rawA, &rawB, action, &mutationRevision),
+                    operation: "assembly action"
                 )
 
             case .paintReset(let objectID, let volumeID, let layer):
@@ -1733,15 +1860,7 @@ public final class EnginePlater: @unchecked Sendable {
         }
 
         private static func encode(_ feature: SurfaceFeature) -> orca_surface_feature {
-            var raw = orca_surface_feature()
-            raw.type = feature.kind.rawValue
-            raw.point_a = (feature.pointA.x, feature.pointA.y, feature.pointA.z)
-            raw.point_b = (feature.pointB.x, feature.pointB.y, feature.pointB.z)
-            raw.normal = (feature.normal.x, feature.normal.y, feature.normal.z)
-            raw.radius = feature.radius
-            raw.area = feature.area
-            raw.plane_index = feature.planeIndex
-            return raw
+            EnginePlater.encodeMeasureFeature(feature)
         }
     }
 
@@ -1854,6 +1973,119 @@ public final class EnginePlater: @unchecked Sendable {
                         return (0..<min(otherCount, 16)).map { Int(slots[$0]) }
                     } : nil)
         }
+    }
+
+    /// The object's brim-ear points (object space).
+    public func brimPoints(objectID: ObjectID) throws -> [(position: SIMD3<Double>, radius: Double)] {
+        try lock.withLock {
+            var raw: UnsafeMutablePointer<orca_brim_point>?
+            var count: UInt32 = 0
+            try BridgeResult.consume(
+                orca_plater_object_brim_points(handle, objectID.rawValue, &raw, &count),
+                operation: "read brim ears"
+            )
+            guard let raw else { return [] }
+            defer { orca_brim_points_dispose(raw) }
+            return (0..<Int(count)).map { index in
+                let point = raw[index]
+                return (SIMD3(Double(point.position.0), Double(point.position.1),
+                              Double(point.position.2)),
+                        Double(point.head_front_radius))
+            }
+        }
+    }
+
+    /// Desktop auto-generate: corners of the first-layer contour past
+    /// max_angle_deg (desktop default 125), one undo step.
+    public func autoBrimEars(
+        presets: EnginePresets, objectID: ObjectID,
+        maxAngleDeg: Double, detectionLengthMM: Double, radiusMM: Double
+    ) throws -> (added: UInt32, revision: UInt64) {
+        try Self.withLockedHandles(plater: self, presets: presets) { platerHandle, presetHandle in
+            var added: UInt32 = 0
+            var revision: UInt64 = 0
+            try BridgeResult.consume(
+                orca_plater_object_brim_points_auto(
+                    platerHandle, presetHandle, objectID.rawValue,
+                    maxAngleDeg, detectionLengthMM, radiusMM,
+                    &added, &revision),
+                operation: "auto brim ears"
+            )
+            return (added, revision)
+        }
+    }
+
+    /// Per-instance assembly data (3MF-carried explode transforms).
+    public struct AssembleInfo: Sendable {
+        public let matrix: simd_double4x4
+        public let offsetToAssembly: SIMD3<Double>
+        public let initialized: Bool
+    }
+
+    public func assembleInfo(objectID: ObjectID) throws -> [AssembleInfo] {
+        try lock.withLock {
+            var raw: UnsafeMutablePointer<orca_assemble_info>?
+            var count: UInt32 = 0
+            try BridgeResult.consume(
+                orca_plater_object_assemble_info(handle, objectID.rawValue, &raw, &count),
+                operation: "read assemble info"
+            )
+            guard let raw else { return [] }
+            defer { orca_assemble_info_dispose(raw) }
+            return (0..<Int(count)).map { index in
+                let info = raw[index]
+                let matrix = withUnsafeBytes(of: info.matrix) { buffer -> simd_double4x4 in
+                    let values = buffer.baseAddress!.assumingMemoryBound(to: Double.self)
+                    return simd_double4x4(
+                        SIMD4(values[0], values[1], values[2], values[3]),
+                        SIMD4(values[4], values[5], values[6], values[7]),
+                        SIMD4(values[8], values[9], values[10], values[11]),
+                        SIMD4(values[12], values[13], values[14], values[15]))
+                }
+                return AssembleInfo(
+                    matrix: matrix,
+                    offsetToAssembly: SIMD3(info.offset_to_assembly.0,
+                                            info.offset_to_assembly.1,
+                                            info.offset_to_assembly.2),
+                    initialized: info.initialized != 0)
+            }
+        }
+    }
+
+    /// The object's cut connectors (object space).
+    public func cutConnectors(objectID: ObjectID) throws -> [CutConnector] {
+        try lock.withLock {
+            var raw: UnsafeMutablePointer<orca_cut_connector>?
+            var count: UInt32 = 0
+            try BridgeResult.consume(
+                orca_plater_object_cut_connectors(handle, objectID.rawValue, &raw, &count),
+                operation: "read cut connectors"
+            )
+            guard let raw else { return [] }
+            defer { orca_cut_connectors_dispose(raw) }
+            return (0..<Int(count)).map { index in
+                let c = raw[index]
+                return CutConnector(
+                    position: SIMD3(c.position.0, c.position.1, c.position.2),
+                    normal: SIMD3(c.normal.0, c.normal.1, c.normal.2),
+                    radius: c.radius, height: c.height,
+                    radiusTolerance: c.radius_tolerance,
+                    heightTolerance: c.height_tolerance,
+                    type: c.type, style: c.style, shape: c.shape)
+            }
+        }
+    }
+
+    static func encodeMeasureFeature(_ feature: SurfaceFeature) -> orca_surface_feature {
+        var raw = orca_surface_feature()
+        raw.type = feature.kind.rawValue
+        raw.point_a = (feature.pointA.x, feature.pointA.y, feature.pointA.z)
+        raw.point_b = (feature.pointB.x, feature.pointB.y, feature.pointB.z)
+        raw.normal = (feature.normal.x, feature.normal.y, feature.normal.z)
+        raw.radius = feature.radius
+        raw.area = feature.area
+        raw.plane_index = feature.planeIndex
+        return raw
     }
 
     /// Builds the measure context over the object's merged mesh (CPU-heavy:

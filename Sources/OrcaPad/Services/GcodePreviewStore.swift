@@ -23,12 +23,16 @@ enum ToolpathColorMode: String, CaseIterable, Identifiable, Sendable {
     case acceleration = "Acceleration"
     case jerk = "Jerk"
     case tool = "Tool"
+    /// Desktop "ColorPrint": solid per-extruder FILAMENT colours, banding
+    /// at every colour-change height (the sidebar slot colours + M600
+    /// ticks), instead of a value gradient.
+    case colorPrint = "ColorPrint"
 
     var id: String { rawValue }
 
     var unit: String {
         switch self {
-        case .feature, .tool: return ""
+        case .feature, .tool, .colorPrint: return ""
         case .speed, .actualSpeed: return "mm/s"
         case .layerHeight, .lineWidth: return "mm"
         case .fanSpeed: return "%"
@@ -40,6 +44,23 @@ enum ToolpathColorMode: String, CaseIterable, Identifiable, Sendable {
         case .jerk: return "mm/s"
         }
     }
+}
+
+/// Desktop ColorPrint scheme data (GCodeViewer "filament" colour mode):
+/// the per-extruder filament colour table active from each height band
+/// upward. `minHeight` of the first band is -infinity (print start).
+struct ColorPrintBand: Equatable, Sendable {
+    let minHeight: Float
+    let colours: [SIMD4<Float>]
+}
+
+/// One colour-change tick as the legend shows it.
+struct ColorPrintChange: Identifiable, Sendable, Equatable {
+    /// 0-based extruder index whose colour changes.
+    let extruder: Int
+    let height: Float
+    let colour: SIMD4<Float>
+    var id: String { "\(height)-\(extruder)" }
 }
 
 /// Engine ExtrusionRole display names (values are the engine's own enum —
@@ -143,6 +164,19 @@ final class GcodePreviewStore {
         }
     }
 
+    // MARK: ColorPrint scheme data (preview.color-print)
+
+    /// Per-height-band filament colour table (nil until a toolpath loads).
+    /// Renderer entry point: `colorPrintColour(extruder:height:)` — one
+    /// lookup per segment in ToolpathRenderer's colour switch.
+    private(set) var colorPrintBands: [ColorPrintBand] = []
+    /// Extruder count the table carries (max of slots and change ticks).
+    private(set) var colorPrintExtruderCount = 1
+    /// Legend: the slot colours at print start.
+    private(set) var colorPrintBaseColours: [SIMD4<Float>] = []
+    /// Legend: every colour change, ascending.
+    private(set) var colorPrintChanges: [ColorPrintChange] = []
+
     var estimatedStealthSeconds: Float { toolpath?.estimatedStealthSeconds ?? 0 }
     var extruderStats: [ExtruderStats] { toolpath?.extruders ?? [] }
 
@@ -179,10 +213,28 @@ final class GcodePreviewStore {
         return remaining
     }
 
-    func load(url: URL, identity: String, origin: SIMD3<Float> = .zero) async {
+    /// Colour inputs for the ColorPrint scheme, supplied by the view at
+    /// load time: the Prepare filament slots' configured colours and the
+    /// document's colour-change ticks (the only place a change's TARGET
+    /// COLOUR lives — the toolpath's own M600 markers carry the height and
+    /// extruder but no colour). External G-code files pass none; the
+    /// scheme then falls back to deterministic per-extruder hues.
+    private var colorPrintInputs: (
+        filamentColours: [String],
+        changes: [EnginePlater.CustomGcodeItem]
+    ) = (filamentColours: [], changes: [])
+
+    func load(
+        url: URL,
+        identity: String,
+        origin: SIMD3<Float> = .zero,
+        filamentColours: [String] = [],
+        colourChanges: [EnginePlater.CustomGcodeItem] = []
+    ) async {
         guard !isLoading, loadedIdentity != identity else { return }
         isLoading = true
         phase = .loading
+        colorPrintInputs = (filamentColours: filamentColours, changes: colourChanges)
         let result = await BackgroundWork.run(operation: "load gcode preview") {
             try EngineGcode.loadToolpath(path: url.path, origin: origin)
         }
@@ -205,11 +257,14 @@ final class GcodePreviewStore {
     func loadPlateSections(
         url: URL,
         identity: String,
-        origins: [Int: SIMD3<Float>]
+        origins: [Int: SIMD3<Float>],
+        filamentColours: [String] = [],
+        colourChanges: [EnginePlater.CustomGcodeItem] = []
     ) async {
         guard !isLoading, loadedIdentity != identity else { return }
         isLoading = true
         phase = .loading
+        colorPrintInputs = (filamentColours: filamentColours, changes: colourChanges)
         let result = await BackgroundWork.run(operation: "load gcode plate sections") {
             try EngineGcode.loadPlateSections(path: url.path, origins: origins)
         }
@@ -293,7 +348,136 @@ final class GcodePreviewStore {
         lowerLayer = 0
         upperLayer = max(toolpath.layers.count - 1, 0)
         topLayerProgress = topLayerSegmentCount
+        installColorPrintData()
         phase = .ready
+    }
+
+    // MARK: ColorPrint band building (desktop: solid extruder colours per
+    // layer band, switching at every colour-change tick)
+
+    /// Rebuilds the per-height colour table from the load-time inputs.
+    /// Base = the filament slot colours; each colour-change tick (M600)
+    /// replaces one extruder's colour from its height upward. Tool changes
+    /// need no entry — segments already carry the active extruder.
+    private func installColorPrintData() {
+        let inputs = colorPrintInputs
+        let changes = inputs.changes
+            .filter { $0.kind == .colorChange && !$0.color.isEmpty }
+            .sorted { $0.printZ < $1.printZ }
+        let highestTickExtruder = changes.map(\.extruder).max() ?? 0
+        let count = max(
+            max(inputs.filamentColours.count, 1),
+            highestTickExtruder
+        )
+        var base: [SIMD4<Float>] = []
+        for index in 0..<count {
+            let configured = index < inputs.filamentColours.count
+                ? Self.parseColour(inputs.filamentColours[index])
+                : nil
+            base.append(configured ?? Self.defaultExtruderColour(index))
+        }
+        var bands = [ColorPrintBand(minHeight: -Float.infinity, colours: base)]
+        var legend: [ColorPrintChange] = []
+        var current = base
+        for tick in changes {
+            // Colour-change extruder is 1-based; 0 means "the (single)
+            // extruder" — both map to index 0.
+            let index = max(tick.extruder - 1, 0)
+            let colour = Self.parseColour(tick.color) ?? Self.defaultExtruderColour(index)
+            if index < current.count {
+                current[index] = colour
+            } else {
+                // A tick naming an extruder beyond the slots still colors:
+                // grow the table deterministically.
+                while current.count < index { current.append(Self.defaultExtruderColour(current.count)) }
+                current.append(colour)
+            }
+            bands.append(ColorPrintBand(minHeight: Float(tick.printZ), colours: current))
+            legend.append(ColorPrintChange(
+                extruder: index, height: Float(tick.printZ), colour: colour))
+        }
+        colorPrintBands = bands
+        colorPrintExtruderCount = current.count
+        colorPrintBaseColours = base
+        colorPrintChanges = legend
+    }
+
+    /// The ColorPrint colour of one segment — the public lookup the
+    /// renderer's colour switch calls:
+    /// `case .colorPrint: return store.colorPrintColour(
+    ///     extruder: segment.extruder, height: segment.printZ)`.
+    /// Height epsilon 0.001 mm: a change set exactly at a layer's z applies
+    /// from that layer upward (the tick editor snaps to layer z's).
+    func colorPrintColour(extruder: UInt8, height: Float) -> SIMD4<Float> {
+        let index = Int(extruder)
+        var band = colorPrintBands.first ?? ColorPrintBand(
+            minHeight: -Float.infinity,
+            colours: [Self.defaultExtruderColour(0)])
+        for candidate in colorPrintBands
+        where candidate.minHeight <= height + 0.001 {
+            band = candidate
+        }
+        guard !band.colours.isEmpty else {
+            return Self.defaultExtruderColour(index)
+        }
+        let clamped = min(max(index, 0), band.colours.count - 1)
+        return band.colours[clamped]
+    }
+
+    /// "#rrggbb" / "#rgb" → linear-ish display RGB (0…1). Named colours
+    /// ("red") return nil — the caller substitutes the deterministic
+    /// per-extruder default rather than guessing.
+    nonisolated private static func parseColour(_ text: String) -> SIMD4<Float>? {
+        let hex = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard hex.hasPrefix("#") else { return nil }
+        let digits = String(hex.dropFirst())
+        var values: [Int]
+        switch digits.count {
+        case 3:
+            values = (0..<3).compactMap { index in
+                Int(String(digits[digits.index(digits.startIndex, offsetBy: index)]), radix: 16)
+                    .map { $0 * 17 }  // 0xf → 0xff
+            }
+        case 6:
+            values = (0..<3).compactMap { part in
+                let start = digits.index(digits.startIndex, offsetBy: part * 2)
+                let end = digits.index(start, offsetBy: 2)
+                return Int(digits[start..<end], radix: 16)
+            }
+        default:
+            return nil
+        }
+        guard values.count == 3 else { return nil }
+        return SIMD4(
+            Float(values[0]) / 255,
+            Float(values[1]) / 255,
+            Float(values[2]) / 255,
+            1
+        )
+    }
+
+    /// Deterministic distinct hue per extruder (golden-ratio rotation) —
+    /// used when no slot colour exists (e.g. an external G-code file with
+    /// no project colours).
+    nonisolated private static func defaultExtruderColour(_ index: Int) -> SIMD4<Float> {
+        let hue = Float((Double(index) * 0.618033988749895).truncatingRemainder(dividingBy: 1))
+        let saturation: Float = 0.85
+        let brightness: Float = 0.95
+        // HSV → RGB (h in 0…6)
+        let h = hue * 6
+        let chroma = brightness * saturation
+        let second = chroma * (1 - abs((h.truncatingRemainder(dividingBy: 2)) - 1))
+        let offset = brightness - chroma
+        let rgb: (Float, Float, Float)
+        switch h {
+        case ..<1: rgb = (chroma, second, 0)
+        case ..<2: rgb = (second, chroma, 0)
+        case ..<3: rgb = (0, chroma, second)
+        case ..<4: rgb = (0, second, chroma)
+        case ..<5: rgb = (second, 0, chroma)
+        default: rgb = (chroma, 0, second)
+        }
+        return SIMD4(rgb.0 + offset, rgb.1 + offset, rgb.2 + offset, 1)
     }
 
     func setLayerRange(lower: Int, upper: Int) {

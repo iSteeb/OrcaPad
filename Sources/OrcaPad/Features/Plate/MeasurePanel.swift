@@ -14,6 +14,12 @@ struct MeasurePanel: View {
     let features: [EnginePlater.SurfaceFeature?]
     let result: EnginePlater.FeatureMeasurement?
     let onClear: () -> Void
+    /// Assembly actions (desktop gizmo assemble, ABI v42): visible when
+    /// both slots hold a point or plane feature and an instance is
+    /// selected; the callbacks carry the engine action ordinal (0 set
+    /// parallel, 1 center coincident, 2/3 reverse rotation).
+    var showsAssembly = false
+    var onAssembleAction: ((Int32) -> Void)? = nil
 
     @AppStorage("units.inches") private var inches = false
 
@@ -61,6 +67,40 @@ struct MeasurePanel: View {
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
                 .minimumScaleFactor(0.6)
+            }
+            // Assembly (desktop GLGizmoAssembly actions): applies the two
+            // picked features to the selected instance. Typed failures
+            // surface as status messages through DocumentStore.
+            if showsAssembly, let onAssembleAction {
+                HStack(spacing: 8) {
+                    Image(systemName: "shippingbox")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    Text("Assembly")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                    Button {
+                        onAssembleAction(0)
+                    } label: {
+                        Label("Set parallel", systemImage: "arrow.left.and.right.righttriangle.left.righttriangle.right")
+                            .font(.caption)
+                    }
+                    .buttonStyle(.bordered)
+                    Button {
+                        onAssembleAction(1)
+                    } label: {
+                        Label("Center coincident", systemImage: "smallcircle.filled.circle")
+                            .font(.caption)
+                    }
+                    .buttonStyle(.bordered)
+                    Button {
+                        onAssembleAction(2)
+                    } label: {
+                        Label("Reverse rotation", systemImage: "arrow.triangle.2.circlepath")
+                            .font(.caption)
+                    }
+                    .buttonStyle(.bordered)
+                }
             }
         }
         .padding(10)

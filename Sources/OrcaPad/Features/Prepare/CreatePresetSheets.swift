@@ -311,3 +311,106 @@ struct CreatePrinterSheet: View {
         )
     }
 }
+
+/// "Merge with…" (desktop filament-bar action, prepare.multi-filament):
+/// the CURRENT filament is the base; picking another filament merges the
+/// two into one user preset whose per-slot (vector) options carry both
+/// presets' values — base first, merged-in second. See
+/// PresetStore.mergeFilaments for exactly what merges and what the
+/// desktop's slot-level merge additionally does (document-side extruder
+/// re-assignment, outside the preset layer).
+struct MergeFilamentSheet: View {
+    let presets: PresetStore
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var mergeName = ""
+    @State private var name = ""
+
+    private var baseName: String { presets.selection.filament }
+
+    private var candidates: [PresetEntry] {
+        presets.visibleEntries(for: .filament).filter { $0.name != baseName }
+    }
+
+    private var existing: PresetEntry? {
+        presets.filaments.first { $0.name == name }
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    LabeledContent("Base preset") {
+                        Text(baseName)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                    NavigationLink {
+                        GroupedPickerList(
+                            title: "Merge In",
+                            entries: candidates,
+                            selected: mergeName,
+                            vendorPlaceholder: "Other"
+                        ) { picked in
+                            mergeName = picked
+                        }
+                    } label: {
+                        LabeledContent("Merge in") {
+                            Text(mergeName.isEmpty ? "Choose\u{2026}" : mergeName)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                        }
+                    }
+                    TextField("New preset name", text: $name)
+                        .autocorrectionDisabled()
+                } footer: {
+                    CreatePresetFormFooter(existing: existing)
+                }
+                Section {
+                    EmptyView()
+                } header: {
+                    Text("What merges")
+                } footer: {
+                    Text("Every per-slot option both presets define (colour, type, diameter…) becomes two entries — base first, merged-in second; scalar options keep the base value. The result is saved as a detached user preset and selected. (Desktop's “Merge with” also re-assigns the old slot's objects across the document — that part lives with the plate/filament bar, not here.)")
+                }
+            }
+            .navigationTitle("Merge Filament")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Merge") {
+                        let chosenMerge = mergeName
+                        let chosenName = name
+                        Task {
+                            if await presets.mergeFilaments(
+                                baseName: baseName,
+                                mergeName: chosenMerge,
+                                newName: chosenName
+                            ) {
+                                dismiss()
+                            }
+                        }
+                    }
+                    .disabled(
+                        mergeName.isEmpty
+                            || name.trimmingCharacters(in: .whitespaces).isEmpty
+                            || mergeName == baseName
+                            || (existing.map { $0.origin != .user } ?? false)
+                    )
+                }
+            }
+            .onAppear {
+                if name.isEmpty, !baseName.isEmpty, !mergeName.isEmpty {
+                    name = "\(baseName) + \(mergeName)"
+                }
+            }
+            .onChange(of: mergeName) { _, newValue in
+                name = newValue.isEmpty ? "" : "\(baseName) + \(newValue)"
+            }
+        }
+        .presentationDetents([.large])
+    }
+}

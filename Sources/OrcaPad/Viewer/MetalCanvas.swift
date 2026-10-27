@@ -59,6 +59,21 @@ struct SceneSync {
     /// object's profile pairs + layer-height context + live drag band;
     /// nil = no selection / not in VLH mode.
     var vlhOverlay: Renderer.VLHOverlay? = nil
+    /// Brim-ears overlay (desktop GLGizmoBrimEars, ABI v42): the selected
+    /// object's ears; nil = not in brim-ears mode / no object.
+    var brimEars: Renderer.BrimEarsOverlay? = nil
+    /// Cut-connector overlay (desktop CutDialog, ABI v42): the selected
+    /// object's placed connectors; nil = outside the cut flow.
+    var cutConnectors: Renderer.CutConnectorsOverlay? = nil
+    /// The cut plane for connector placement (viewer space); non-nil only
+    /// while placement mode is active (taps place connectors on it).
+    var cutPlane: Renderer.CutPlane? = nil
+    /// Assembly explode (desktop AssembleView, ABI v42): per-instance
+    /// viewer-space render-matrix overrides (empty = normal placement).
+    var assemblyExplode: [InstanceID: simd_float4x4] = [:]
+    /// Camera zoom request (advances when a zoom step is chosen; the
+    /// scale is a multiplicative step like the pinch gesture).
+    var cameraZoomRequest: (id: UInt64, scale: Float) = (0, 1)
 }
 
 /// Manipulation callbacks from the canvas gestures (engine-space units).
@@ -102,6 +117,15 @@ struct CanvasManipulation {
     var onVLHDrag: ((Double) -> Void)? = nil
     /// VLH drag end at the final z: the store commits ONE adjust mutation.
     var onVLHEnd: ((Double) -> Void)? = nil
+    /// Brim-ears mode (ABI v42): a tap ON a marker selects/toggles it (nil
+    /// index = tapped empty space → deselect). LAST members like onPaint.
+    var onBrimEarSelect: ((Int?) -> Void)? = nil
+    /// Brim-ears mode: a tap on the object's surface places an ear at the
+    /// picked point (the store applies the desktop bed-level semantics).
+    var onBrimEarTap: ((Renderer.FacePick) -> Void)? = nil
+    /// Cut-connector placement (desktop CutDialog manual mode): a tap that
+    /// hit the cut plane inside the object places one connector there.
+    var onCutConnectorTap: ((Renderer.CutPlanePick) -> Void)? = nil
 }
 
 /// SwiftUI wrapper around MTKView + gesture recognizers.
@@ -169,6 +193,11 @@ struct MetalCanvas: UIViewRepresentable {
             scene.gizmoMode == .measure ? scene.measureOverlay : nil)
         coordinator.renderer?.setVLHOverlay(
             scene.gizmoMode == .vlh ? scene.vlhOverlay : nil)
+        coordinator.renderer?.setBrimEars(
+            scene.gizmoMode == .brimEars ? scene.brimEars : nil)
+        coordinator.renderer?.setCutConnectors(scene.cutConnectors)
+        coordinator.renderer?.setCutPlane(scene.cutPlane)
+        coordinator.renderer?.setAssemblyOverrides(scene.assemblyExplode)
         let needsSceneApply =
             scene.snapshot.documentID != coordinator.lastDocumentID ||
             scene.snapshot.revision != coordinator.lastDocumentRevision ||
@@ -217,6 +246,10 @@ struct MetalCanvas: UIViewRepresentable {
                 coordinator.renderer?.frameBed()
             }
         }
+        if scene.cameraZoomRequest.id != coordinator.lastZoomRequest {
+            coordinator.lastZoomRequest = scene.cameraZoomRequest.id
+            coordinator.renderer?.camera.zoom(by: scene.cameraZoomRequest.scale)
+        }
     }
 
     // MARK: Coordinator — gestures + renderer lifetime
@@ -232,6 +265,7 @@ struct MetalCanvas: UIViewRepresentable {
         var lastSelectedVolumeID: VolumeID?
         var lastFrameRequest: UInt64?
         var lastCameraRequest: UInt64?
+        var lastZoomRequest: UInt64?
 
         var manipulation: CanvasManipulation?
         /// The renderer's current selection volume (for the tap toggle);
@@ -330,6 +364,28 @@ struct MetalCanvas: UIViewRepresentable {
                     manipulation?.onVLHEnd?(z)
                     return
                 }
+            }
+            if renderer.gizmoMode == .brimEars {
+                // Desktop GLGizmoBrimEars: a tap on a marker selects/
+                // deselects it; a tap on the object places an ear at the
+                // picked surface point; empty space clears the selection.
+                if let index = renderer.pickBrimEar(at: location, in: view) {
+                    manipulation?.onBrimEarSelect?(index)
+                    return
+                }
+                if let face = renderer.pickFace(at: location, in: view) {
+                    manipulation?.onBrimEarTap?(face)
+                    return
+                }
+                manipulation?.onBrimEarSelect?(nil)
+                return
+            }
+            // Cut-connector placement (desktop CutDialog manual mode):
+            // taps on the cut plane place connectors; everything else
+            // stays camera control.
+            if let pick = renderer.pickCutPlane(at: location, in: view) {
+                manipulation?.onCutConnectorTap?(pick)
+                return
             }
             if renderer.gizmoMode == .layFlat {
                 // Desktop Flatten gizmo: the hull plane under the touch wins
@@ -503,9 +559,9 @@ struct MetalCanvas: UIViewRepresentable {
             renderer: Renderer
         ) -> DragState {
             let mode = renderer.gizmoMode
-            if mode == .paint || mode == .measure {
-                // Strokes/feature picks are taps; dragging stays camera
-                // control.
+            if mode == .paint || mode == .measure || mode == .brimEars {
+                // Strokes/feature picks/ear placements are taps; dragging
+                // stays camera control.
                 return .orbit
             }
             // VLH: drags on the strip adjust the profile at the finger's z
@@ -551,6 +607,8 @@ struct MetalCanvas: UIViewRepresentable {
             case .measure:
                 return .orbit  // handled above; kept for exhaustiveness
             case .vlh:
+                return .orbit  // handled above; kept for exhaustiveness
+            case .brimEars:
                 return .orbit  // handled above; kept for exhaustiveness
             case .layFlat:
                 // Touch-hover: dragging across the object highlights the

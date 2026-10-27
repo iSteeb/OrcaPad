@@ -7,7 +7,7 @@ extern "C" {
 #endif
 
 /// Version of the C ABI contract in this header. Callers verify it at runtime.
-#define ORCA_BRIDGE_ABI_VERSION ((uint32_t)41)
+#define ORCA_BRIDGE_ABI_VERSION ((uint32_t)42)
 
 typedef int32_t orca_status_code;
 #define ORCA_STATUS_OK                     ((orca_status_code)0)
@@ -607,6 +607,147 @@ orca_result orca_plater_plate_settings(orca_plater *plater,
 orca_result orca_plater_plate_set_settings(
     orca_plater *plater, orca_plate_id plate_id,
     const orca_plate_settings *settings, orca_revision *out_revision);
+
+/// Desktop "Fill by angle" (smart fill) and bucket fill (ABI v42):
+/// angle_deg > 0 flood-selects facets around the hit whose mutual angle
+/// stays under the threshold (seed fill); angle_deg == 0 fills the hit
+/// facet plus same-state neighbors (bucket fill, `propagate` extends to
+/// all connected same-state facets). One undo step; typed NOT_FOUND when
+/// the selection is empty.
+orca_result orca_plater_volume_paint_fill(orca_plater *plater,
+                                          orca_object_id object_id,
+                                          orca_volume_id volume_id,
+                                          uint8_t layer,
+                                          double hit_x, double hit_y, double hit_z,
+                                          double view_dx, double view_dy, double view_dz,
+                                          double angle_deg, uint8_t propagate,
+                                          int32_t state,
+                                          orca_revision *out_revision);
+
+// --- brim ears (desktop GLGizmoBrimEars, ABI v42) -----------------------------
+
+/// One manually-placed brim ear (desktop ModelObject::BrimPoint), OBJECT
+/// space: position near the first layer contour + ear radius.
+typedef struct {
+    float position[3];
+    float head_front_radius;
+} orca_brim_point;
+
+/// The object's brim-ear points (read-only; caller owns the array).
+orca_result orca_plater_object_brim_points(orca_plater *plater,
+                                           orca_object_id object_id,
+                                           orca_brim_point **out,
+                                           uint32_t *out_count);
+void orca_brim_points_dispose(orca_brim_point *points);
+
+/// Places one ear (one undo step "Brim ears"). Consumed by slicing when
+/// brim_type = btPainted (engine Brim.cpp make_brim_ears).
+orca_result orca_plater_object_brim_point_add(orca_plater *plater,
+                                              orca_object_id object_id,
+                                              double x, double y, double z,
+                                              double radius,
+                                              orca_revision *out_revision);
+
+/// Removes every ear (one undo step).
+orca_result orca_plater_object_brim_points_clear(orca_plater *plater,
+                                                 orca_object_id object_id,
+                                                 orca_revision *out_revision);
+
+/// Desktop auto-generate: slices the object's first layer, decimates the
+/// contours (Douglas-Peucker at detection_length) and places ears at
+/// convex (outer) / concave (inner) corners past max_angle_deg — the
+/// desktop gizmo's recipe over the engine's own Polygon utilities.
+/// radius_mm <= 0 uses the desktop default (initial_layer_line_width x 16).
+/// One undo step; returns the placed count.
+orca_result orca_plater_object_brim_points_auto(orca_plater *plater,
+                                                orca_presets *presets,
+                                                orca_object_id object_id,
+                                                double max_angle_deg,
+                                                double detection_length_mm,
+                                                double radius_mm,
+                                                uint32_t *out_added,
+                                                orca_revision *out_revision);
+
+// --- reload from disk (desktop Reload from disk / Replace, ABI v42) ------------
+
+/// Replaces the object's geometry with the mesh loaded from `path`
+/// (desktop reload_from_disk: placement and instances are KEPT). The file's
+/// parts are merged into the first volume (single solid); per-part volumes
+/// from the old object are dropped; paint annotations are cleared (the
+/// triangle indices change). One undo step "Reload from disk".
+orca_result orca_plater_object_replace_mesh(orca_plater *plater,
+                                            orca_object_id object_id,
+                                            const char *path,
+                                            orca_revision *out_revision);
+
+// --- assembly (desktop AssembleView + GLGizmoAssembly, ABI v42) ----------------
+
+/// Per-instance assembly data (desktop ModelInstance m_assemble_transformation,
+/// round-tripped in 3MF <assemble> records). Read-only; the exploded VIEW is
+/// client-side interpolation of the instance matrix toward this matrix.
+typedef struct {
+    double matrix[16];       // column-major assemble transformation
+    double offset_to_assembly[3];
+    uint8_t initialized;     // 3MF carried a record
+    uint8_t reserved[7];
+} orca_assemble_info;
+
+orca_result orca_plater_object_assemble_info(orca_plater *plater,
+                                             orca_object_id object_id,
+                                             orca_assemble_info **out,
+                                             uint32_t *out_count);
+void orca_assemble_info_dispose(orca_assemble_info *info);
+
+/// Desktop assembly actions (GLGizmoMeasure assembly mode): given two
+/// picked surface features (object space, from the measure context) the
+/// engine computes the transform; action 0 = set to parallel,
+/// 1 = set to center coincident, 2/3 = reverse rotation of feature 1/2.
+/// Applied to the instance transform. One undo step "Assembly".
+orca_result orca_plater_instance_assemble_action(orca_plater *plater,
+                                                 orca_object_id object_id,
+                                                 orca_instance_id instance_id,
+                                                 const orca_surface_feature *a,
+                                                 const orca_surface_feature *b,
+                                                 int32_t action,
+                                                 orca_revision *out_revision);
+
+// --- cut connectors (desktop CutDialog connectors, ABI v42) --------------------
+
+/// Connector attributes: desktop CutConnectorType (0 plug, 1 dowel,
+/// 2 snap), style (0 prism, 1 frustum), shape (0 triangle, 1 square,
+/// 2 hexagon, 3 circle).
+typedef struct {
+    double position[3];       // world (engine) space, on the cut plane
+    double normal[3];         // cut plane normal the connector is drilled along
+    float  radius;            // mm
+    float  height;            // mm
+    float  radius_tolerance;  // 0..1
+    float  height_tolerance;  // 0..1
+    int32_t type;             // 0..2
+    int32_t style;            // 0..1
+    int32_t shape;            // 0..3
+    int32_t reserved;
+} orca_cut_connector;
+
+/// The object's cut connectors (read-only; caller owns the array).
+orca_result orca_plater_object_cut_connectors(orca_plater *plater,
+                                              orca_object_id object_id,
+                                              orca_cut_connector **out,
+                                              uint32_t *out_count);
+void orca_cut_connectors_dispose(orca_cut_connector *connectors);
+
+/// Adds one connector (one undo step "Cut connectors"); the existing
+/// orca_plater_object_cut consumes the list (CutUtils reads
+/// ModelObject::cut_connectors). `normal` orients the drill axis.
+orca_result orca_plater_object_cut_connector_add(orca_plater *plater,
+                                                 orca_object_id object_id,
+                                                 const orca_cut_connector *connector,
+                                                 orca_revision *out_revision);
+
+/// Removes every connector (one undo step).
+orca_result orca_plater_object_cut_connectors_clear(orca_plater *plater,
+                                                    orca_object_id object_id,
+                                                    orca_revision *out_revision);
 
 // --- drop / floating (desktop Drop + Auto Drop, ABI v41) -----------------------
 

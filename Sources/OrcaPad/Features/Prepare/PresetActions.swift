@@ -15,6 +15,8 @@ struct PresetActionsMenu: View {
     @State private var deleteConfirmation = false
     /// Create Preset wizards (prepare create-wizards, ABI v41).
     @State private var createPresented = false
+    /// Desktop filament-bar "Merge with…" (prepare.multi-filament).
+    @State private var mergePresented = false
 
     private var presets: PresetStore { environment.presets }
 
@@ -64,6 +66,15 @@ struct PresetActionsMenu: View {
                     )
                 }
             }
+            // Desktop filament "Merge with…" (prepare.multi-filament):
+            // the current filament absorbs another preset's per-slot values.
+            if kind == .filament, presets.filaments.count > 1 {
+                Button {
+                    mergePresented = true
+                } label: {
+                    Label("Merge with\u{2026}", systemImage: "square.stack.3d.down.right")
+                }
+            }
         } label: {
             Label("Preset", systemImage: "ellipsis.circle")
         }
@@ -77,6 +88,9 @@ struct PresetActionsMenu: View {
             case .filament: CreateFilamentSheet(presets: presets)
             case .process: EmptyView()
             }
+        }
+        .sheet(isPresented: $mergePresented) {
+            MergeFilamentSheet(presets: presets)
         }
         .confirmationDialog(
             "Delete \"\(currentName)\"?",

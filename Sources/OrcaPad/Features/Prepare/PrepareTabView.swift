@@ -11,6 +11,7 @@ import UniformTypeIdentifiers
 /// Simple/Advanced/Expert filter, and the Slice action in the toolbar.
 struct PrepareTabView: View {
     @Environment(AppEnvironment.self) private var environment
+    @Environment(\.openURL) private var openURL
     @State private var activeKind: PresetKind = .process
     @State private var activePage: String?
     @State private var expandedKind: PresetKind?
@@ -385,6 +386,31 @@ struct PrepareTabView: View {
                     }
                 } label: {
                     ChromeToolLabel(symbol: "arrow.left.arrow.right.square", label: "Configs")
+                }
+                .buttonStyle(.plain)
+                Divider().frame(height: 28)
+                // Desktop File ▸ model-library links (files.model-links):
+                // the Plate File menu is outside this file's ownership, so
+                // the import area of the Prepare pill carries them.
+                Menu {
+                    Text("Safari downloads land in Files ▸ OrcaPad ▸ Downloads when saved there.")
+                    Button {
+                        openURL(URL(string: "https://www.printables.com")!)
+                    } label: {
+                        Label("Printables", systemImage: "square.grid.2x2")
+                    }
+                    Button {
+                        openURL(URL(string: "https://www.makerworld.com")!)
+                    } label: {
+                        Label("MakerWorld", systemImage: "globe")
+                    }
+                    Button {
+                        openURL(URL(string: "https://www.thingiverse.com")!)
+                    } label: {
+                        Label("Thingiverse", systemImage: "triangle")
+                    }
+                } label: {
+                    ChromeToolLabel(symbol: "arrow.down.app", label: "Models")
                 }
                 .buttonStyle(.plain)
                 Divider().frame(height: 28)

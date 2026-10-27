@@ -1091,6 +1091,114 @@ final class PresetStore {
         }
     }
 
+    // MARK: Multi-filament merge (desktop sidebar "Merge with")
+
+    /// Desktop filament-bar "Merge with…" (GUI_Factories.cpp
+    /// create_filament_action_menu → Sidebar::change_filament →
+    /// delete_filament) re-assigns a slot's extruders across the DOCUMENT
+    /// and drops the slot — a document-level operation that lives outside
+    /// this store (DocumentStore / Plate tab). What the PRESET layer
+    /// implements here (documented scope): a user preset built from
+    /// `baseName` whose VECTOR-VALUED options carry the concatenation of
+    /// base's and `mergeName`'s values (filament_colour, filament_type,
+    /// filament_diameter… — slot A's entries then slot B's, exactly how a
+    /// multi-filament preset stores one value per slot), saved as `newName`
+    /// (detached) and selected. Scalar options keep the base value; enum/
+    /// point vectors are not merged (their serialized forms are not
+    /// joinable). Returns whether the merged preset was created.
+    @discardableResult
+    func mergeFilaments(baseName: String, mergeName: String, newName: String) async -> Bool {
+        guard let engine, isReady, !isSelecting else {
+            status.report(.presets, "merge filament blocked: presets are busy")
+            return false
+        }
+        guard !isEngineBusy else {
+            status.report(.presets, "presets: locked while slicing — available again when the slice finishes")
+            return false
+        }
+        guard baseName != mergeName else {
+            status.report(.presets, failure: .invariant(
+                operation: "merge filament presets",
+                diagnostic: "a preset cannot be merged with itself"))
+            return false
+        }
+        let current = selection
+        isSelecting = true
+        let result = await BackgroundWork.run(operation: "merge filament presets") { () -> Int in
+            // Capture BOTH presets' pristine values: selecting resets the
+            // edited copy, so each select+dump pair reads one preset.
+            try engine.select(
+                machine: current.machine, filament: mergeName, process: current.process
+            ).get()
+            let mergeDump = try engine.configDump(kind: .filament, edited: false).get()
+            try engine.select(
+                machine: current.machine, filament: baseName, process: current.process
+            ).get()
+            let baseDump = try engine.configDump(kind: .filament, edited: false).get()
+            // Plan every concatenation BEFORE writing any value (schema-
+            // derived: only vector options of joinable types).
+            var planned: [(key: String, value: String)] = []
+            for (key, baseValue) in baseDump.sorted(by: { $0.key < $1.key }) {
+                guard let mergeValue = mergeDump[key],
+                      !baseValue.isEmpty, !mergeValue.isEmpty,
+                      let joined = Self.joinedFilamentVector(key: key, baseValue, mergeValue)
+                else { continue }
+                planned.append((key: key, value: joined))
+            }
+            do {
+                for entry in planned {
+                    try engine.setValue(
+                        kind: .filament, key: entry.key, serializedValue: entry.value
+                    ).get()
+                }
+            } catch {
+                // Explicit recovery: a mid-apply failure would leave the
+                // base preset's edited copy half-merged — restore it from
+                // its selection, then surface the typed failure. A failing
+                // reset does not mask the merge error below.
+                if case .failure(let resetError) = engine.resetKind(.filament) {
+                    throw AppFailure.bridge(resetError)
+                }
+                throw error
+            }
+            try engine.saveUser(kind: .filament, name: newName, detach: true).get()
+            return planned.count
+        }
+        isSelecting = false
+        switch result {
+        case .success(let count):
+            guard await refreshFromEngine() else { return false }
+            status.report(.presets, "merged preset saved: \(newName) (\(count) per-slot option(s))")
+            return await select(kind: .filament, name: newName)
+        case .failure(let failure):
+            status.report(.presets, failure: failure)
+            return false
+        }
+    }
+
+    /// Joins the serialized values of one VECTOR option (ConfigOptionType
+    /// bit 0x4000) of two filament presets: strings concatenate with ';' —
+    /// the cstyle separator upstream's escape_strings_cstyle emits —
+    /// numeric/bool vectors with ','. Enum and point vectors return nil
+    /// (their serialized forms are not concatenatable).
+    private nonisolated static func joinedFilamentVector(
+        key: String, _ baseValue: String, _ mergeValue: String
+    ) -> String? {
+        guard case .success(let index) = ConfigSchema.index,
+              let option = index[key]
+        else { return nil }
+        let vectorBit = 0x4000
+        guard option.type & vectorBit != 0 else { return nil }
+        switch option.type & ~vectorBit {
+        case 3:  // coString base type → ConfigOptionStrings
+            return "\(baseValue);\(mergeValue)"
+        case 1, 2, 4, 5, 8:  // float / int / percent / floatOrPercent / bool
+            return "\(baseValue),\(mergeValue)"
+        default:
+            return nil
+        }
+    }
+
     // MARK: Desktop-parity config overrides
 
     /// Writes a serialized override into the edited preset of `kind` and

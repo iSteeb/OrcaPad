@@ -154,6 +154,71 @@ enum ZipImport {
         return models
     }
 
+    /// Extracts EVERY file entry of `source` into `directory` (created when
+    /// missing) and returns the written file URLs in archive order. The
+    /// profile-update installer (Services/ProfileUpdates) uses this for a
+    /// downloaded vendor bundle zip (the model-only extractor above would
+    /// drop the `<Vendor>.json` + preset files it carries). Same container
+    /// rules and budgets as the model import: stored/deflate only, no ZIP64,
+    /// no encryption, zip-slip paths rejected, zip-bomb caps enforced.
+    static func extractAll(from source: URL, into directory: URL) throws -> [URL] {
+        let hasSecurityScope = source.startAccessingSecurityScopedResource()
+        defer {
+            if hasSecurityScope {
+                source.stopAccessingSecurityScopedResource()
+            }
+        }
+        let data: Data
+        do {
+            data = try Data(contentsOf: source)
+        } catch {
+            throw ZipImportError.unreadable(String(describing: error))
+        }
+        guard !data.isEmpty else {
+            throw ZipImportError.unreadable("the file is empty")
+        }
+        do {
+            try FileManager.default.createDirectory(
+                at: directory, withIntermediateDirectories: true)
+        } catch {
+            throw ZipImportError.unreadable(
+                "could not create \(directory.path): \(String(describing: error))")
+        }
+
+        let entries = try parseCentralDirectory(data)
+        var files: [URL] = []
+        var totalBytes = 0
+        for entry in entries {
+            guard !entry.name.hasSuffix("/") else { continue }  // directory
+            guard entry.uncompressedSize <= maxEntryBytes else {
+                throw ZipImportError.tooLarge(
+                    "\(entry.name) is \(entry.uncompressedSize) bytes")
+            }
+            totalBytes += entry.uncompressedSize
+            guard totalBytes <= maxTotalBytes else {
+                throw ZipImportError.tooLarge(
+                    "\(entry.name): archive total exceeds \(maxTotalBytes) bytes")
+            }
+            let content = try entryContent(entry, in: data)
+            try validatePath(entry.name, relativeTo: directory)
+            let destination = directory.appendingPathComponent(entry.name)
+            do {
+                try FileManager.default.createDirectory(
+                    at: destination.deletingLastPathComponent(),
+                    withIntermediateDirectories: true)
+                try content.write(to: destination, options: .atomic)
+            } catch {
+                throw ZipImportError.unreadable(
+                    "could not write \(entry.name): \(String(describing: error))")
+            }
+            files.append(destination)
+        }
+        guard !files.isEmpty else {
+            throw ZipImportError.unsupported("the archive contains no file entries")
+        }
+        return files
+    }
+
     // MARK: Container parsing
 
     private struct Entry {
