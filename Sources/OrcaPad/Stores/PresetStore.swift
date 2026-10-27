@@ -293,14 +293,18 @@ final class PresetStore {
         }
     }
 
-    func select(kind: PresetKind, name: String) async {
+    /// Selects the preset of `kind`. Returns whether the engine committed
+    /// the selection (the caller of the Transfer continuation needs to know
+    /// before re-applying captured values).
+    @discardableResult
+    func select(kind: PresetKind, name: String) async -> Bool {
         guard let engine, isReady, !isSelecting else {
             status.report(.presets, "preset selection blocked: presets are busy")
-            return
+            return false
         }
         guard !isEngineBusy else {
             status.report(.presets, "presets: locked while slicing — available again when the slice finishes")
-            return
+            return false
         }
         // Value snapshots for the nonisolated background closure.
         let current = selection
@@ -381,6 +385,97 @@ final class PresetStore {
             systemConfigs = system
             persist(selected)
             status.report(.presets, "presets: selection ready")
+            return true
+        case .failure(let failure):
+            status.report(.presets, failure: failure)
+            return false
+        }
+    }
+
+    // MARK: Preset switch with value transfer (desktop "Transfer")
+
+    /// What a transfer applied and what the new preset refused.
+    private struct TransferOutcome: Sendable {
+        let edited: [String: String]
+        let system: [String: String]
+        let rejected: [(key: String, message: String)]
+    }
+
+    /// Desktop preset-switch dialog "Transfer" continuation: capture the
+    /// modified keys' serialized values from the edited dump, perform the
+    /// selection (which resets the edited working copy), then re-apply the
+    /// captured values onto the NEW selection's edited preset via setValue
+    /// and refresh the dumps. Keys the new preset family does not define
+    /// are rejected by the engine (`unknown configuration key`) — those are
+    /// collected and reported so the rest of the transfer still lands:
+    /// best-effort by design, never silently dropped.
+    func selectTransferringModifications(kind: PresetKind, name: String) async {
+        guard let engine, isReady, !isSelecting else {
+            status.report(.presets, "preset selection blocked: presets are busy")
+            return
+        }
+        guard !isEngineBusy else {
+            status.report(.presets, "presets: locked while slicing — available again when the slice finishes")
+            return
+        }
+        // Values BEFORE the switch. A "modified" key with no edited value
+        // (present in the system dump only) carries nothing to re-apply.
+        let edited = editedConfigs[kind] ?? [:]
+        let modified = modifiedKeys(in: kind)
+        let captured: [(key: String, value: String)] = modified
+            .sorted()
+            .compactMap { key in edited[key].map { (key: key, value: $0) } }
+        let untransferrable = modified.count - captured.count
+        // The plain selection; its own failure already reached the banner.
+        guard await select(kind: kind, name: name) else { return }
+        guard !captured.isEmpty else {
+            status.report(
+                .presets,
+                "presets: selection ready" +
+                    (untransferrable > 0 ? " (\(untransferrable) modified key(s) had no edited value)" : " (nothing to transfer)")
+            )
+            return
+        }
+        let result = await BackgroundWork.run(operation: "transfer preset values") {
+            () -> TransferOutcome in
+            var rejected: [(key: String, message: String)] = []
+            for pair in captured {
+                switch engine.setValue(
+                    kind: kind, key: pair.key, serializedValue: pair.value
+                ) {
+                case .success:
+                    break
+                case .failure(let error):
+                    rejected.append((key: pair.key, message: error.message))
+                }
+            }
+            return TransferOutcome(
+                edited: try engine.configDump(kind: kind, edited: true).get(),
+                system: try engine.configDump(kind: kind, edited: false).get(),
+                rejected: rejected
+            )
+        }
+        switch result {
+        case .success(let outcome):
+            editedConfigs[kind] = outcome.edited
+            systemConfigs[kind] = outcome.system
+            let transferred = captured.count - outcome.rejected.count
+            if outcome.rejected.isEmpty {
+                status.report(
+                    .presets,
+                    "presets: selection ready — \(transferred) value(s) transferred" +
+                        (untransferrable > 0 ? " (\(untransferrable) modified key(s) had no edited value)" : "")
+                )
+            } else {
+                // The new preset does not offer every captured key: the
+                // transfer is partial and says so, by key.
+                let refused = outcome.rejected.map { $0.key }
+                    .sorted().joined(separator: ", ")
+                status.report(.presets, failure: .invariant(
+                    operation: "transfer preset values",
+                    diagnostic: "\(transferred) of \(captured.count) value(s) transferred; not offered by \"\(name)\": \(refused)"
+                ))
+            }
         case .failure(let failure):
             status.report(.presets, failure: failure)
         }

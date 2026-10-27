@@ -3126,6 +3126,111 @@ orca_result orca_plater_add_text_object(orca_plater *plater,
     });
 }
 
+// --- height ranges (desktop layer-range modifiers, ABI v39) -------------------
+
+void orca_height_ranges_dispose(orca_height_range *ranges) {
+    std::free(ranges);
+}
+
+orca_result orca_plater_object_height_ranges(orca_plater *plater,
+                                            orca_object_id object_id,
+                                            orca_height_range **out,
+                                            uint32_t *out_count) {
+    constexpr const char *operation = "orca_plater_object_height_ranges";
+    if (out) *out = nullptr;
+    if (out_count) *out_count = 0;
+    if (!plater)
+        return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation,
+                            "plater handle is null");
+    if (!out || !out_count)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "output pointer is null");
+    return orcapad_guard(operation, [&]() -> orca_result {
+        Slic3r::ModelObject *object = plater_obj(plater, object_id);
+        if (!object)
+            return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation,
+                                "object was not found");
+        const size_t count = object->layer_config_ranges.size();
+        orca_height_range *ranges = static_cast<orca_height_range *>(
+            count ? std::malloc(count * sizeof(orca_height_range)) : nullptr);
+        if (count && !ranges)
+            return orcapad_fail(ORCA_STATUS_OUT_OF_MEMORY, operation,
+                                "could not allocate the range list");
+        size_t index = 0;
+        for (const auto &entry : object->layer_config_ranges) {
+            const Slic3r::DynamicPrintConfig &config = entry.second.get();
+            const double height = config.has("layer_height")
+                ? config.opt_float("layer_height") : 0.2;
+            ranges[index++] = orca_height_range{
+                entry.first.first, entry.first.second, height};
+        }
+        *out = ranges;
+        *out_count = static_cast<uint32_t>(count);
+        return orcapad_ok();
+    });
+}
+
+orca_result orca_plater_object_set_height_ranges(orca_plater *plater,
+                                                 orca_object_id object_id,
+                                                 const orca_height_range *ranges,
+                                                 uint32_t count,
+                                                 orca_revision *out_revision) {
+    constexpr const char *operation = "orca_plater_object_set_height_ranges";
+    if (out_revision) *out_revision = 0;
+    if (!plater)
+        return orcapad_fail(ORCA_STATUS_INVALID_HANDLE, operation,
+                            "plater handle is null");
+    if (!out_revision)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "output pointer is null");
+    if (count > 0 && !ranges)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "range array is null but count is positive");
+    if (count > 4096)
+        return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                            "too many ranges");
+    for (uint32_t index = 0; index < count; ++index) {
+        const orca_height_range &range = ranges[index];
+        if (!std::isfinite(range.min_z) || !std::isfinite(range.max_z) ||
+            !std::isfinite(range.layer_height))
+            return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                                "a range contains a non-finite value");
+        if (range.min_z < 0.0 || range.min_z >= range.max_z)
+            return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                                "ranges need 0 <= min_z < max_z");
+        if (range.layer_height <= 0.0)
+            return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                                "layer height must be positive");
+        if (index > 0 && range.min_z < ranges[index - 1].max_z)
+            return orcapad_fail(ORCA_STATUS_INVALID_ARGUMENT, operation,
+                                "ranges overlap or are not ascending");
+    }
+    return orcapad_guard(operation, [&]() -> orca_result {
+        Slic3r::ModelObject *object = plater_obj(plater, object_id);
+        if (!object)
+            return orcapad_fail(ORCA_STATUS_NOT_FOUND, operation,
+                                "object was not found");
+        if (!orcapad_revision_available(*plater))
+            return orcapad_fail(ORCA_STATUS_INTERNAL_INVARIANT, operation,
+                                "document revision is exhausted");
+        OrcapadMutation mutation(*plater, "Height ranges");
+        object->layer_config_ranges.clear();
+        for (uint32_t index = 0; index < count; ++index) {
+            Slic3r::DynamicPrintConfig config;
+            config.set_key_value(
+                "layer_height",
+                new Slic3r::ConfigOptionFloat(ranges[index].layer_height));
+            Slic3r::ModelConfig entry;
+            entry.assign_config(std::move(config));
+            object->layer_config_ranges[std::make_pair(
+                ranges[index].min_z, ranges[index].max_z)] = std::move(entry);
+        }
+        orcapad_touch_object(*plater, object_id);
+        *out_revision = mutation.commit();
+        return orcapad_ok();
+    });
+}
+
 /// Desktop "Add SVG" v1 (ABI v38): NSVGUtils parse+tessellate -> Emboss
 /// polygons2model, standalone raised object (same placement as text).
 orca_result orca_plater_add_svg_object(orca_plater *plater,

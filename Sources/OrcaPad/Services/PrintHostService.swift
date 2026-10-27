@@ -48,6 +48,60 @@ final class PrintHostService {
     private(set) var isUploading = false
     private(set) var lastReceipt: Receipt?
 
+    // MARK: Upload queue (board cycle-0.16)
+
+    /// One queued send (desktop has no queue; OrcaPad batches multi-file
+    /// sends and repeated "send later" picks into a sequential list — the
+    /// one-at-a-time rule the single upload already enforces, made visible).
+    struct QueuedUpload: Identifiable, Equatable, Sendable {
+        enum Phase: Equatable, Sendable {
+            case waiting
+            case running
+            case done
+            case cancelled
+            case failed(String)
+        }
+
+        let id: UUID
+        let file: URL
+        let printer: EnginePresets.PhysicalPrinterRecord
+        let startPrint: Bool
+        var phase: Phase = .waiting
+
+        var isFinished: Bool {
+            switch phase {
+            case .waiting, .running: return false
+            case .done, .cancelled, .failed: return true
+            }
+        }
+
+        var statusText: String {
+            switch phase {
+            case .waiting: return "waiting"
+            case .running: return "uploading…"
+            case .done: return "sent"
+            case .cancelled: return "skipped"
+            case .failed(let message): return message
+            }
+        }
+    }
+
+    /// Queue order is execution order; items are appended and consumed
+    /// front-first, never reordered behind the user's back.
+    private(set) var queue: [QueuedUpload] = []
+    /// The sequential consumer. Non-nil while an item is executing or is
+    /// about to be; `isUploading` stays true across the whole drain so a
+    /// direct Send can never interleave with a queued item.
+    private var pumpTask: Task<Void, Never>?
+
+    /// Result of one upload attempt — shared by the direct send and the
+    /// queue so both report and receipt identically.
+    private enum UploadOutcome: Sendable {
+        case success(Receipt)
+        case cancelled
+        case failure(AppFailure)
+    }
+
     init(status: StatusCenter) {
         self.status = status
     }
@@ -193,7 +247,8 @@ final class PrintHostService {
     }
 
     /// Uploads `gcode` to `printer`. `startPrint` mirrors the desktop
-    /// checkbox (select-and-print / Moonraker print flag).
+    /// checkbox (select-and-print / Moonraker print flag). One at a time:
+    /// a second call while any upload (direct or queued) runs is refused.
     func upload(
         _ gcode: URL,
         to printer: EnginePresets.PhysicalPrinterRecord,
@@ -206,12 +261,117 @@ final class PrintHostService {
         isUploading = true
         lastReceipt = nil
         defer { isUploading = false }
+        _ = await performUpload(gcode, to: printer, startPrint: startPrint)
+    }
+
+    // MARK: Upload queue (board cycle-0.16)
+
+    /// Appends files (a multi-file pick, or the last slice result) for the
+    /// given printer and starts the sequential consumer if it is idle.
+    func enqueue(
+        _ files: [URL],
+        to printer: EnginePresets.PhysicalPrinterRecord,
+        startPrint: Bool
+    ) {
+        guard !files.isEmpty else { return }
+        queue.append(
+            contentsOf: files.map {
+                QueuedUpload(id: UUID(), file: $0, printer: printer, startPrint: startPrint)
+            }
+        )
+        let noun = files.count == 1
+            ? files[0].lastPathComponent : "\(files.count) uploads"
+        status.report(.device, "\(printer.name): queued \(noun)")
+        pumpQueue()
+    }
+
+    /// Cancels the upload IN FLIGHT (task spec: cancel-current advances) —
+    /// the current item is marked skipped and the queue continues with the
+    /// next one. It never touches waiting items.
+    func cancelCurrentUpload() {
+        guard pumpTask != nil else { return }
+        pumpTask?.cancel()
+    }
+
+    /// Removes a still-waiting item (running items can only be skipped).
+    func removeQueuedUpload(id: UUID) {
+        guard let index = queue.firstIndex(where: { $0.id == id }),
+              queue[index].phase == .waiting
+        else { return }
+        queue.remove(at: index)
+    }
+
+    func clearFinishedUploads() {
+        queue.removeAll(where: \.isFinished)
+    }
+
+    /// Starts the sequential consumer when idle and work exists. `isUploading`
+    /// spans the whole drain (raised here, lowered only when nothing is
+    /// waiting) so the direct-send guard and the UI disable state cannot
+    /// flicker between items.
+    private func pumpQueue() {
+        guard pumpTask == nil, queue.contains(where: { $0.phase == .waiting })
+        else { return }
+        isUploading = true
+        pumpTask = Task {
+            await consumeQueue()
+            pumpTask = nil
+            if queue.contains(where: { $0.phase == .waiting }) {
+                // Either a cancel-current skipped an item or new files were
+                // enqueued while the pump was winding down: keep draining.
+                pumpQueue()
+            } else {
+                isUploading = false
+            }
+        }
+    }
+
+    /// Runs the queue strictly one item at a time. Cancellation targets the
+    /// CURRENT item: its outcome is recorded as skipped, the loop stops, and
+    /// `pumpQueue` restarts a fresh consumer for the remaining items.
+    private func consumeQueue() async {
+        while let index = queue.firstIndex(where: { $0.phase == .waiting }) {
+            if Task.isCancelled { break }
+            var item = queue[index]
+            item.phase = .running
+            queue[index] = item
+            let outcome = await performUpload(
+                item.file, to: item.printer, startPrint: item.startPrint
+            )
+            // Re-locate by identity: the user may have removed other items
+            // (or this waiting one was replaced) while the upload ran.
+            guard let current = queue.firstIndex(where: { $0.id == item.id })
+            else { continue }
+            var updated = queue[current]
+            switch outcome {
+            case .success:
+                updated.phase = .done
+            case .cancelled:
+                updated.phase = .cancelled
+            case .failure(let failure):
+                updated.phase = .failed(failure.localizedDescription)
+            }
+            queue[current] = updated
+            if Task.isCancelled { break }
+        }
+    }
+
+    /// The one upload flow (request plan, transport, host body checks,
+    /// receipt, status reporting) — the direct send and every queued item
+    /// execute exactly this. Reports go through StatusCenter for both
+    /// callers; the queue maps the returned outcome onto its item phase.
+    private func performUpload(
+        _ gcode: URL,
+        to printer: EnginePresets.PhysicalPrinterRecord,
+        startPrint: Bool
+    ) async -> UploadOutcome {
         do {
             // Reading a multi-megabyte G-code file must not block the main
             // actor; the request builder is pure and nonisolated.
             let plan = try await Task.detached(priority: .userInitiated) {
                 try Self.request(for: printer, file: gcode, startPrint: startPrint)
             }.value
+            if Task.isCancelled { return .cancelled }
             let session: URLSession
             if let digest = plan.digest {
                 session = Self.digestSession(user: digest.user, password: digest.password)
@@ -275,15 +435,20 @@ final class PrintHostService {
             if let completionNote {
                 status.report(.device, completionNote)
             }
-            lastReceipt = Receipt(
+            let receipt = Receipt(
                 printer: printer.name,
                 file: gcode.lastPathComponent,
                 startedPrint: startPrint && !plan.noRemoteStart
             )
-        } catch let error as UploadError {
-            status.report(.device, failure: AppFailure.wrap(error, operation: "upload gcode"))
+            lastReceipt = receipt
+            return .success(receipt)
         } catch {
-            status.report(.device, failure: AppFailure.wrap(error, operation: "upload gcode"))
+            // A cancel (Skip) surfaces as CancellationError from the
+            // URLSession await — it is a skip, not a failure.
+            if Task.isCancelled || error is CancellationError { return .cancelled }
+            let failure = AppFailure.wrap(error, operation: "upload gcode")
+            status.report(.device, failure: failure)
+            return .failure(failure)
         }
     }
 

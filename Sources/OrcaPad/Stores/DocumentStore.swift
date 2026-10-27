@@ -955,6 +955,29 @@ final class DocumentStore {
         }
     }
 
+    /// IMPL-F integration: existing ranges for the editor sheet.
+    func heightRanges(objectID: ObjectID) async -> [EnginePlater.HeightRange] {
+        guard let plater else { return [] }
+        let result = await BackgroundWork.run(operation: "read height ranges") {
+            try plater.objectHeightRanges(objectID: objectID)
+        }
+        switch result {
+        case .success(let ranges): return ranges
+        case .failure(let failure):
+            status.report(.document, failure: failure)
+            return []
+        }
+    }
+
+    func setHeightRanges(
+        objectID: ObjectID, ranges: [EnginePlater.HeightRange]
+    ) async -> Bool {
+        await applyMutation(
+            .setHeightRanges(objectID: objectID, ranges: ranges),
+            operation: "set height ranges"
+        ) != nil
+    }
+
     // MARK: Object shells + COG (ABI v37)
 
     /// Hull + centroid of every object (IMPL-B contract shim, coordinator

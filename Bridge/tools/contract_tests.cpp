@@ -276,7 +276,7 @@ static void test_md5_shim() {
 
 static void test_abi_version() {
     CHECK_EQ(orca_bridge_abi_version(), ORCA_BRIDGE_ABI_VERSION);
-    CHECK_EQ(ORCA_BRIDGE_ABI_VERSION, 38);
+    CHECK_EQ(ORCA_BRIDGE_ABI_VERSION, 39);
 }
 
 struct ProgressRecord {
@@ -3328,7 +3328,66 @@ static void test_arrange_orient(const std::string &dir, const std::string &data_
     orca_plater_free(plater);
 }
 
-// ABI v38: SVG emboss (standalone raised object)
+// ABI v39: height ranges (layer-range modifiers)
+static void test_height_ranges(const std::string &dir) {
+    orca_plater *plater = nullptr;
+    GUARD(g0, orca_plater_new(&plater));
+    expect_ok(g0, "plater_new");
+    const std::string cube = write_cube_stl(dir, "ranges_cube.stl");
+    orca_object_id object_id = 0;
+    orca_revision revision = 0;
+    GUARD(g1, import_one(plater, cube.c_str(), 100.0, 100.0, &object_id, &revision));
+    expect_ok(g1, "import cube");
+
+    // empty by default
+    orca_height_range *ranges = nullptr;
+    uint32_t count = 0;
+    GUARD(q1, orca_plater_object_height_ranges(plater, object_id, &ranges, &count));
+    expect_ok(q1, "height ranges empty");
+    CHECK_EQ(count, 0u);
+    orca_height_ranges_dispose(ranges);
+
+    // set two ranges, read back ascending with heights
+    orca_height_range set[2] = {{0.0, 4.0, 0.12}, {4.0, 20.0, 0.28}};
+    GUARD(s1, orca_plater_object_set_height_ranges(plater, object_id, set, 2, &revision));
+    expect_ok(s1, "set two ranges");
+    GUARD(q2, orca_plater_object_height_ranges(plater, object_id, &ranges, &count));
+    expect_ok(q2, "read back");
+    CHECK_EQ(count, 2u);
+    CHECK_NEAR(ranges[0].min_z, 0.0, 1e-9);
+    CHECK_NEAR(ranges[0].max_z, 4.0, 1e-9);
+    CHECK_NEAR(ranges[0].layer_height, 0.12, 1e-9);
+    CHECK_NEAR(ranges[1].layer_height, 0.28, 1e-9);
+    orca_height_ranges_dispose(ranges);
+
+    // typed rejections: overlap + inverted + zero height
+    orca_height_range bad[2] = {{0.0, 5.0, 0.2}, {4.0, 8.0, 0.2}};
+    GUARD(x1, orca_plater_object_set_height_ranges(plater, object_id, bad, 2, &revision));
+    expect_code(x1, ORCA_STATUS_INVALID_ARGUMENT, "overlapping ranges");
+    orca_height_range inverted[1] = {{5.0, 3.0, 0.2}};
+    GUARD(x2, orca_plater_object_set_height_ranges(plater, object_id, inverted, 1, &revision));
+    expect_code(x2, ORCA_STATUS_INVALID_ARGUMENT, "inverted range");
+    orca_height_range zero[1] = {{0.0, 3.0, 0.0}};
+    GUARD(x3, orca_plater_object_set_height_ranges(plater, object_id, zero, 1, &revision));
+    expect_code(x3, ORCA_STATUS_INVALID_ARGUMENT, "zero layer height");
+
+    // clear via empty set + undo restores
+    GUARD(s2, orca_plater_object_set_height_ranges(plater, object_id, nullptr, 0, &revision));
+    expect_ok(s2, "clear ranges");
+    GUARD(q3, orca_plater_object_height_ranges(plater, object_id, &ranges, &count));
+    expect_ok(q3, "cleared");
+    CHECK_EQ(count, 0u);
+    orca_height_ranges_dispose(ranges);
+    GUARD(u1, orca_plater_undo(plater, &revision));
+    expect_ok(u1, "undo clear");
+    GUARD(q4, orca_plater_object_height_ranges(plater, object_id, &ranges, &count));
+    expect_ok(q4, "after undo");
+    CHECK_EQ(count, 2u);
+    orca_height_ranges_dispose(ranges);
+    orca_plater_free(plater);
+}
+
+// ABI v38: SVG emboss (standalone raised object)// ABI v38: SVG emboss (standalone raised object)
 static void test_svg(const std::string &dir) {
     orca_plater *plater = nullptr;
     GUARD(g0, orca_plater_new(&plater));
@@ -4609,6 +4668,7 @@ int main() {
     test_painting(dir);
     test_hull_and_text(dir);
     test_svg(dir);
+    test_height_ranges(dir);
     test_project_roundtrip(dir, data_dir);
     test_user_presets(data_dir);
     test_physical_printers(data_dir);

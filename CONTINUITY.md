@@ -110,6 +110,20 @@
 
 ## PROGRESS
 
+- [2026-10-26 CODE] 0.15 + 0.16 COMPLETE (parallel agents, 2 more cycles):
+  0.15 "inspection" (SVG emboss ABI v38 engine NSVGUtils+Emboss pipeline,
+  overhang highlighting w/ desktop slope test, ortho camera, 3D object
+  labels, viewer quality options, preview summary, nozzle selector,
+  placeholder browser, cross-kind settings search, gridlines toggle;
+  parity 62% -> 67%). 0.16 "workflow" (height-range modifiers ABI v39
+  layer_config_ranges read/replace/undo, upload queue, Bonjour discovery
+  NWBrowser, compare presets w/ session-restore walk, unsaved-changes
+  TRANSFER, flush-into object toggles; parity 67% -> 70%). Host contract
+  tests 51,621 PASS; audit/license green. Subagent pipeline: 2 research +
+  4 implementation agents across the two cycles, exclusive file ownership,
+  coordinator-only builds (integration fixed: literal-\t heredoc artifact,
+  NWBrowser Result pattern, actor isolation, async sheet loader).
+
 - [2026-10-26 CODE] 0.14 COMPLETE via PARALLEL SUBAGENTS (board:
   .agents/BOARD.md, gitignored; smoke test -> 3 research agents -> 2
   implementation agents with exclusive file ownership; coordinator owns
@@ -248,6 +262,12 @@
   host key is `host_type`.
 
 ## OUTCOMES
+
+- [2026-10-26] 0.15 + 0.16 milestone: parity 70% (85 done, 29 partial).
+  Day total: 42% -> 70% across releases 0.8.0-0.16.0 (ABI v31 -> v39).
+  Remaining 23 missing: big rocks (VLH gizmo, measure/simplify/subdivide,
+  STEP, preferences, localization, cloud sync) tracked in the manifest.
+
 
 - [2026-10-26] 0.14 milestone: every desktop print-host connection
   implemented (11 upload paths + digest/flashair), Wave B shipped, text

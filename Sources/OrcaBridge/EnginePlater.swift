@@ -113,6 +113,22 @@ public final class EnginePlater: @unchecked Sendable {
                          radiusMM: Double, state: Int32)
         /// Removes every stroke of one paint layer.
         case paintReset(objectID: ObjectID, volumeID: VolumeID, layer: PaintLayer)
+        /// Desktop layer-range modifiers (ABI v39): REPLACES the object's
+        /// height ranges in one undo step.
+        case setHeightRanges(objectID: ObjectID, ranges: [HeightRange])
+    }
+
+    /// One layer-height range (desktop height-range modifiers).
+    public struct HeightRange: Sendable, Equatable {
+        public let minZ: Double
+        public let maxZ: Double
+        public let layerHeight: Double
+
+        public init(minZ: Double, maxZ: Double, layerHeight: Double) {
+            self.minZ = minZ
+            self.maxZ = maxZ
+            self.layerHeight = layerHeight
+        }
     }
 
     /// Paint layers (each a ModelVolume FacetsAnnotation consumed by slicing).
@@ -471,6 +487,24 @@ public final class EnginePlater: @unchecked Sendable {
                 snapshot: scene,
                 createdObjectID: try Self.objectID(rawObjectID, operation: "add svg object"),
                 createdObjectCount: 1)
+        }
+    }
+
+    /// The object's layer-height ranges, ascending (ABI v39).
+    public func objectHeightRanges(objectID: ObjectID) throws -> [HeightRange] {
+        try lock.withLock {
+            var raw: UnsafeMutablePointer<orca_height_range>?
+            var count: UInt32 = 0
+            try BridgeResult.consume(
+                orca_plater_object_height_ranges(
+                    handle, objectID.rawValue, &raw, &count),
+                operation: "read height ranges"
+            )
+            let buffer = UnsafeBufferPointer(start: raw, count: Int(count))
+            defer { orca_height_ranges_dispose(raw) }
+            return buffer.map {
+                HeightRange(minZ: $0.min_z, maxZ: $0.max_z, layerHeight: $0.layer_height)
+            }
         }
     }
 
@@ -1029,6 +1063,22 @@ public final class EnginePlater: @unchecked Sendable {
                         radiusMM, state, &mutationRevision
                     ),
                     operation: "paint"
+                )
+
+            case .setHeightRanges(let objectID, let ranges):
+                var raw = ranges.map { range in
+                    orca_height_range(
+                        min_z: range.minZ, max_z: range.maxZ,
+                        layer_height: range.layerHeight)
+                }
+                try BridgeResult.consume(
+                    raw.withUnsafeBufferPointer { buffer in
+                        orca_plater_object_set_height_ranges(
+                            handle, objectID.rawValue,
+                            buffer.baseAddress, UInt32(ranges.count),
+                            &mutationRevision)
+                    },
+                    operation: "set height ranges"
                 )
 
             case .paintReset(let objectID, let volumeID, let layer):

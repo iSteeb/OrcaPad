@@ -33,6 +33,8 @@ struct PrepareTabView: View {
     @State private var pendingSelection: PendingSelection?
     @State private var importPresetPresented = false
     @State private var importBundlePresented = false
+    /// Board cycle-0.16: compare-presets sheet for the ACTIVE kind.
+    @State private var comparePresented = false
     /// Board §wave-b/2: auto re-slice on document changes (persisted —
     /// desktop "slice automatically" preference parity).
     @AppStorage("slice.auto") private var autoSlice = false
@@ -82,9 +84,15 @@ struct PrepareTabView: View {
                 Button("Discard \(pending.modified) change(s) and switch", role: .destructive) {
                     Task { await presets.select(kind: pending.kind, name: pending.name) }
                 }
+                Button("Transfer \(pending.modified) change(s)") {
+                    Task {
+                        await presets.selectTransferringModifications(
+                            kind: pending.kind, name: pending.name)
+                    }
+                }
                 Button("Keep editing", role: .cancel) {}
             } message: { pending in
-                Text("The current preset has \(pending.modified) modified setting(s). Save them as a user preset from the preset menu first, or discard them.")
+                Text("The current preset has \(pending.modified) modified setting(s). Save them as a user preset from the preset menu first, discard them, or transfer them onto the new preset.")
             }
         }
         // Auto-slice observation (board §wave-b/2): re-keyed on every
@@ -218,6 +226,9 @@ struct PrepareTabView: View {
         .sheet(isPresented: $setupPresented) {
             SetupWizardSheet(presets: presets)
         }
+        .sheet(isPresented: $comparePresented) {
+            ComparePresetsSheet(presets: presets, kind: activeKind)
+        }
         .fileImporter(
             isPresented: $importPresetPresented,
             allowedContentTypes: [.json],
@@ -305,6 +316,14 @@ struct PrepareTabView: View {
                         importBundlePresented = true
                     } label: {
                         Label("Import config bundle\u{2026}", systemImage: "shippingbox")
+                    }
+                    Divider()
+                    // Board cycle-0.16: desktop DiffPresetDialog parity —
+                    // compare two presets of the active kind side by side.
+                    Button {
+                        comparePresented = true
+                    } label: {
+                        Label("Compare presets\u{2026}", systemImage: "square.split.2x1")
                     }
                     Divider()
                     Button {

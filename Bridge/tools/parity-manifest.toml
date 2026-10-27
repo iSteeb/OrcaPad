@@ -289,10 +289,11 @@ priority = 32
 id = "plate.height-range"
 area = "plate"
 title = "Height range modifiers (layer config ranges)"
-status = "missing"
+status = "done"
 desktop = ["context:Height range Modifier"]
+evidence = ["abi:orca_plater_object_set_height_ranges", "client:HeightRangesSheet"]
 work = "Bridge + UI"
-priority = 20
+note = "ABI v39: replace-style layer_config_ranges with overlap/ascending validation, read-back and undo contract-tested; Height ranges sheet edits z-ranges with layer heights"
 
 [[feature]]
 id = "plate.per-object-settings"
@@ -360,11 +361,11 @@ note = "Desktop FillBedJob parity (ABI v30): needed = (plate_area - fixed_area) 
 id = "plate.flush-options"
 area = "plate"
 title = "Flush into infill / support / object"
-status = "missing"
+status = "done"
 desktop = ["context:Flush into objects' infill", "context:Flush into objects' support", "context:Flush into this object"]
+evidence = ["client:flushKeys", "client:Flushing"]
 work = "Bridge + UI"
-priority = 26
-note = "multi-material; per-object flush_into_* options"
+note = "flush_into_infill/objects/support verified as PrintObjectConfig members — object-level toggles on the object settings sheet (engine object-override path, reset arrow erases)"
 
 [[feature]]
 id = "plate.convert-units"
@@ -751,21 +752,21 @@ note = "rename = save-as + delete"
 id = "prepare.unsaved-changes"
 area = "prepare"
 title = "Unsaved-changes prompt on preset switch"
-status = "partial"
+status = "done"
 desktop = ["dialog:UnsavedChangesDialog"]
-evidence = ["client:confirmationDialog"]
-gap = "discard / keep editing only: no transfer of changes onto the new preset"
+evidence = ["client:confirmationDialog", "client:selectTransferringModifications"]
 work = "Bridge + UI"
-priority = 106
+note = "discard / keep / TRANSFER: modified values re-applied onto the new selection; keys the new preset rejects are reported by name"
 
 [[feature]]
 id = "prepare.compare-presets"
 area = "prepare"
 title = "Compare presets"
-status = "missing"
+status = "done"
 desktop = ["dialog:DiffPresetDialog", "dialog:FullCompareDialog"]
+evidence = ["client:ComparePresetsSheet"]
 work = "UI"
-priority = 104
+note = "two-preset diff per kind from system config dumps (changed keys first, identical collapsed); walks the live session with full restore of the previous selection and unsaved edits"
 
 [[feature]]
 id = "prepare.bed-type"
@@ -1128,19 +1129,21 @@ evidence = ['client:case "octoprint"', 'client:case "moonraker"', "client:func u
 id = "device.upload-queue"
 area = "device"
 title = "Upload queue"
-status = "missing"
+status = "done"
 desktop = ["dialog:PrintHostQueueDialog"]
+evidence = ["client:QueuedUpload", "client:pumpQueue"]
 work = "UI"
-priority = 310
+note = "multi-file enqueue, sequential execution (one upload at a time, shared busy gate), skip-current, remove-waiting, clear-finished"
 
 [[feature]]
 id = "device.discovery"
 area = "device"
 title = "Printer discovery (Bonjour)"
-status = "missing"
+status = "partial"
 desktop = ["dialog:BonjourDialog", "dialog:IPListDialog"]
+evidence = ["client:PrinterDiscovery", "client:NWBrowser"]
 work = "UI"
-priority = 311
+gap = "NWBrowser scans _octoprint/_moonraker (with _http fallback) in the printer editor with tap-to-prefill; Creality's proprietary discovery is not implemented"
 
 [[feature]]
 id = "device.host-prusalink"

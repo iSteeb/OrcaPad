@@ -177,6 +177,16 @@
 	</dict>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>OrcaPad connects to 3D printers on your network to send G-code and show their web interface.</string>
+	<!-- Bonjour discovery in the printer editor (cycle-0.16): iOS 14+
+	     requires every browsed service type to be declared, in addition to
+	     NSLocalNetworkUsageDescription above. _http._tcp is the fallback
+	     when the printer-specific types stay silent. -->
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_octoprint._tcp</string>
+		<string>_moonraker._tcp</string>
+		<string>_http._tcp</string>
+	</array>
 	<!-- App Store Connect export compliance [USER 2026-10-13]: only
 	     OS-provided encryption (HTTPS via URLSession/WebKit) and hashing,
 	     which are exempt. Declaring it here skips the per-build prompt. -->

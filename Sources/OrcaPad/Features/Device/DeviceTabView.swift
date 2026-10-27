@@ -549,7 +549,7 @@ private struct SendGcodeSheet: View {
                                 Image(systemName: "folder")
                             }
                             .buttonStyle(.borderless)
-                            .accessibilityLabel("Choose a G-code file")
+                            .accessibilityLabel("Choose G-code files")
                         }
                         LabeledContent("Printer", value: printer.name)
                         LabeledContent("Host", value: "\(PrinterHostKind.label(printer.hostType)) · \(printer.url)")
@@ -570,6 +570,16 @@ private struct SendGcodeSheet: View {
                             }
                         }
                         .disabled(environment.printHost.isUploading)
+                        // Board cycle-0.16 upload queue: park the file in the
+                        // sequential queue instead of sending now (the queue
+                        // section below shows per-item status and Skip).
+                        Button {
+                            environment.printHost.enqueue(
+                                [gcode], to: printer, startPrint: startPrint)
+                        } label: {
+                            Label("Add to queue", systemImage: "list.bottom")
+                        }
+                        .disabled(environment.printHost.isUploading)
                     } footer: {
                         if let receipt = environment.printHost.lastReceipt,
                            receipt.printer == printer.name,
@@ -582,6 +592,9 @@ private struct SendGcodeSheet: View {
                             )
                             .foregroundStyle(.green)
                         }
+                    }
+                    if !environment.printHost.queue.isEmpty {
+                        uploadQueueSection
                     }
                 } else {
                     VStack(alignment: .leading, spacing: 10) {
@@ -605,14 +618,88 @@ private struct SendGcodeSheet: View {
             .fileImporter(
                 isPresented: $pickPresented,
                 allowedContentTypes: GcodeTypes.all,
+                allowsMultipleSelection: true,
                 onCompletion: { result in
-                    if case .success(let url) = result {
-                        chosen = url
+                    if case .success(let urls) = result {
+                        if urls.count <= 1 {
+                            chosen = urls.first
+                        } else {
+                            // A multi-file pick is a queue by intent (board
+                            // cycle-0.16): every picked G-code goes to the
+                            // sequential queue, not just the first one.
+                            environment.printHost.enqueue(
+                                urls, to: printer, startPrint: startPrint)
+                        }
                     }
                 }
             )
         }
-        .presentationDetents([.medium])
+        .presentationDetents([.medium, .large])
+    }
+
+    /// Board cycle-0.16 upload queue: every parked upload with its phase;
+    /// Skip cancels the one in flight and the queue advances, waiting items
+    /// can be dropped, finished ones cleared.
+    private var uploadQueueSection: some View {
+        Section {
+            ForEach(environment.printHost.queue) { item in
+                HStack(spacing: 10) {
+                    phaseIcon(item.phase)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(item.file.lastPathComponent)
+                            .font(.callout)
+                            .lineLimit(1)
+                        Text("\(item.printer.name) · \(item.statusText)")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    if item.phase == .running {
+                        Button("Skip") {
+                            environment.printHost.cancelCurrentUpload()
+                        }
+                        .font(.caption)
+                    } else if item.phase == .waiting {
+                        Button {
+                            environment.printHost.removeQueuedUpload(id: item.id)
+                        } label: {
+                            Image(systemName: "minus.circle")
+                        }
+                        .buttonStyle(.borderless)
+                        .accessibilityLabel("Remove from queue")
+                    }
+                }
+            }
+            if environment.printHost.queue.contains(where: \.isFinished) {
+                Button("Clear finished") {
+                    environment.printHost.clearFinishedUploads()
+                }
+            }
+        } header: {
+            Text("Upload queue")
+        } footer: {
+            Text("Uploads run one at a time. Skip cancels the current upload and starts the next file.")
+        }
+    }
+
+    @ViewBuilder
+    private func phaseIcon(_ phase: PrintHostService.QueuedUpload.Phase) -> some View {
+        switch phase {
+        case .waiting:
+            Image(systemName: "clock")
+                .foregroundStyle(.secondary)
+        case .running:
+            ProgressView()
+        case .done:
+            Image(systemName: "checkmark.circle.fill")
+                .foregroundStyle(.green)
+        case .cancelled:
+            Image(systemName: "minus.circle")
+                .foregroundStyle(.orange)
+        case .failed:
+            Image(systemName: "xmark.circle.fill")
+                .foregroundStyle(.red)
+        }
     }
 }
 
@@ -629,6 +716,9 @@ private struct PhysicalPrinterEditor: View {
     @State private var url = ""
     @State private var webUI = ""
     @State private var apiKey = ""
+    /// Board cycle-0.16 Bonjour discovery (see PrinterDiscovery): browse
+    /// while the section is on, resolve on tap, prefill URL + host type.
+    @State private var discovery = PrinterDiscovery()
 
     /// Cloud hosts serve from a fixed address which the desktop dialog
     /// prefills (PhysicalPrinterDialog.cpp: app.obico.io / connect.prusa3d.
@@ -683,6 +773,7 @@ private struct PhysicalPrinterEditor: View {
                 } footer: {
                     Text("Host URL receives uploads, e.g. http://192.168.1.51 (Moonraker behind Mainsail/Fluidd) or http://192.168.1.51:7125 (Moonraker directly). Cloud hosts use their fixed service address (prefilled); paste the account/token as the API key. Flashforge takes the printer's LAN address with API key \"serial:checkCode\". Device UI URL is the web page shown in this tab when it differs from the host URL, e.g. http://192.168.1.51 for Mainsail.")
                 }
+                discoverySection
             }
             .navigationTitle(existing == nil ? "Add printer" : "Edit printer")
             .navigationBarTitleDisplayMode(.inline)
@@ -728,8 +819,90 @@ private struct PhysicalPrinterEditor: View {
                     apiKey = existing.apiKey
                 }
             }
+            .onDisappear {
+                discovery.stop()
+            }
         }
         .presentationDetents([.medium, .large])
+    }
+
+    // MARK: Bonjour discovery (board cycle-0.16)
+
+    /// Scans _octoprint._tcp / _moonraker._tcp (_http._tcp fallback) while
+    /// on; a tap resolves host+port and prefills the fields above (the
+    /// suggestion also picks the host type for the printer services).
+    private var discoverySection: some View {
+        Section {
+            Toggle("Browse the local network", isOn: Binding(
+                get: { discovery.isBrowsing },
+                set: { discovery.setBrowsing($0) }
+            ))
+            if discovery.isBrowsing && discovery.found.isEmpty {
+                HStack(spacing: 10) {
+                    ProgressView()
+                    Text("Searching…")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            ForEach(discovery.found) { printer in
+                Button {
+                    discovery.resolve(printer, completion: applyDiscovery)
+                } label: {
+                    HStack(spacing: 10) {
+                        Image(systemName: "antenna.radiowaves.left.and.right")
+                            .foregroundStyle(Color.accentColor)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(printer.name)
+                                .font(.callout)
+                                .foregroundStyle(Color.primary)
+                                .lineLimit(1)
+                            Text(subtitle(for: printer))
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                        }
+                        Spacer()
+                        if discovery.resolvingID == printer.id {
+                            ProgressView()
+                        } else if printer.resolvedURL != nil {
+                            Image(systemName: "checkmark.circle.fill")
+                                .foregroundStyle(.green)
+                        }
+                    }
+                }
+                .disabled(discovery.resolvingID != nil)
+            }
+            if let failure = discovery.failureText {
+                Label(failure, systemImage: "exclamationmark.triangle")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            }
+        } header: {
+            Text("Discovery")
+        } footer: {
+            Text("Scans for OctoPrint and Moonraker (Klipper) printers on this network; iOS asks for local-network permission on the first scan. Tapping a found printer fills in the host URL and type (web servers only fill the URL).")
+        }
+    }
+
+    private func subtitle(for printer: PrinterDiscovery.FoundPrinter) -> String {
+        if let resolved = printer.resolvedURL {
+            return "\(printer.suggestion.label) · \(resolved)"
+        }
+        return printer.suggestion.label
+    }
+
+    /// Prefill from a resolved service (board cycle-0.16: "tap a found host
+    /// to prefill URL + host type"). The host type goes first so its own
+    /// cloud-prefill onChange cannot overwrite the resolved URL; a user-typed
+    /// URL is replaced deliberately — the tap IS the intent.
+    private func applyDiscovery(
+        _ resolvedURL: String, suggestion: PrinterDiscovery.FoundPrinter.Suggestion
+    ) {
+        if let suggested = suggestion.hostType {
+            hostType = suggested
+        }
+        url = resolvedURL
     }
 
     private static func normalized(_ value: String) -> String {

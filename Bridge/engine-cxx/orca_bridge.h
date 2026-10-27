@@ -7,7 +7,7 @@ extern "C" {
 #endif
 
 /// Version of the C ABI contract in this header. Callers verify it at runtime.
-#define ORCA_BRIDGE_ABI_VERSION ((uint32_t)38)
+#define ORCA_BRIDGE_ABI_VERSION ((uint32_t)39)
 
 typedef int32_t orca_status_code;
 #define ORCA_STATUS_OK                     ((orca_status_code)0)
@@ -370,6 +370,33 @@ void orca_hull_mesh_dispose(orca_hull_mesh *mesh);
 orca_result orca_plater_object_hull(orca_plater *plater,
                                     orca_object_id object_id,
                                     orca_hull_mesh *out);
+
+// --- height ranges (desktop layer-range modifiers, ABI v39) -------------------
+
+typedef struct {
+    double min_z;
+    double max_z;
+    double layer_height;   // mm, > 0
+} orca_height_range;
+
+/// The object's layer-height ranges, ascending by min_z (read-only).
+/// Caller owns the array; free with std::free-like semantics via
+/// orca_height_ranges_dispose.
+orca_result orca_plater_object_height_ranges(orca_plater *plater,
+                                            orca_object_id object_id,
+                                            orca_height_range **out,
+                                            uint32_t *out_count);
+void orca_height_ranges_dispose(orca_height_range *ranges);
+
+/// REPLACES the object's ranges with the given list (one undo step).
+/// Validation: finite values, min_z < max_z, layer_height > 0, ranges
+/// strictly non-overlapping and ascending — violations are typed
+/// INVALID_ARGUMENT and change nothing.
+orca_result orca_plater_object_set_height_ranges(orca_plater *plater,
+                                                 orca_object_id object_id,
+                                                 const orca_height_range *ranges,
+                                                 uint32_t count,
+                                                 orca_revision *out_revision);
 
 /// Desktop "Add SVG" v1 (standalone raised SVG object, flat base): parses
 /// the SVG in millimetres (nanosvg, engine NSVGUtils), tessellates its

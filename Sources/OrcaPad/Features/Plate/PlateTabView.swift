@@ -29,6 +29,7 @@ struct PlateTabView: View {
     @State private var rotationAxis: EngineAxis = .z
     @State private var renameTarget: RenameTarget?
     @State private var settingsTarget: SettingsTarget?
+    @State private var heightRangesTarget: HeightRangesTarget?
     @State private var countTarget: CountPrompt?
     @State private var countText = ""
     @State private var renameText = ""
@@ -1153,6 +1154,16 @@ struct PlateTabView: View {
                     preselectKey: target.preselectKey
                 )
             }
+            .sheet(item: $heightRangesTarget) { target in
+                HeightRangesSheet(
+                    objectID: target.objectID,
+                    objectName: target.objectName,
+                    zSpan: target.zSpan,
+                    loadRanges: { [weak document] in
+                        await document?.heightRanges(objectID: target.objectID) ?? []
+                    }
+                )
+            }
             .sheet(isPresented: $parameterTablePresented) {
                 ParameterTableView()
             }
@@ -1406,6 +1417,11 @@ extension PlateTabView {
                     objectID: object.id, volumeID: nil, title: object.name)
             } label: {
                 Label("Edit process settings…", systemImage: "slider.horizontal.3")
+            }
+            Button {
+                heightRangesTarget = HeightRangesTarget(object: object)
+            } label: {
+                Label("Height ranges…", systemImage: "rectangle.split.3x1")
             }
             Button {
                 Task {
@@ -1689,6 +1705,25 @@ private struct SettingsTarget: Identifiable {
     var preselectKey: String?
 
     var id: String { "\(objectID)-\(volumeID?.description ?? "object")-\(preselectKey ?? "")" }
+}
+
+/// Height-range editor routing (desktop object list "Height ranges"):
+/// the object id plus its own z span as edit reference.
+private struct HeightRangesTarget: Identifiable {
+    let objectID: ObjectID
+    let objectName: String
+    let zSpan: ClosedRange<Double>
+
+    init(object: SceneObject) {
+        objectID = object.id
+        objectName = object.name
+        let minimum = Double(object.mesh.bounds.minimum.z)
+        let maximum = Double(object.mesh.bounds.maximum.z)
+        // A flat-in-z object still edits: 1 mm of reference headroom.
+        zSpan = minimum ... max(maximum, minimum + 1)
+    }
+
+    var id: String { "\(objectID)-height-ranges" }
 }
 
 /// Rename routing: object or volume.

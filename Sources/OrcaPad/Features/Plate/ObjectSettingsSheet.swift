@@ -67,6 +67,41 @@ struct ObjectSettingsSheet: View {
                 } footer: {
                     Text("Tap the reset arrow to remove an override. Changes are undoable.")
                 }
+                // Desktop object-level "Flush options" (PrintObjectConfig
+                // booleans): object settings only — parts override
+                // PrintRegionConfig, which does not define these keys.
+                if !flushKeys.isEmpty {
+                    Section {
+                        ForEach(flushKeys, id: \.self) { key in
+                            if let schema = schemaIndex[key] {
+                                SettingsEditorRowView(
+                                    row: SettingsEditorRow(
+                                        schema: schema,
+                                        value: flushValue(key),
+                                        isModified: overrides[key] != nil
+                                    ),
+                                    onCommit: { newValue in
+                                        commit(key: key, value: newValue)
+                                    },
+                                    onReset: { erase(key: key) },
+                                    onReject: { message in
+                                        environment.status.report(
+                                            .document,
+                                            failure: .invariant(
+                                                operation: "set \(key)",
+                                                diagnostic: message
+                                            )
+                                        )
+                                    }
+                                )
+                            }
+                        }
+                    } header: {
+                        Text("Flushing")
+                    } footer: {
+                        Text("Prime-tower purging targets for this object. Values start from today's resolved config; the reset arrow returns to it.")
+                    }
+                }
             }
             .navigationTitle(title)
             .navigationBarTitleDisplayMode(.inline)
@@ -105,6 +140,25 @@ struct ObjectSettingsSheet: View {
             let r = schemaIndex[rhs]?.label ?? rhs
             return l.localizedCaseInsensitiveCompare(r) == .orderedAscending
         }
+    }
+
+    /// Desktop "Flush options" category at object level (engine definition
+    /// order). The C side accepts these as object override keys — they are
+    /// PrintObjectConfig members (orcapad_settings_keys object set); the
+    /// list self-empties if a future engine build drops one.
+    private var flushKeys: [String] {
+        guard volumeID == nil else { return [] }
+        return ["flush_into_infill", "flush_into_support", "flush_into_objects"]
+            .filter { allowedKeys.contains($0) && schemaIndex[$0] != nil }
+    }
+
+    /// Today's effective flush toggle value: the override when present,
+    /// else the resolved config the slice would use, else the schema
+    /// default (flush_into_support defaults on, the others off).
+    private func flushValue(_ key: String) -> String {
+        if let value = overrides[key] { return value }
+        if let value = resolved[key], !value.isEmpty { return value }
+        return schemaIndex[key]?.defaultValue ?? "0"
     }
 
     private func reload() async {
